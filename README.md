@@ -32,7 +32,7 @@ One package, three cordis plugins, one bundle.
 | `dsh-buddy/client` | browser half | The Settings → Buddy tab, the sidebar button, and the main panel it selects (buddy conversations, opened in the shipped conversation view). Reaches the host only over `rpc.call('/api', 'buddyPersona/…')`. |
 | `buddy` agent preset | preset (`assets/preset/`) | Copied from the shipped `standard` preset, plus a persona row whose prefix is `{{buddy_soul}}`. Installed to `~/.dsh/.agent-presets/buddy/` on first boot; this is the only thing that puts the authored voice in front of a model. |
 
-The two host rows are inserted by `cordis.patch.yml` and are deliberately separate: each has its own effect scope, so a failure in one does not take the other down, and either can be disabled from a profile's own patch without touching code. The browser half is **not** a patch row — it reaches the boot graph through the package's `dsh.client` declaration.
+The two host rows are inserted by `cordis.patch.yml` and are deliberately separate: each has its own effect scope, so a failure in one does not take the other down, and either can be disabled from a profile's own patch without touching code. The browser half reaches the boot graph through the package's `dsh.client` declaration, which the harness only reads for a row named exactly `dsh-buddy` — hence a third, empty `buddy-client` row that registers nothing.
 
 ## Where data lives
 

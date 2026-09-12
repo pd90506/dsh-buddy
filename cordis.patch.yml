@@ -11,7 +11,9 @@
 #     disabled: true
 #
 # The browser half is not a row here: it reaches the boot graph through the
-# package's `dsh.client` declaration.
+# package's `dsh.client` declaration. That declaration is only read for a row
+# named exactly `dsh-buddy` (dsh-client-modules skips subpath names like
+# `dsh-buddy/store`), which is the sole purpose of the empty `buddy-client` row.
 #
 # Nothing here does anything on its own. With no SOUL.md written, the plugin
 # mounts, registers its settings section and its endpoints, and idles.
@@ -21,4 +23,7 @@
       config: {}
     - id: buddy-persona
       name: 'dsh-buddy/persona'
+      config: {}
+    - id: buddy-client
+      name: 'dsh-buddy'
       config: {}

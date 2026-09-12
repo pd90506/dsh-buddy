@@ -1,10 +1,20 @@
 /**
- * Names shared by both halves and by the agent preset.
+ * Names shared by both halves and by the agent preset, and the `dsh-buddy`
+ * anchor row.
  *
- * This module exports no `apply`, so it cannot be mounted as a cordis row by
- * mistake — the rows are `dsh-buddy/store` and `dsh-buddy/persona`.
+ * The anchor row registers nothing. It exists because `dsh-client-modules` only
+ * reads `dsh.client` from the manifest of a row named exactly after its package;
+ * the working rows are `dsh-buddy/store` and `dsh-buddy/persona`, subpath
+ * specifiers it skips, so without this row the browser half never reaches the
+ * page. `test/patch.test.ts` guards it.
  * @module dsh-buddy
  */
+
+/** Cordis plugin name used by loader diagnostics. */
+export const name = "dsh-buddy";
+
+/** Mounts nothing: the row's whole job is to be named `dsh-buddy`. */
+export function apply(_ctx: unknown): void {}
 
 /** Storage domain name. Lowercase, per the domain grammar's `UNIT_NAME_RE`. */
 export const BUDDY_DOMAIN_NAME = "buddy";
