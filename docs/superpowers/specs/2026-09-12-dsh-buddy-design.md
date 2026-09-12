@@ -43,6 +43,12 @@
 | `ctx.agentPresets.standingKeyFor(id)` 返回一个 preset 的 `ScopeKey` | host Service inspect provider |
 | `ScopeKey` 是不透明对象，带 parent 链 | `dsh-scope/lib/types/index.d.ts` |
 | `ctx.systemPrompt.section({name, order, text})`，`text` 可为 `(ctx) => string` | `dsh-system-prompt/lib/types/index.d.ts:47-68` |
+| **人格行必须是 scope-only**：`dsh-system-prompt` 无条件注册 deployment persona，一个全局挂载的人格行会与它**冲突并响亮失败**；挂在 agent preset 里才会 shadow 掉它 | `$DSH/node_modules/@deepseek-ai/dsh-persona/lib/index.js:4-16` |
+| 官方 `@deepseek-ai/dsh-persona` 的 `prefix`/`suffix` 只接受**静态字符串**（`z.string()`） | `dsh-persona/lib/index.js:23-28` |
+| **但静态字符串不等于静态取值**：prompt 变量的 provider 在**每次 `assemble()` 都被重新调用**，所以 `prefix: '{{buddySoul}}'` 是动态的，改文件无需重载 | `dsh-system-prompt/lib/index.js:308-314` |
+| 渲染器**不会二次扫描被替换进去的值**，`{{` 若无配对 `}}` 按字面散文处理 | `dsh-system-prompt/lib/index.js:106-107, 171-172` |
+| 同名 prompt 变量重复注册会抛错；错误信息提示按 agent 作用域注册可得每-agent 取值 | `dsh-system-prompt/lib/index.js:190` |
+| agent preset = 一个目录，含 `agent.cordis.yml`（行列表）+ `preset.yml`（`name`/`description`/`order`）；用户 preset 根目录为 `<dshHome>/.agent-presets/` | `dsh-agent-presets/lib/index.js:182,195`；`presets/minimal/` |
 | `ctx.sessionQuery` 提供 `searchSessions` / `searchEvents` / `readSession` | host Service inspect provider |
 | **DSH 没有 cron/scheduler 服务** | host Service 全表 70 项，无对应条目 |
 | `@deepseek-ai/dsh-home-paths` 提供 `dshHomePath(...segments)` 与 `expandHomePath(path)`；home 解析优先级为「显式配置 > `$DSH_HOME` > `~/.dsh`」 | `$DSH/node_modules/@deepseek-ai/dsh-home-paths/lib/types/index.d.ts` |
@@ -79,7 +85,7 @@
 | row | 职责 | 发布 |
 |---|---|---|
 | `buddy-store` | 打开 domain `buddy`；用 `dshHomePath('buddy')`（或 settings 覆盖值经 `expandHomePath`）解析 buddy home 并保证目录存在 | `ctx.buddyStore` |
-| `buddy-persona` | 读写 `SOUL.md` / `AGENTS.md`，暴露 typert 端点给设置页 | `ctx.buddyPersona` |
+| `buddy-persona` | 读写 `SOUL.md` / `AGENTS.md`，暴露 typert 端点给设置页。**不注册任何 prompt section** | `ctx.buddyPersona` |
 | `buddy-memory` | tier1 策略层（预算、provenance、冻结快照）；tier2 直接打 `ctx.sessionQuery` | `ctx.buddyMemory` |
 | `buddy-skills` | `ctx.skills.registerProvider()`；curation 与快照 ledger | `ctx.buddySkills` |
 | `buddy-scheduler` | 全新基础设施：任务存储、tick 循环、preflight | `ctx.buddyScheduler` |
@@ -93,6 +99,38 @@
 ### 4.3 Agent preset `buddy`
 
 挂人格注入与 buddy 专属工具。**人格只作用于 buddy 会话**，不污染既有编码会话。
+
+这不是风格选择而是**硬约束**：`dsh-system-prompt` 无条件注册 deployment persona，一个全局挂载的
+人格行会与它冲突并在启动时响亮失败。官方 `@deepseek-ai/dsh-persona` 的模块文档原话是
+"mounted globally it collides with the registry's own registration and fails loud"，以及
+"an agent preset cannot mount the prompt registry itself, so without a row of its own a preset
+could change an agent's tools but never its identity"。
+
+因此人格能力**拆成两半，但只写一行代码**：
+
+| 半边 | 平面 | 职责 |
+|---|---|---|
+| `buddy-persona`（我们写） | host composition | `SOUL.md` / `AGENTS.md` 文件读写 + 设置页 typert 端点；发布 `ctx.buddyPersona`；注册 prompt **变量** `buddySoul`。**不注册任何 prompt section** |
+| `@deepseek-ai/dsh-persona`（官方现成） | 仅 `buddy` preset | preset 里一行 `prefix: '{{buddySoul}}'` |
+
+**为什么不自写 preset-only 行**（评审中一度提出，核实源码后否决）：否决理由曾是「`prefix` 是静态
+字符串，改了 `SOUL.md` 必须重载才生效」。这个结论不成立——变量 provider 在**每次 `assemble()` 都会
+被重新调用**（`dsh-system-prompt/lib/index.js:308-314`），所以 `'{{buddySoul}}'` 这个静态字符串
+承载的是动态取值，保存即生效。既然官方行已经满足需求，自写行只会多出一个子路径导出、一套测试，
+并且要自行重现 dsh-persona 规避 deployment persona 冲突的那套处理。
+
+**变量而非 section，是一道结构性隔离**：变量在被引用前完全惰性。人格只出现在 buddy preset 的
+那一行 `{{buddySoul}}` 里，所以它**在结构上**到不了普通编码会话——这比「注册时挑对 scope」更难写错。
+
+**为什么人格文本可以放心含 `{{`**：渲染器不会二次扫描被替换进去的值
+（`dsh-system-prompt/lib/index.js:106-107, 171-172`）。这对一个**将来由 Agent 自己编辑**的文件是硬要求。
+
+**`suffix` 暂不使用**：`AGENTS.md` 的规则拼在 `prefix` 里（人格之后、加一个小标题），不走
+`suffix`。官方文档写明 `suffix` 省略或为空会「shadow the deployment suffix away」——若用户没写规则，
+就会静默删掉官方的 first-party guidance。语义上 `suffix`（渲染在工具指引之后）确实更适合放规则，
+这个改进留给后续期，届时需要一个「空规则时回落占位文本」的方案。
+
+preset 落在 `<dshHome>/.agent-presets/buddy/`，含 `agent.cordis.yml` 与 `preset.yml`。
 
 一条 buddy 对话 = 一个**普通 DSH Session**，只是携带 `buddy` preset。因此持久化、全文检索、
 工具、审批、附件、回放、Telegram 桥接全部继承，无需重写。
@@ -117,7 +155,9 @@ Settings → dsh-buddy 标签页写 persona
    ↓ typert 端点
 buddy-persona 写 $DSH_HOME/buddy/SOUL.md
    ↓
-buddy preset 的 systemPrompt.section(text: ctx => 读 SOUL.md)
+buddy-persona 注册 prompt 变量 buddySoul（provider 每次 assemble 重调）
+   ↓
+buddy preset 的 @deepseek-ai/dsh-persona 行：prefix: '{{buddySoul}}'
    ↓
 新建 buddy 会话，模型语气真的变了            ← 可验收
 ```
@@ -125,7 +165,22 @@ buddy preset 的 systemPrompt.section(text: ctx => 读 SOUL.md)
 同时：左栏 Settings 上方出现 dsh-buddy 按钮 → 点击后主面板接管 → 显示 buddy 会话列表
 → 点一条回到官方聊天页。
 
-落地三行：`buddy-store`、`buddy-persona`、`buddy-panel`，外加 `buddy` preset。
+落地两行 + 一个浏览器半边 + 一个 preset：
+
+| 交付物 | 平面 |
+|---|---|
+| `buddy-store` | host row |
+| `buddy-persona` | host row |
+| 浏览器半边（按钮 + 主面板 + 设置页） | 包的 `dsh.client` bundle（不是 patch 行） |
+| `buddy` agent preset（`agent.cordis.yml` + `preset.yml`） | `<dshHome>/.agent-presets/buddy/` |
+
+preset 的安装由 `buddy-store` 在首次加载时完成：目录不存在则写入，**已存在则一律不覆盖**
+（用户可能已经手改过自己的 preset）。
+
+内置的 `agent.cordis.yml` **模板不是手写的**：先把官方 `standard` 拷成 `buddy`、加上人格行、
+用 `agentPresets.standingKeyFor('buddy')` mount-validate 通过，再把验证过的成品收进仓库当模板。
+composition 技能明确警告「从零写的 composition 常常漏掉 isolate realm 或 consumer 行」，
+拷贝法从一开始就是可加载的。
 
 ### 5.1 第一期不做
 
@@ -223,9 +278,12 @@ domain 名须小写（`UNIT_NAME_RE`）。
 | `storageDomain` 未挂载 | `buddy-store` 加载期响亮失败，其余行因 `inject` 未满足而等待 |
 | domain `already-open` | 复用活句柄（热重载路径） |
 | 存储数据 schema 漂移 | 响亮失败（`invalid-record`），不静默吞掉 |
-| `SOUL.md` 不存在 | 视为空人格，`systemPrompt.section` 贡献空串（空文本不贡献任何内容） |
-| `SOUL.md` 读取失败 | 记日志，本次装配贡献空串，不阻塞会话 |
+| `SOUL.md` 不存在 | 回落到内置默认人格文本。**绝不返回空串**：空 `prefix` 会把 deployment persona 遮蔽掉却不放任何东西进去，得到一个没有任何身份的会话 |
+| `SOUL.md` 读取失败 | 同上回落到默认人格，不抛出。人格损坏绝不能阻止会话启动 |
+| `buddySoul` provider 返回 `undefined` | 不允许发生。渲染器对「被引用但本次装配无取值」的变量直接抛错，会打挂每一个 buddy 会话 |
+| dsh-buddy 未安装但 `buddy` preset 仍在 | 装配以 `unknown prompt variable "{{buddySoul}}"` 响亮失败。**这是期望行为**：静默回落会得到一个自称 Buddy 却没有 Buddy 身份的会话 |
 | 面板注册失败 | 按钮同时不注册 —— 二者同生同死 |
+| `buddy` preset 目录已存在 | **一律不覆盖**，只记一条日志（用户可能已手改） |
 | 技能写入前快照失败 | 拒绝写入（快照是写入的前置条件，不是尽力而为） |
 
 ## 10. 测试策略
@@ -259,7 +317,9 @@ DSH_HOME=$T dsh --profile web --no-open --port 3099
 3. buddy 界面列出 buddy 会话；点一条回到官方聊天页并打开该会话
 4. Settings 出现 dsh-buddy 标签页，可编辑 persona 并保存
 5. 保存后 `$DSH_HOME/buddy/SOUL.md` 内容正确
-6. 新建 buddy 会话，模型行为体现该人格；非 buddy 会话不受影响
+6. `buddy` preset 出现在 preset 选择器里；用它新建会话，模型行为体现该人格；
+   非 buddy 会话（例如现有编码会话）完全不受影响
+6b. 改完 `SOUL.md` 后**无需重载**，下一个新会话即生效
 7. `dsh --profile <name> --dump-config` 中 patch 行生效，启动日志无 FAILED
 8. 上述测试全绿；typecheck 通过
 
