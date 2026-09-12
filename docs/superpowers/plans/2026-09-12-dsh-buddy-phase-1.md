@@ -92,6 +92,7 @@ dsh-buddy/
   "description": "DSH plugin: a persistent personal assistant with persona, memory and a dedicated main panel",
   "type": "module",
   "license": "MIT",
+  "main": "lib/index.js",
   "exports": {
     ".": { "default": "./lib/index.js" },
     "./store": { "default": "./lib/store.js" },
@@ -110,6 +111,7 @@ dsh-buddy/
     "check": "npm run typecheck && npm run build && npm test"
   },
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "assistant"],
+  "engines": { "node": "^22.19.0 || >=24.0.0" },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
@@ -126,21 +128,22 @@ dsh-buddy/
     }
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.2",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-home-paths": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-session": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-session-query": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-storage-domain": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.1",
-    "@deepseek-ai/dsh-typert-protocol": "^0.1.5-rc.1"
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/dsh-home-paths": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-session-query": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-settings": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-storage-domain": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.8 <0.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/schemastery": "^3.18.2",
     "@deepseek-ai/dsh-home-paths": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-session": "^0.1.5-rc.1",
     "@deepseek-ai/dsh-session-query": "^0.1.5-rc.1",
@@ -156,6 +159,14 @@ dsh-buddy/
   }
 }
 ```
+
+> **Manifest corrections (applied 2026-09-12, after `dsh-plugin-dev check`).** Four fields differ from this plan's original draft; the reasons, so nobody reverts them:
+> - `@deepseek-ai/schemastery` moved from `dependencies` to `peerDependencies` (and into `devDependencies` for the local build). `@deepseek-ai/dsh-settings` declares it a peer itself, and `Config` is a schemastery instance handed across that boundary — a second nested copy is the "cordis 双副本" hazard. Both planes are duck-typed (`schema.toJSON()`, `safeParse`; no `instanceof`), so today it would merely drift, not crash. `zod` stays a plain dependency: `dsh-storage-domain` declares zod as a dependency, not a peer.
+> - Harness peer ranges widened from `^0.1.5-rc.1` to `>=0.1.0-rc.8 <0.2.0`. Semver's prerelease rule means `^0.1.5-rc.1` matches `0.1.5-rc.2` but **not** `0.1.6-rc.1`, and the harness ships on an rc cadence.
+> - `engines.node` added as `^22.19.0 || >=24.0.0` — the harness's own supported range (`references/official-docs/AGENTS.md`), not merely `>=22`.
+> - `main` added as `lib/index.js` (no `./` prefix — the checker's `files` matcher compares literally). The rows still resolve through `exports`; this is only the fallback for a resolver that ignores `exports`.
+>
+> Two `dsh-plugin-dev check` findings are **deliberately not fixed**: `readme-five-langs` (five-language READMEs are that toolkit's own publishing convention; this plugin is `private`) and `packageManager` (it wants pnpm pinned; this repo is npm-managed with a `package-lock.json`).
 
 - [ ] **Step 2: Create `tsconfig.json`**
 
