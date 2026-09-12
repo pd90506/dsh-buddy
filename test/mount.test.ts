@@ -11,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +53,13 @@ interface MountOptions {
 	readonly sessions?: readonly SessionStub[];
 	/** Titles keyed by session id; a missing id means the session has no title. */
 	readonly titles?: Readonly<Record<string, { title: string; updatedAt: number }>>;
+	/**
+	 * Make `AGENTS.md` a named pipe instead of an ordinary file, *before* the
+	 * rows mount. `readOr` (`src/persona/soul.ts`) blocks on `readFile` until a
+	 * writer opens the other end, which is what lets a test hold the boot's
+	 * initial persona read open and observe the wire while it is stuck there.
+	 */
+	readonly agentsIsFifo?: boolean;
 }
 
 /** What the test observes from outside the plugins. */
@@ -126,6 +134,7 @@ function dispatch(service: ServiceProxy, method: string, args: unknown[]): unkno
 async function mount(options: MountOptions = {}): Promise<Mounted> {
 	const home = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-"));
 	if (options.soulOnDisk !== undefined) await writeFile(join(home, "SOUL.md"), options.soulOnDisk, "utf8");
+	if (options.agentsIsFifo === true) execFileSync("mkfifo", [join(home, "AGENTS.md")]);
 
 	// The store row's boot also installs the shipped preset under the *harness*
 	// home, resolved independently of `home` above via `dshHomePath()` reading
@@ -308,6 +317,41 @@ test("the prompt variable serves the authored persona once it is read", async ()
 	const { variables } = await mount({ soulOnDisk: "Authored voice." });
 	await until(() => variables.get(SOUL_VARIABLE)?.({}) === "Authored voice.");
 	assert.equal(variables.get(SOUL_VARIABLE)?.({}), "Authored voice.");
+});
+
+test("the persona endpoint never answers with the pre-read placeholder", async () => {
+	// `AGENTS.md` is a fifo: the boot's own `readOr` blocks on it until a writer
+	// appears, which holds the initial disk read open for as long as this test
+	// needs. An assertion made only after the window closes would prove nothing
+	// about it — the defect this pins is exactly "the empty placeholder is
+	// answered while the read is still in flight."
+	const mounted = await mount({ soulOnDisk: "Authored voice.", agentsIsFifo: true });
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+
+	let settled: PersonaView | undefined;
+	const pending = (dispatch(persona, "persona", []) as Promise<PersonaView>).then((view) => {
+		settled = view;
+		return view;
+	});
+
+	try {
+		// The boot read cannot have landed yet — nothing has written to the fifo —
+		// so the wire call above must still be unresolved rather than already
+		// answering `{ soul: "", agents: "", home }`.
+		await settle();
+		assert.equal(settled, undefined, "persona() must not resolve before the initial disk read lands");
+	} finally {
+		// Unblock the boot's `readOr(agents)` unconditionally: with the fix
+		// reverted this assertion throws before the fifo ever gets its writer,
+		// and the boot's still-pending `readFile` on it would otherwise hold the
+		// process open rather than letting the mutation surface as a clean fail.
+		await writeFile(join(mounted.home, "AGENTS.md"), "Rules.", "utf8");
+	}
+
+	const view = await pending;
+	assert.equal(view.soul, "Authored voice.");
+	assert.equal(view.agents, "Rules.");
 });
 
 test("the prompt variable is still registered when the systemPrompt plane arrives late", async () => {

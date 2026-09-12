@@ -87,6 +87,24 @@ export function apply(ctx: PluginContext): void {
 	// keeps one turn's identity stable while the user edits the file underneath.
 	let document: PersonaDocument = { soul: "", agents: "" };
 
+	// Whether a real write has landed yet. The initial disk read and a wire write
+	// can both be in flight at once (the read is slow, or simply hasn't reached
+	// its `await` boundary), and the read must never win that race: it started
+	// from disk state that a write can since have made stale. Checked after the
+	// initial read's `await`, this is the guard for the boot-window write/read
+	// race the Task 6 report flagged as a known concern.
+	let written = false;
+
+	// Resolves once the initial disk read has landed, so no wire call — read or
+	// write — is ever served (or acts on) the `{ soul: "", agents: "" }`
+	// placeholder `document` starts as. Every call the gateway takes below awaits
+	// this before touching `document`, which also keeps a wire write from racing
+	// the boot read's own `readOr` calls against the same files.
+	let resolveInitialRead: () => void = () => undefined;
+	const initialRead = new Promise<void>((resolve) => {
+		resolveInitialRead = resolve;
+	});
+
 	const view = (): PersonaView => ({
 		soul: document.soul,
 		agents: document.agents,
@@ -122,9 +140,14 @@ export function apply(ctx: PluginContext): void {
 	// deliberately uncaught — a row whose endpoints are invisible on the wire is
 	// a failure to report, not to survive.
 	new BuddyPersonaGateway(ctx, {
-		readPersona: async () => view(),
+		readPersona: async () => {
+			await initialRead;
+			return view();
+		},
 		writePersona: async (patch) => {
+			await initialRead;
 			document = await writePersona(paths, patch);
+			written = true;
 			await ctx.buddyStore.markPersonaWritten(new Date().toISOString());
 			return view();
 		},
@@ -149,7 +172,12 @@ export function apply(ctx: PluginContext): void {
 	// `readPersona` degrades rather than throwing, so a damaged persona costs the
 	// authored voice for this run and never the row.
 	ctx.effect(async (): Promise<() => void> => {
-		document = await readPersona(paths);
+		const loaded = await readPersona(paths);
+		// A write gated on `initialRead` cannot land before this point, but the
+		// flag stays as the documented invariant rather than an unstated ordering
+		// assumption: whichever landed first, on disk, must be what survives.
+		if (!written) document = loaded;
+		resolveInitialRead();
 		return () => undefined;
 	}, "dsh-buddy: persona load");
 }
