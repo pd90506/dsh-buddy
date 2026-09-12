@@ -412,47 +412,61 @@ test("the browser half injects slots, locale, connection, layout and sessions", 
 	assert.deepEqual(client.inject, ["slots", "locale", "connection", "layout", "sessions"]);
 });
 
-test("every cordis-injected service with a known declaring package is named in dsh.client.inject", async () => {
-	// A cordis `inject` entry is a hard dependency: Guard throws if the fiber's
-	// declared service has no provider loaded in the web shell. `dsh.client.inject`
-	// is this plugin's declaration of which client plugins the harness must load
-	// for that provider to exist — so every entry in `inject` needs a package here,
-	// or the plugin silently depends on some other plugin happening to be loaded.
+test("every cordis-injected service has its real declaring package in dsh.client.inject, with no exemption", async () => {
+	// `dsh.client.inject` is NOT a per-service provider contract — it is a bundle
+	// arrival-order list (@deepseek-ai/dsh-client-modules/lib/client.js:265-268
+	// iterates `row.inject` and looks each name up in the loaded graph; a name
+	// absent from the graph is silently skipped). That silence is exactly how two
+	// phantom entries survived in this manifest since task 1: `dsh-client-runtime`
+	// (never an installable package) and `dsh-client-ui-slots` (a types-only
+	// import name — the real owner of `ctx.slots` is `dsh-client-ui-renderer`,
+	// confirmed by reading its `declare module '@deepseek-ai/cordis' { interface
+	// Context { slots: SlotRegistry } }`). Neither ever broke anything, because
+	// the renderer sets `immediately: true` and always arrives early regardless
+	// of who lists it — which is also why the wrong name went unnoticed.
 	//
-	// This is exactly the gap task 8 introduced and fixed: `sessions` was added to
-	// `inject` for the sidebar/main pair's `openSession`, but the package that
-	// declares `ctx.sessions` (found by reading its own
-	// `declare module '@deepseek-ai/cordis' { interface Context { sessions: ... } }`)
-	// was never added to the manifest.
+	// This test cannot check "is this package actually installed and does its
+	// package.json declare dsh.client" from inside this repo: that lives in the
+	// harness's own vendored tree at a machine-specific path outside this
+	// plugin's dependency graph (this repo's own package.json never installs the
+	// browser-side @deepseek-ai/dsh-client-* packages — the harness supplies
+	// them), so hardcoding that path here would be either non-portable or
+	// silently vacuous in a different checkout. What it DOES check: every cordis
+	// service this plugin hard-declares in `inject` (`export const inject` in
+	// src/client/index.tsx) has its real declaring package — each confirmed by
+	// reading that package's own Context augmentation, recorded in the task-8 fix
+	// reports — present in the manifest. The map has NO exemptions on purpose:
+	// omitting one (as `slots` was, the first time) is exactly the gap that let a
+	// wrong entry through uncaught, so an unmapped service now fails loudly
+	// instead of being silently skipped.
 	const client = loadClient();
 	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 		dsh: { client: { inject: string[] } };
 	};
 	const declared = pkg.dsh.client.inject;
 
-	// One entry per cordis-injected service whose declaring package was
-	// confirmed by reading that package's own Context augmentation (see the
-	// task-8 fix report). `slots` is deliberately absent: `ctx.slots` is
-	// declared inside `@deepseek-ai/dsh-client-ui-renderer`'s types, which itself
-	// depends on `@deepseek-ai/dsh-client-ui-slots` for the `SlotRegistry` type —
-	// which of the two the manifest ought to name was not resolved, so asserting
-	// it here would either lock in a guess or silently pass either way.
-	const knownProviders: Record<string, string> = {
-		connection: "@deepseek-ai/dsh-client-connection",
+	const provider: Record<string, string> = {
+		slots: "@deepseek-ai/dsh-client-ui-renderer",
 		locale: "@deepseek-ai/dsh-client-locale",
+		connection: "@deepseek-ai/dsh-client-connection",
 		layout: "@deepseek-ai/dsh-client-ui-layout",
 		sessions: "@deepseek-ai/dsh-api-session-controller",
 	};
 
-	const asserted = client.inject.filter((service) => service in knownProviders);
-	assert.ok(asserted.length >= 3, "this assertion is vacuous unless it actually checks several known services");
-	for (const service of asserted) {
-		const provider = knownProviders[service] as string;
+	for (const service of client.inject) {
+		const expected = provider[service];
 		assert.ok(
-			declared.includes(provider),
-			`cordis inject "${service}" has no declaring package (${provider}) in dsh.client.inject`,
+			expected !== undefined,
+			`no declaring package recorded for cordis service "${service}" — add it to this map, do not skip it`,
+		);
+		assert.ok(
+			declared.includes(expected),
+			`cordis inject "${service}" has no declaring package (${expected}) in dsh.client.inject`,
 		);
 	}
+	// The map must track `inject` exactly, not a superset with a stale leftover
+	// from a service this plugin no longer depends on.
+	assert.deepEqual(Object.keys(provider).sort(), [...client.inject].sort());
 });
 
 test("the settings tab registers into settings.section with a stable id, order and namespaced label", () => {
