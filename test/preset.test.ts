@@ -20,6 +20,7 @@ import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SOUL_VARIABLE } from "../src/index.ts";
 
 const PRESET_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "preset", "agent.cordis.yml");
 
@@ -34,7 +35,8 @@ type RowConfig = Record<string, string>;
  * exactly one row shape — a zero-indent `- id: <id>` line opening a row, an
  * exactly-matching two-space `name: '@deepseek-ai/dsh-persona'` line, and
  * (optionally) a two-space `config:` line followed by four-space
- * `key: 'value'` lines with single-quoted scalars.
+ * `key: 'value'` (single-quoted) or `key: bare text` (unquoted plain scalar)
+ * lines.
  *
  * Fail-closed by construction: every regex here is anchored to one exact
  * literal shape and none has a fallback branch that accepts "close enough".
@@ -65,10 +67,18 @@ function personaRowConfigs(source: string): RowConfig[] {
 			for (let i = configIndex + 1; i < block.length; i++) {
 				const line = block[i] ?? "";
 				if (line === "") continue;
-				const match = /^ {4}([A-Za-z][A-Za-z0-9]*): '([^']*)'$/.exec(line);
+				const match = /^ {4}([A-Za-z][A-Za-z0-9]*): (.+)$/.exec(line);
 				if (match === null) break; // dedent, or a shape this function refuses to interpret: stop, do not guess.
 				const key = match[1] ?? "";
-				const value = match[2] ?? "";
+				const raw = match[2] ?? "";
+				let value: string;
+				if (raw.startsWith("'") && raw.endsWith("'") && raw.length >= 2) {
+					value = raw.slice(1, -1);
+				} else if (/^[|>"{[&*]/.test(raw)) {
+					break; // block scalar, double-quoted, flow collection, anchor/alias: refuse to interpret.
+				} else {
+					value = raw; // an unquoted plain scalar, taken verbatim.
+				}
 				config[key] = value;
 			}
 		}
@@ -114,7 +124,7 @@ function personaPackageNameOccurrences(source: string): number {
 	return codeOnly.split(PERSONA_PACKAGE_NAME).length - 1;
 }
 
-test("the frozen buddy preset carries exactly one dsh-persona row, prefix-only and referencing buddy_soul", () => {
+test("the frozen buddy preset carries exactly one dsh-persona row, bound to the shared SOUL_VARIABLE constant", () => {
 	const source = readFileSync(PRESET_PATH, "utf8");
 	const personaRows = personaRowConfigs(source);
 	const rawOccurrences = personaPackageNameOccurrences(source);
@@ -124,5 +134,18 @@ test("the frozen buddy preset carries exactly one dsh-persona row, prefix-only a
 		`found ${String(rawOccurrences)} occurrence(s) of "${PERSONA_PACKAGE_NAME}" outside comments, but the structured extractor recognised only ${String(personaRows.length)} row(s) — a persona row exists in a shape the extractor cannot parse`,
 	);
 	assert.equal(personaRows.length, 1, `expected exactly one @deepseek-ai/dsh-persona row, found ${String(personaRows.length)}`);
-	assert.deepEqual(personaRows[0], { prefix: "{{buddy_soul}}" });
+	// Bound to the constant, not restated as a literal: a drift between
+	// `SOUL_VARIABLE` and the frozen template (exactly the defect that reached
+	// real-harness boot two commits ago, when the variable was briefly
+	// camelCase) fails here rather than only at runtime.
+	assert.deepEqual(personaRows[0], {
+		prefix: `{{${SOUL_VARIABLE}}}`,
+		suffix: "Your working directory is {{cwd}}.",
+	});
+	// `dsh-system-prompt`'s own `VARIABLE_NAME` regex
+	// (`@deepseek-ai/dsh-system-prompt/lib/index.js:58`, `/^[a-z][a-z0-9_]*$/`)
+	// refuses camelCase names outright — a real-harness boot failed on exactly
+	// that shape. Encode the rule here rather than relying on it being
+	// remembered the next time this constant changes.
+	assert.match(SOUL_VARIABLE, /^[a-z][a-z0-9_]*$/);
 });

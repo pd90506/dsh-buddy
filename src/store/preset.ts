@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BUDDY_PRESET_ID } from "../index.ts";
 
 /** The files the template consists of. */
 const PRESET_FILES = ["agent.cordis.yml", "preset.yml"] as const;
@@ -29,7 +30,10 @@ const PRESET_FILES = ["agent.cordis.yml", "preset.yml"] as const;
  * @returns the preset directory path.
  */
 export function presetTargetDir(dshHome: string): string {
-	return join(dshHome, ".agent-presets", "buddy");
+	// The install directory name IS the preset id — `BUDDY_PRESET_ID`, not a
+	// restated literal, because the harness resolves an agent preset by
+	// looking up this exact directory name under `.agent-presets/`.
+	return join(dshHome, ".agent-presets", BUDDY_PRESET_ID);
 }
 
 /**
