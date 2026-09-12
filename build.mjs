@@ -28,7 +28,10 @@ const hostExternal = [...Object.keys(dependencies), ...Object.keys(peerDependenc
  * are written; it is deliberately explicit rather than a directory scan, so a
  * mistyped path fails the build instead of silently producing no artifact.
  */
-const hostEntries = [["src/index.ts", "lib/index.js"]];
+const hostEntries = [
+	["src/index.ts", "lib/index.js"],
+	["src/store/index.ts", "lib/store.js"],
+];
 
 for (const [entry, outfile] of hostEntries) {
 	await build({

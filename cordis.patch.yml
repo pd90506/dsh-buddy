@@ -1,0 +1,24 @@
+# dsh-buddy bundle layer, appended to the profile's bundle stack by
+# `dsh plugin --profile <name> add` (via the package's dsh.bundle.patch
+# declaration).
+#
+# Two host rows, deliberately separate: the store owns the buddy home and the
+# `buddy` storage domain, and the persona row stands on it. Each row has its own
+# effect scope, so a failure in one does not take the other down, and either can
+# be turned off from a profile's own cordis.patch.yml without touching code:
+#
+#   - id: buddy-persona
+#     disabled: true
+#
+# The browser half is not a row here: it reaches the boot graph through the
+# package's `dsh.client` declaration.
+#
+# Nothing here does anything on its own. With no SOUL.md written, the plugin
+# mounts, registers its settings section and its endpoints, and idles.
+- insert:
+    - id: buddy-store
+      name: 'dsh-buddy/store'
+      config: {}
+    - id: buddy-persona
+      name: 'dsh-buddy/persona'
+      config: {}
