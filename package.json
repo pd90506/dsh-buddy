@@ -14,7 +14,7 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "src", "cordis.patch.yml"],
+  "files": ["lib", "src", "assets", "cordis.patch.yml"],
   "scripts": {
     "build": "node build.mjs",
     "prepare": "node build.mjs",
