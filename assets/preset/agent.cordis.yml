@@ -1,4 +1,5 @@
-# The `standard` agent preset: the full coding agent, mounted once per process.
+# The `buddy` agent preset: Buddy's persona plus the `standard` coding agent's
+# toolset it was copied from, mounted once per process.
 #
 # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
 # standing scope; every session naming it joins by scope parentage, so the
