@@ -41,9 +41,15 @@ interface SectionOptions {
 	readonly label: () => string;
 }
 
+/** A `main` slot registration, as the slot service receives it — no id/order/label, only the key the sidebar addresses it by. */
+interface MainPanelOptions {
+	readonly name: string;
+	readonly key: string;
+}
+
 /** One recorded slot registration. */
 interface Registration {
-	readonly options: SectionOptions;
+	readonly options: SectionOptions | MainPanelOptions;
 	readonly component: unknown;
 }
 
@@ -135,11 +141,19 @@ function loadClient(resolve: (name: string) => unknown = (name) => nodeRequire(n
 
 /**
  * A browser-side context stub that records every contribution.
- * @param options - `runSlotCallback: false` models a shell with no settings slot;
- *   `rpc` replaces the connection service's RPC client.
+ * @param options - `runSlotCallback: false` models a shell with no matching slot;
+ *   `rpc` replaces the connection service's RPC client; `sessions` and `layout`
+ *   replace those services so a test can observe `openSession`'s wiring.
  * @returns the stub context and its recordings.
  */
-function contextStub(options: { runSlotCallback?: boolean; rpc?: RpcStub } = {}): Recorded {
+function contextStub(
+	options: {
+		runSlotCallback?: boolean;
+		rpc?: RpcStub;
+		sessions?: { open(sessionId: string): void };
+		layout?: { selectPanel(panelId: unknown): void };
+	} = {},
+): Recorded {
 	const runSlotCallback = options.runSlotCallback ?? true;
 	const rpc = options.rpc ?? { call: async () => ({ ok: true, value: {} }) };
 	const registrations: Registration[] = [];
@@ -171,15 +185,27 @@ function contextStub(options: { runSlotCallback?: boolean; rpc?: RpcStub } = {})
 		slots: {
 			inject: (name: string, callback: () => unknown) => {
 				injected.push(name);
-				if (runSlotCallback) callback();
+				if (!runSlotCallback) return;
+				const result = callback();
+				// The shipped `main` registration pattern is a generator
+				// (`function* () { yield slots.register(...) }`, per
+				// dsh-client-ui-conversation) rather than a bare call: a generator
+				// function only runs its body up to the first `yield` once iterated,
+				// so calling it without draining it would silently skip the
+				// `register` call and this stub would never see the panel.
+				if (result !== null && typeof result === "object" && typeof (result as Iterator<unknown>).next === "function") {
+					for (const _ of result as Iterable<unknown>) {
+						// draining is the point: each step runs one `yield register(...)`.
+					}
+				}
 			},
-			register: (sectionOptions: SectionOptions, component: unknown) => {
+			register: (sectionOptions: SectionOptions | MainPanelOptions, component: unknown) => {
 				registrations.push({ options: sectionOptions, component });
 				return () => {};
 			},
 		},
-		layout: { selectPanel: () => {} },
-		sessions: {},
+		layout: options.layout ?? { selectPanel: () => {} },
+		sessions: options.sessions ?? {},
 	};
 	return { ctx, registrations, injected, effects, dictionaries };
 }
@@ -352,7 +378,7 @@ function mountSettingsTab(answer: (endpoint: string) => Promise<unknown>): Mount
 	});
 	client.apply(ctx);
 
-	const registration = registrations[0];
+	const registration = registrations.find((r) => r.options.name === "settings.section");
 	assert.ok(registration !== undefined, "the settings section must be registered");
 	renderer.mount(registration.component as () => unknown);
 
@@ -391,27 +417,55 @@ test("the settings tab registers into settings.section with a stable id, order a
 	const { ctx, registrations, injected } = contextStub();
 	client.apply(ctx);
 
-	assert.deepEqual(injected, ["settings.section"], "the tab must go into the settings left nav");
-	assert.equal(registrations.length, 1, "task 7 contributes the settings section and nothing else");
-	const registration = registrations[0];
+	// Task 8 adds the "main" and "sidebar.panellist" pair alongside task 7's
+	// settings tab; those are asserted separately below, so here only the count
+	// and the settings.section entry itself are pinned.
+	assert.deepEqual(injected, ["settings.section", "main", "sidebar.panellist"]);
+	assert.equal(registrations.length, 3, "settings.section, main and sidebar.panellist — nothing else");
+	const registration = registrations.find((r) => r.options.name === "settings.section");
 	assert.ok(registration !== undefined);
-	assert.equal(registration.options.name, "settings.section");
-	assert.equal(registration.options.id, "buddy");
-	assert.equal(registration.options.locale, "settings.buddy");
+	const options = registration.options as SectionOptions;
+	assert.equal(options.id, "buddy");
+	assert.equal(options.locale, "settings.buddy");
 	// The nav is sorted by a bare numeric comparator with no tie-breaker, so the
 	// order must not collide with a neighbour: Telegram takes 26, Plugin Market 40.
-	assert.equal(registration.options.order, 27);
-	assert.equal(registration.options.label(), "settings.buddy:nav", "the label must resolve through the bound namespace");
+	assert.equal(options.order, 27);
+	assert.equal(options.label(), "settings.buddy:nav", "the label must resolve through the bound namespace");
 	assert.equal(typeof registration.component, "function");
 });
 
-test("the settings section is not registered when the shell has no settings slot", () => {
+test("the main panel and the sidebar button are registered as one pair, addressed by the shared key", () => {
+	const client = loadClient();
+	const { ctx, registrations } = contextStub();
+	client.apply(ctx);
+
+	const main = registrations.find((r) => r.options.name === "main");
+	assert.ok(main !== undefined, "the generator-shaped main registration must actually run, not just be injected");
+	assert.equal((main.options as MainPanelOptions).key, MAIN_PANEL_KEY);
+	assert.equal(typeof main.component, "function");
+
+	const button = registrations.find((r) => r.options.name === "sidebar.panellist");
+	assert.ok(button !== undefined);
+	const buttonOptions = button.options as SectionOptions;
+	// This is the pairing itself: the sidebar addresses the main panel by this
+	// same id, so a drift here is a button that throws on click in the browser.
+	assert.equal(buttonOptions.id, MAIN_PANEL_KEY);
+	assert.equal((main.options as MainPanelOptions).key, buttonOptions.id, "the button's id and the panel's key must be the same string");
+	// Left-column render order is panellist → workspaces → settings → footer, so
+	// any order here lands above Settings; this only pins it away from 0/undefined.
+	assert.equal(buttonOptions.order, 10);
+	assert.equal(buttonOptions.locale, "settings.buddy");
+	assert.equal(buttonOptions.label(), "settings.buddy:nav", "the label must resolve through the bound namespace");
+	assert.equal(typeof button.component, "function");
+});
+
+test("no registration happens when the shell has none of the matching slots", () => {
 	const client = loadClient();
 	const { ctx, registrations, injected } = contextStub({ runSlotCallback: false });
 	client.apply(ctx);
 
-	assert.deepEqual(injected, ["settings.section"]);
-	assert.equal(registrations.length, 0, "registration must be gated on slots.inject, not unconditional");
+	assert.deepEqual(injected, ["settings.section", "main", "sidebar.panellist"]);
+	assert.equal(registrations.length, 0, "every registration must be gated on slots.inject, not unconditional");
 });
 
 test("both dictionaries are registered, as a reversible effect", () => {
@@ -567,4 +621,188 @@ test("a loaded persona saves exactly the drafts the load produced", async () => 
 		payload: { args: { patch: { soul: "a voice", agents: "some rules" } } },
 	});
 	assert.equal(tab.saveButton().props["disabled"], false, "the tab must be saveable again once the write settles");
+});
+
+/** One call recorded against the sessions or layout service stubs. */
+interface RecordedAction {
+	readonly service: "sessions.open" | "layout.selectPanel";
+	readonly arg: unknown;
+}
+
+/** A mounted main panel and what it did to its collaborators. */
+interface MountedPanel {
+	/** Every call the panel made through the connection service. */
+	readonly calls: RecordedCall[];
+	/** Every call the panel's `openSession` made against sessions/layout, in order. */
+	readonly actions: RecordedAction[];
+	/** The element tree of the most recent render. */
+	tree(): unknown;
+}
+
+/**
+ * Mount the real main panel: `apply` builds it, so the component under test is
+ * the one actually registered into the `main` slot, wired to the plugin's own
+ * `openSession` (which drives `ctx.sessions.open` then `ctx.layout.selectPanel(null)`).
+ * @param answer - the gateway envelope (or rejection) for `buddyPersona/sessions`.
+ * @returns the mounted panel handle.
+ */
+function mountBuddyPanel(answer: (endpoint: string) => Promise<unknown>): MountedPanel {
+	const renderer = createRenderer();
+	const calls: RecordedCall[] = [];
+	const actions: RecordedAction[] = [];
+	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
+	const { ctx, registrations } = contextStub({
+		rpc: {
+			call: async (route: string, endpoint: string, payload: unknown) => {
+				calls.push({ route, endpoint, payload });
+				return await answer(endpoint);
+			},
+		},
+		sessions: { open: (sessionId: string) => actions.push({ service: "sessions.open", arg: sessionId }) },
+		layout: { selectPanel: (panelId: unknown) => actions.push({ service: "layout.selectPanel", arg: panelId }) },
+	});
+	client.apply(ctx);
+
+	const registration = registrations.find((r) => r.options.name === "main");
+	assert.ok(registration !== undefined, "the main panel must be registered");
+	renderer.mount(registration.component as () => unknown);
+
+	return { calls, actions, tree: () => renderer.tree() };
+}
+
+/**
+ * Find a conversation row button by its rendered title.
+ *
+ * Deliberately shallow (only the button's own immediate children), so it
+ * cannot be confused with the header's Refresh button, whose only child is a
+ * plain locale-key string rather than a title span.
+ * @param tree - the rendered element tree.
+ * @param title - the row's rendered title text.
+ * @returns the row's button element.
+ */
+function rowButton(tree: unknown, title: string): StubElement {
+	const button = elements(tree).find((element) => {
+		if (element.type !== "button") return false;
+		const children = element.props["children"];
+		const kids = Array.isArray(children) ? children : [children];
+		return kids.some(
+			(kid) => typeof kid === "object" && kid !== null && (kid as Partial<StubElement>).props?.["children"] === title,
+		);
+	});
+	assert.ok(button !== undefined, `no row button found for "${title}"`);
+	return button;
+}
+
+test("the panel loads on mount, lists conversations, and falls back to Untitled for a blank title", async () => {
+	const items = [
+		{ sessionId: "s1", title: "Trip planning", updatedAt: 2, cwd: "/home/x" },
+		{ sessionId: "s2", title: "", updatedAt: 0, cwd: "" },
+	];
+	const panel = mountBuddyPanel(async () => ({ ok: true, value: items }));
+	await settle();
+
+	assert.deepEqual(panel.calls.map((call) => call.endpoint), ["buddyPersona/sessions"]);
+	const texts = elements(panel.tree())
+		.map((element) => element.props["children"])
+		.filter((child): child is string => typeof child === "string");
+	assert.ok(texts.includes("Trip planning"), "a titled session must show its own title");
+	assert.ok(texts.includes("/home/x"), "a non-empty cwd must render as a meta line");
+	assert.ok(texts.includes("settings.buddy:untitled"), "a blank title must render as Untitled, not an empty row");
+});
+
+test("an empty cwd renders no meta line", async () => {
+	// s2 above has title "" (covered by the untitled fallback) and cwd "" — this
+	// pins the cwd side of that same row separately, so a defect in either
+	// condition is caught by a specific assertion rather than a shared one.
+	const panel = mountBuddyPanel(async () => ({
+		ok: true,
+		value: [{ sessionId: "s2", title: "", updatedAt: 0, cwd: "" }],
+	}));
+	await settle();
+
+	const row = rowButton(panel.tree(), "settings.buddy:untitled");
+	const children = row.props["children"];
+	const kids = Array.isArray(children) ? children : [children];
+	// React renders `false` as nothing, but the JSX call site still evaluates
+	// `item.cwd !== "" && <span>…</span>` to that `false` rather than omitting
+	// the slot entirely — so the falsifiable check is "no rendered element
+	// besides the title span", not "a shorter children array".
+	const rendered = kids.filter((kid) => typeof kid === "object" && kid !== null);
+	assert.equal(rendered.length, 1, "an empty cwd must not add a rendered meta span");
+});
+
+test("the empty-state hint shows only after a load resolves to zero conversations", async () => {
+	const panel = mountBuddyPanel(async () => ({ ok: true, value: [] }));
+
+	// Still in flight: items is undefined, so the empty hint must not show yet
+	// (it would otherwise flash "no conversations" while a slow load is pending).
+	let texts = elements(panel.tree()).map((element) => element.props["children"]);
+	assert.ok(!texts.includes("settings.buddy:empty"), "the empty hint must not show before the load settles");
+
+	await settle();
+	texts = elements(panel.tree()).map((element) => element.props["children"]);
+	assert.ok(texts.includes("settings.buddy:empty"));
+});
+
+test("a failed sessions load surfaces the error instead of an empty-state lie", async () => {
+	const panel = mountBuddyPanel(async () => ({ ok: false, error: { code: "EIO", message: "host is down" } }));
+	await settle();
+
+	const texts = elements(panel.tree()).map((element) => element.props["children"]);
+	assert.ok(texts.includes("buddyPersona/sessions failed: EIO: host is down"), "the load failure must be shown, not swallowed");
+	assert.ok(!texts.includes("settings.buddy:empty"), "an error is not the same claim as zero conversations");
+});
+
+test("the refresh button re-issues the sessions call", async () => {
+	const panel = mountBuddyPanel(async () => ({ ok: true, value: [] }));
+	await settle();
+	assert.equal(panel.calls.length, 1);
+
+	const refresh = elements(panel.tree()).find(
+		(element) => element.type === "button" && element.props["children"] === "settings.buddy:refresh",
+	);
+	assert.ok(refresh !== undefined, "the header must render a refresh button");
+	(refresh.props["onClick"] as () => void)();
+	await settle();
+	assert.equal(panel.calls.length, 2, "clicking refresh must call the endpoint again, not replay the first result");
+});
+
+test("opening a conversation calls sessions.open, then returns the centre column via layout.selectPanel(null)", async () => {
+	const panel = mountBuddyPanel(async () => ({
+		ok: true,
+		value: [{ sessionId: "s1", title: "Trip planning", updatedAt: 2, cwd: "" }],
+	}));
+	await settle();
+
+	const row = rowButton(panel.tree(), "Trip planning");
+	(row.props["onClick"] as () => void)();
+
+	// Order matters: selectPanel(null) first would flip the centre column away
+	// before sessions.open had a chance to stage the target conversation.
+	assert.deepEqual(panel.actions, [
+		{ service: "sessions.open", arg: "s1" },
+		{ service: "layout.selectPanel", arg: null },
+	]);
+});
+
+test("the sidebar icon defaults to size 16 and honours a supplied size", () => {
+	const renderer = createRenderer();
+	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
+	const { ctx, registrations } = contextStub();
+	client.apply(ctx);
+
+	const registration = registrations.find((r) => r.options.name === "sidebar.panellist");
+	assert.ok(registration !== undefined);
+	const Icon = registration.component as (props: { size?: number }) => StubElement;
+
+	assert.equal(Icon({}).props["width"], 16, "the sidebar row's default glyph size is 16");
+	assert.equal(Icon({ size: 24 }).props["width"], 24, "a supplied size must be honoured, not ignored");
+});
+
+test("the button and the panel are both registered — neither alone", async () => {
+	// A sidebar row without a main entry throws on click, because
+	// ctx.layout.selectPanel rejects a key the main slot never registered.
+	const built = await bundleText();
+	assert.match(built, /sidebar\.panellist/);
+	assert.match(built, /"main"|'main'/);
 });

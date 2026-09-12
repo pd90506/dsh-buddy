@@ -10,13 +10,15 @@
  * module instead of being restated on either side.
  * @module dsh-buddy/client
  */
-// Imported, never restated: task 8's button and panel must address the same
-// string, and one shared constant is the only way they cannot drift. Nothing in
-// task 7 reads it yet, so esbuild drops it from the artifact — which is why the
-// "one constant" rule is pinned by a source-text assertion in
-// `test/client-ui.test.ts` rather than by anything read back off the bundle.
+// Imported, never restated: the button (sidebar.panellist) and the panel it
+// selects (main) must address the same string, and one shared constant is the
+// only way they cannot drift apart in a later edit. Bundling inlines the value
+// either way, so no assertion against the built artifact can tell a hand-
+// restated constant from the shared one — which is why the "one constant" rule
+// is pinned by a source-text assertion in `test/client-ui.test.ts` instead.
 import { MAIN_PANEL_KEY } from "../index.ts";
 import { createCall } from "./call.ts";
+import { createBuddyIcon, createBuddyPanel } from "./panel.tsx";
 import { createBuddySettingsSection } from "./settings.tsx";
 
 /** Dictionary namespace owned by this plugin. */
@@ -90,6 +92,33 @@ export function apply(ctx: any): void {
 		ctx.slots.register(
 			{ name: "settings.section", id: SECTION_ID, order: SECTION_ORDER, label: () => t("nav"), locale: NS },
 			BuddySettingsSection,
+		),
+	);
+
+	// The button and the panel are one unit. `ctx.layout.selectPanel` throws on a
+	// key the main slot never registered — and preserves the current selection —
+	// so a button registered without its panel is a button that throws on click.
+	const BuddyPanel = createBuddyPanel({
+		call,
+		t,
+		openSession: (sessionId: string) => {
+			ctx.sessions.open(sessionId);
+			// null returns the centre column to the Conversation.
+			ctx.layout.selectPanel(null);
+		},
+	});
+	const BuddyIcon = createBuddyIcon();
+
+	// One shared constant for both registrations, so the id and the key cannot
+	// drift apart in a later edit.
+	ctx.slots.inject("main", function* () {
+		yield ctx.slots.register({ name: "main", key: MAIN_PANEL_KEY }, BuddyPanel);
+	});
+
+	ctx.slots.inject("sidebar.panellist", () =>
+		ctx.slots.register(
+			{ name: "sidebar.panellist", id: MAIN_PANEL_KEY, order: 10, label: () => t("nav"), locale: NS },
+			BuddyIcon,
 		),
 	);
 }
