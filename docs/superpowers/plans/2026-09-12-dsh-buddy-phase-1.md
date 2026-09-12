@@ -391,8 +391,8 @@ git commit -m "feat: scaffold dsh-buddy and resolve the buddy home"
 **Interfaces:**
 - Consumes: `SETTINGS_NAMESPACE` from `src/index.ts`.
 - Produces:
-  - `interface BuddyConfig { home: string; panelOrder: number }`
-  - `Config: z<BuddyConfig>`
+  - `interface BuddyConfig { home: string }`
+  - `Config: z<Partial<BuddyConfig>, BuddyConfig>`
   - `FALLBACK_CONFIG: BuddyConfig`
 
 - [ ] **Step 1: Write the failing test `test/config.test.ts`**
@@ -405,7 +405,6 @@ import { Config, FALLBACK_CONFIG } from "../src/config.ts";
 test("a silent document produces the documented defaults", () => {
 	const resolved = Config({});
 	assert.equal(resolved.home, "");
-	assert.equal(resolved.panelOrder, 10);
 });
 
 test("the fallback matches the schema defaults", () => {
@@ -448,27 +447,25 @@ export interface BuddyConfig {
 	 * what almost every deployment wants; a `~` prefix is expanded.
 	 */
 	home: string;
-	/**
-	 * Ascending position of the dsh-buddy row in the sidebar's global panel list.
-	 * The renderer sorts on a bare numeric comparator with no tie-breaker, so an
-	 * unused number is what keeps the position stable as other plugins come and go.
-	 */
-	panelOrder: number;
 }
 
 /** Defaults used before the settings section resolves. */
-export const FALLBACK_CONFIG: BuddyConfig = { home: "", panelOrder: 10 };
+export const FALLBACK_CONFIG: BuddyConfig = { home: "" };
 
-/** The settings schema; defaults apply when the user document is silent. */
-export const Config: z<BuddyConfig> = z.object({
+/**
+ * The settings schema; defaults apply when the user document is silent.
+ *
+ * Two type arguments, not one: schemastery declares `Schemastery<S = any, T = S>`
+ * (S = input, T = output), so the conventional `z<BuddyConfig>` would make every
+ * field required on input and turn `Config({})` into a type error. The two-arg
+ * form states what the schema actually does — a partial document in, a complete
+ * config out. Collapsing it back breaks `test/config.test.ts`.
+ */
+export const Config: z<Partial<BuddyConfig>, BuddyConfig> = z.object({
 	home: z
 		.string()
 		.default("")
 		.description("Buddy home directory holding SOUL.md and AGENTS.md; empty means <harness home>/buddy"),
-	panelOrder: z
-		.number()
-		.default(10)
-		.description("Sidebar position of the dsh-buddy panel row; lower sorts higher"),
 });
 ```
 
@@ -1380,10 +1377,10 @@ async function mount(): Promise<Mounted> {
 				ns: string,
 				_s: unknown,
 				_e: unknown,
-				hooks: { setSource(source: () => { home: string; panelOrder: number }): void },
+				hooks: { setSource(source: () => { home: string }): void },
 			) => {
 				sections.push(ns);
-				hooks.setSource(() => ({ home, panelOrder: 10 }));
+				hooks.setSource(() => ({ home }));
 			},
 		}),
 	);
