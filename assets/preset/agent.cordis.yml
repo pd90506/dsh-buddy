@@ -17,6 +17,8 @@
 # pool instances — `provide()` throws on the second registration under the
 # same realm symbol; labels join REALMS, and are not what this file needs.)
 
+# ── identity ────────────────────────────────────────────────────────────────
+
 # The buddy persona.
 #
 # `@deepseek-ai/dsh-persona` is scope-only: mounted inside a preset it shadows
@@ -37,17 +39,6 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     prefix: '{{buddySoul}}'
-
-# ── identity ────────────────────────────────────────────────────────────────
-
-# The preset's own persona, shadowing the deployment default for this agent.
-# `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
-- id: persona
-  name: '@deepseek-ai/dsh-persona'
-  config:
-    suffix: Your working directory is {{cwd}}.
-    prefix: >-
-      You are a coding agent powered by the {{model}} model.
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
