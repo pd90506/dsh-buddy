@@ -18,6 +18,12 @@ import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from ".
 import { resolveBuddyPaths, type BuddyPaths } from "../paths.ts";
 import { openStore, type BuddyDomainHandle } from "./domain.ts";
 
+declare module "@deepseek-ai/cordis" {
+	interface Context {
+		buddyStore: BuddyStore;
+	}
+}
+
 /** Cordis plugin name used by loader diagnostics. */
 export const name = "dsh-buddy-store";
 
@@ -69,7 +75,14 @@ export class BuddyStore extends Service {
 /** The context members this row uses. */
 interface PluginContext {
 	get(name: string): unknown;
-	effect(effect: () => (() => void) | void, label?: string): void;
+	/**
+	 * Cordis's async effect form: an `async` body resolving to the disposer.
+	 * See `@deepseek-ai/cordis/lib/types/fiber.d.ts:51` — `AsyncEffect` is
+	 * `Promise<Disposable>` — accepted by the overload on line 159. Cordis then
+	 * owns the pending boot and awaits it before running the disposer, which a
+	 * hand-rolled `void (async () => …)()` cannot offer.
+	 */
+	effect(effect: () => Promise<() => void>, label?: string): unknown;
 	inject(services: string[], callback: (scoped: PluginContext) => void): void;
 	settings?: {
 		installSection(
@@ -89,9 +102,25 @@ interface PluginContext {
 export function apply(ctx: PluginContext): void {
 	let readConfig: () => BuddyConfig = () => FALLBACK_CONFIG;
 
+	let settleSource: () => void = () => undefined;
+	/**
+	 * Resolves once `readConfig` is final. The boot below waits on this rather
+	 * than racing it: `installSection` lands through a scoped injection (a
+	 * microtask chain) while the boot's first `await` is disk I/O, so without a
+	 * barrier a user-set `buddy.home` is honoured only by luck.
+	 */
+	const sourceSettled = new Promise<void>((resolve) => {
+		settleSource = () => resolve();
+	});
+
 	// Scoped injection so the row still mounts without the settings plane.
 	ctx.inject(["settings"], (scoped) => {
-		scoped.settings?.installSection(ctx, SETTINGS_NAMESPACE, Config, {}, {
+		// `FALLBACK_CONFIG`, not `{}`: `entry` is the base layer *and* the value
+		// dsh-settings replays raw — unresolved by the schema — through
+		// `setSource(() => entry)` when the provider detaches. With `{}` the
+		// post-detach `readConfig().home` is `undefined` and `resolveBuddyPaths`
+		// throws on `.trim()`.
+		scoped.settings?.installSection(ctx, SETTINGS_NAMESPACE, Config, FALLBACK_CONFIG, {
 			setSource: (source) => {
 				readConfig = source;
 			},
@@ -100,23 +129,41 @@ export function apply(ctx: PluginContext): void {
 			// A change takes effect on the next start, which the settings tab says.
 			onChange: () => undefined,
 		});
+		// `installSection` calls `setSource` synchronously, so the source is
+		// final the moment it returns — and releasing the barrier here (rather
+		// than inside `setSource`) also unblocks a settings plane that installs
+		// nothing at all.
+		settleSource();
 	});
 
-	ctx.effect(() => {
+	// Async effect form (`fiber.d.ts:51`, overload on `:159`): cordis tracks the
+	// pending boot and awaits it before disposing, so a dispose that lands mid
+	// `openStore` still runs the disposer instead of a no-op over `undefined`.
+	ctx.effect(async (): Promise<() => void> => {
 		let handle: BuddyDomainHandle | undefined;
-		void (async (): Promise<void> => {
+		try {
+			// Only wait when a settings plane is really mounted: a profile
+			// without one must boot straight onto the documented defaults.
+			if (ctx.get("settings") !== undefined) await sourceSettled;
 			handle = await openStore(ctx);
+			const opened = handle;
 			const paths = resolveBuddyPaths(readConfig().home);
 			await mkdir(paths.home, { recursive: true });
-			new BuddyStore(ctx as unknown as Context, paths, handle);
-		})().catch((error: unknown) => {
+			new BuddyStore(ctx as unknown as Context, paths, opened);
+			return () => {
+				void opened.close().catch(() => undefined);
+			};
+		} catch (error) {
+			// The caller owns the opened domain and nothing else can reach it,
+			// so every failure past `openStore` must close it here — including a
+			// fiber disposed mid-boot, where constructing the service on the now
+			// inactive context raises `INACTIVE_EFFECT`.
+			await handle?.close().catch(() => undefined);
 			// A store that cannot open is fatal for every dependent row, and
 			// cordis keeps them waiting rather than half-mounting them. Surfacing
 			// the reason is the only way a user can act on it.
 			console.error(`dsh-buddy-store: boot failed: ${(error as Error).message}`);
-		});
-		return () => {
-			void handle?.close().catch(() => undefined);
-		};
+			return () => undefined;
+		}
 	}, "dsh-buddy: store");
 }

@@ -8,6 +8,8 @@ import type { Plugin } from "@deepseek-ai/cordis";
 import * as row from "../src/store/index.ts";
 import { BuddyStore } from "../src/store/index.ts";
 import type { BuddyDomainHandle, BuddyGlobal } from "../src/store/domain.ts";
+import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../src/config.ts";
+import { resolveBuddyPaths } from "../src/paths.ts";
 
 /** A domain stand-in plus the flags a test needs to read back. */
 interface HandleStub extends BuddyDomainHandle {
@@ -160,6 +162,150 @@ test("the row waits for storageDomain, then creates the home and publishes the s
 		assert.equal(handle.closed, true);
 		assert.equal(ctx.get("buddyStore"), undefined);
 	} finally {
+		scratch.restore();
+	}
+});
+
+/** What the row handed to `settings.installSection`, captured verbatim. */
+interface InstalledSection {
+	owner: unknown;
+	ns: string;
+	schema: unknown;
+	entry: unknown;
+	hooks: { setSource(current: () => BuddyConfig): void; onChange(): void };
+}
+
+/**
+ * A settings provider stand-in shaped like the real one: it records the
+ * registration and hands over a resolved source synchronously, exactly as
+ * `SettingsProvider.installSection` does.
+ * @param resolved - the settings value a user document resolves to.
+ * @param sections - sink the registration is recorded into.
+ * @returns the stand-in service value.
+ */
+function settingsStub(resolved: BuddyConfig, sections: InstalledSection[]): unknown {
+	return {
+		installSection: (
+			owner: unknown,
+			ns: string,
+			schema: unknown,
+			entry: unknown,
+			hooks: InstalledSection["hooks"],
+		): void => {
+			sections.push({ owner, ns, schema, entry, hooks });
+			hooks.setSource(() => resolved);
+			hooks.onChange();
+		},
+	};
+}
+
+test("a home set through the settings plane is the home the store boots on", async () => {
+	const scratch = scratchHome();
+	const ctx = new Context();
+	const handle = handleStub();
+	const userHome = join(scratch.home, "somewhere-else");
+	const sections: InstalledSection[] = [];
+	try {
+		ctx.provide("settings", settingsStub({ home: userHome }, sections));
+		ctx.provide("storageDomain", {
+			open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+			get: () => undefined,
+		});
+		ctx.plugin(storeRow);
+		await until(() => ctx.get("buddyStore") !== undefined);
+
+		// The whole point of the section: without the barrier the boot reads
+		// `readConfig` before the scoped injection has swapped it, and the
+		// user's `buddy.home` is silently replaced by the default.
+		const store = ctx.get("buddyStore") as BuddyStore;
+		assert.equal(store.paths.home, userHome);
+		assert.equal(store.paths.soul, join(userHome, "SOUL.md"));
+		assert.equal(existsSync(userHome), true, "the configured home must be created");
+		assert.notEqual(store.paths.home, join(scratch.home, "buddy"));
+
+		// The registration itself, so a wrong namespace or a placeholder schema
+		// cannot pass: the settings document addresses this section by name.
+		assert.equal(sections.length, 1);
+		const section = sections[0] as InstalledSection;
+		assert.equal(section.ns, SETTINGS_NAMESPACE);
+		assert.equal(section.ns, "buddy");
+		assert.equal(section.schema, Config);
+	} finally {
+		scratch.restore();
+	}
+});
+
+test("the composition entry is the fallback config, so a settings detach stays usable", async () => {
+	const scratch = scratchHome();
+	const ctx = new Context();
+	const handle = handleStub();
+	const sections: InstalledSection[] = [];
+	try {
+		ctx.provide("settings", settingsStub({ home: "" }, sections));
+		ctx.provide("storageDomain", {
+			open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+			get: () => undefined,
+		});
+		ctx.plugin(storeRow);
+		await until(() => ctx.get("buddyStore") !== undefined);
+
+		const section = sections[0] as InstalledSection;
+		// dsh-settings replays `entry` *raw* — never resolved by the schema —
+		// through `setSource(() => entry)` when the provider detaches. `{}` there
+		// makes `readConfig().home` `undefined` and `resolveBuddyPaths` throw on
+		// `.trim()`, so the entry must already be a complete config.
+		assert.equal(section.entry, FALLBACK_CONFIG);
+		assert.doesNotThrow(() => resolveBuddyPaths((section.entry as BuddyConfig).home));
+	} finally {
+		scratch.restore();
+	}
+});
+
+test("a dispose that lands mid-boot still closes the opened domain", async () => {
+	const scratch = scratchHome();
+	const ctx = new Context();
+	const handle = handleStub();
+	const logged: string[] = [];
+	const previousError = console.error;
+	console.error = (message: unknown) => {
+		logged.push(String(message));
+	};
+	let opening = false;
+	let releaseOpen: () => void = () => undefined;
+	const openHeld = new Promise<void>((resolve) => {
+		releaseOpen = () => resolve();
+	});
+	try {
+		const fiber = ctx.plugin(storeRow);
+		ctx.provide("storageDomain", {
+			open: async () => {
+				opening = true;
+				await openHeld;
+				return { name: "buddy", global: handle.global, close: handle.close };
+			},
+			get: () => undefined,
+		});
+		await until(() => opening);
+
+		// Dispose while `openStore` is still in flight — a storageDomain reload,
+		// a profile switch, a hot reload. The domain handle does not exist yet,
+		// so a disposer that captured it would be a no-op and the unit the
+		// caller owns would stay open until the whole facility unmounted.
+		const disposal = fiber.dispose();
+		await settle();
+		assert.equal(handle.closed, false, "nothing to close before the open resolves");
+		releaseOpen();
+		await disposal;
+
+		assert.equal(handle.closed, true, "a domain opened during a disposing boot must still be closed");
+		assert.equal(ctx.get("buddyStore"), undefined);
+		// The boot that lost its fiber says so once and then stops; it must not
+		// keep running past the disposal and log again later.
+		const afterDisposal = logged.length;
+		await settle();
+		assert.equal(logged.length, afterDisposal);
+	} finally {
+		console.error = previousError;
 		scratch.restore();
 	}
 });
