@@ -77,9 +77,52 @@ function personaRowConfigs(source: string): RowConfig[] {
 	return configs;
 }
 
+/** The persona package's own npm name. Cannot appear in the composition's YAML content except as a `name:` value — the one place it appears in this file's prose (the "identity" section's comment) is excluded before counting, below. */
+const PERSONA_PACKAGE_NAME = "@deepseek-ai/dsh-persona";
+
+/**
+ * Count occurrences of {@link PERSONA_PACKAGE_NAME} in the file's non-comment
+ * lines, by plain substring search — format-agnostic on purpose, unlike
+ * {@link personaRowConfigs}'s exact-shape row matching.
+ *
+ * This exists to close the gap that a purely structural extractor leaves
+ * open: `personaRowConfigs` only ever recognises rows in the one shape it
+ * parses, so a second persona row added in an unrecognised shape (double
+ * quotes, a flow mapping, extra spacing) is invisible to it — it contributes
+ * nothing to `personaRowConfigs`'s result, so a naive "exactly one row"
+ * assertion against that result alone stays green while the file actually
+ * carries two rows the real loader will both mount. A plain, format-blind
+ * substring count cannot be fooled by a quoting or spacing change the same
+ * way, because it does not parse structure at all — it only requires that
+ * the exact package name string is present. Comparing the two counts is what
+ * catches "recognised-shape count disagrees with raw-text count", which is
+ * exactly the signature of an unrecognised-but-present row.
+ *
+ * Comment lines are excluded (a line whose trimmed content starts with `#`)
+ * because this composition's own "identity" section comment names
+ * `@deepseek-ai/dsh-persona` in prose — counting that occurrence would make
+ * even the correct, single-row file disagree with the structured count.
+ * Excluding comments does not reopen the gap this function exists to close:
+ * a name mentioned only in a comment registers no row with the real loader
+ * either, so correctly not counting it costs nothing.
+ */
+function personaPackageNameOccurrences(source: string): number {
+	const codeOnly = source
+		.split("\n")
+		.filter((line) => !line.trim().startsWith("#"))
+		.join("\n");
+	return codeOnly.split(PERSONA_PACKAGE_NAME).length - 1;
+}
+
 test("the frozen buddy preset carries exactly one dsh-persona row, prefix-only and referencing buddySoul", () => {
 	const source = readFileSync(PRESET_PATH, "utf8");
 	const personaRows = personaRowConfigs(source);
+	const rawOccurrences = personaPackageNameOccurrences(source);
+	assert.equal(
+		rawOccurrences,
+		personaRows.length,
+		`found ${String(rawOccurrences)} occurrence(s) of "${PERSONA_PACKAGE_NAME}" outside comments, but the structured extractor recognised only ${String(personaRows.length)} row(s) — a persona row exists in a shape the extractor cannot parse`,
+	);
 	assert.equal(personaRows.length, 1, `expected exactly one @deepseek-ai/dsh-persona row, found ${String(personaRows.length)}`);
 	assert.deepEqual(personaRows[0], { prefix: "{{buddySoul}}" });
 });
