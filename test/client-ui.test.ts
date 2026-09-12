@@ -30,8 +30,6 @@ import { createCall } from "../src/client/call.ts";
 interface ClientPlugin {
 	readonly inject: string[];
 	apply(ctx: unknown): void;
-	/** Re-exported shared constant; see `src/client/index.tsx`. */
-	readonly MAIN_PANEL_KEY: string;
 }
 
 /** A `settings.section` registration, as the slot service receives it. */
@@ -66,43 +64,84 @@ interface Recorded {
 	readonly dictionaries: Dictionary[];
 }
 
+/** The connection service's RPC client, as the browser half uses it. */
+interface RpcStub {
+	call(route: string, endpoint: string, payload: unknown): Promise<unknown>;
+}
+
 /** The built bundle, as text. */
 async function bundleText(): Promise<string> {
 	return await readFile(new URL("../lib/client.js", import.meta.url), "utf8");
 }
 
-/** The bundle is evaluated once; `require` caches it, so the factory result is memoized here. */
-let loaded: ClientPlugin | undefined;
+/**
+ * `src/client/index.tsx` as **text**.
+ *
+ * Read, never imported: no test in this plan may import a `.tsx` module because
+ * Node's type stripping does not handle JSX — but reading one as a string is not
+ * importing it, and it is the only way to assert on a source-level property
+ * (which constant a module takes from where) that bundling erases.
+ * @returns the module source.
+ */
+async function clientSourceText(): Promise<string> {
+	return await readFile(new URL("../src/client/index.tsx", import.meta.url), "utf8");
+}
+
+/** What the bundle hands to `window.__ModuleLoader__.load`. */
+interface LoaderModule {
+	readonly id: string;
+	factory(resolve: (name: string) => unknown): unknown;
+}
+
+/** Node's `require`, used both to evaluate the bundle and as the default module resolver. */
+const nodeRequire = createRequire(import.meta.url);
+
+/** The bundle is evaluated once — `require` caches it — so the captured module is memoized. */
+let captured: LoaderModule | undefined;
 
 /**
- * Load `lib/client.js` the way the browser boot graph does.
- * @returns the plugin object the bundle's factory returns.
+ * Evaluate `lib/client.js` the way the browser boot graph does and capture its module.
+ * @returns the `{ id, factory }` the bundle registered.
  */
-function loadClient(): ClientPlugin {
-	if (loaded !== undefined) return loaded;
-	const require = createRequire(import.meta.url);
-	let captured: { id: string; factory: (resolve: (name: string) => unknown) => unknown } | undefined;
+function clientModule(): LoaderModule {
+	if (captured !== undefined) return captured;
+	let seen: LoaderModule | undefined;
 	(globalThis as unknown as { window: unknown }).window = {
 		__ModuleLoader__: {
-			load: (module: { id: string; factory: (resolve: (name: string) => unknown) => unknown }) => {
-				captured = module;
+			load: (module: LoaderModule) => {
+				seen = module;
 			},
 		},
 	};
-	require("../lib/client.js");
-	assert.ok(captured !== undefined, "the bundle must call window.__ModuleLoader__.load");
-	assert.equal(captured.id, "dsh-buddy", "the module id must match the package name");
-	loaded = captured.factory((name: string) => require(name)) as ClientPlugin;
-	return loaded;
+	nodeRequire("../lib/client.js");
+	assert.ok(seen !== undefined, "the bundle must call window.__ModuleLoader__.load");
+	assert.equal(seen.id, "dsh-buddy", "the module id must match the package name");
+	captured = seen;
+	return captured;
+}
+
+/**
+ * Instantiate the browser plugin from the built artifact.
+ *
+ * The factory is re-run per call with its own `module.exports`, so a test may
+ * supply its own resolver — that is how the React tab below is rendered without
+ * a renderer dependency.
+ * @param resolve - module resolver handed to the bundle's `require`.
+ * @returns the plugin object the bundle's factory returns.
+ */
+function loadClient(resolve: (name: string) => unknown = (name) => nodeRequire(name)): ClientPlugin {
+	return clientModule().factory(resolve) as ClientPlugin;
 }
 
 /**
  * A browser-side context stub that records every contribution.
- * @param options - `runSlotCallback: false` models a shell with no settings slot.
+ * @param options - `runSlotCallback: false` models a shell with no settings slot;
+ *   `rpc` replaces the connection service's RPC client.
  * @returns the stub context and its recordings.
  */
-function contextStub(options: { runSlotCallback?: boolean } = {}): Recorded {
+function contextStub(options: { runSlotCallback?: boolean; rpc?: RpcStub } = {}): Recorded {
 	const runSlotCallback = options.runSlotCallback ?? true;
+	const rpc = options.rpc ?? { call: async () => ({ ok: true, value: {} }) };
 	const registrations: Registration[] = [];
 	const injected: string[] = [];
 	const effects: string[] = [];
@@ -110,8 +149,7 @@ function contextStub(options: { runSlotCallback?: boolean } = {}): Recorded {
 	let depth = 0;
 
 	const ctx: Record<string, unknown> = {
-		get: (name: string) =>
-			name === "connection" ? { rpc: { call: async () => ({ ok: true, value: {} }) } } : undefined,
+		get: (name: string) => (name === "connection" ? { rpc } : undefined),
 		effect: (body: () => unknown, label: string) => {
 			effects.push(label);
 			depth += 1;
@@ -144,6 +182,189 @@ function contextStub(options: { runSlotCallback?: boolean } = {}): Recorded {
 		sessions: {},
 	};
 	return { ctx, registrations, injected, effects, dictionaries };
+}
+
+/** One hook's storage across renders. */
+interface HookCell {
+	value: unknown;
+	deps: readonly unknown[] | undefined;
+	initialised: boolean;
+}
+
+/** An element as the stub JSX runtime builds it. */
+interface StubElement {
+	readonly type: unknown;
+	readonly props: Record<string, unknown>;
+}
+
+/** A mounted component: its current tree, re-rendered on every state change. */
+interface Mounted {
+	/** Modules the bundle's `require` must resolve to reach these hooks. */
+	readonly modules: Record<string, unknown>;
+	/** Render the component for the first time. */
+	mount(component: () => unknown): void;
+	/** The element tree produced by the most recent render. */
+	tree(): unknown;
+}
+
+/**
+ * A renderer just large enough for this one component.
+ *
+ * The tab's save gate is a `disabled` prop computed from state the mount load
+ * sets, so proving it needs *some* renderer — and this repo deliberately has no
+ * `react-dom`. Rather than grow one as a dependency, the bundle's own `require`
+ * is pointed at these stubs: `useState` re-renders synchronously, `useCallback`
+ * and `useEffect` honour their dependency lists (without that the mount effect
+ * would re-fire forever), and the JSX runtime returns plain `{ type, props }`.
+ * @returns the stub modules and the mount handle.
+ */
+function createRenderer(): Mounted {
+	const cells: HookCell[] = [];
+	const pendingEffects: (() => unknown)[] = [];
+	let cursor = 0;
+	let renders = 0;
+	let component: (() => unknown) | undefined;
+	let tree: unknown;
+
+	const sameDeps = (previous: readonly unknown[] | undefined, next: readonly unknown[]): boolean =>
+		previous !== undefined && previous.length === next.length && previous.every((v, i) => Object.is(v, next[i]));
+
+	const cell = (): HookCell => {
+		const existing = cells[cursor];
+		const slot = existing ?? { value: undefined, deps: undefined, initialised: false };
+		if (existing === undefined) cells[cursor] = slot;
+		cursor += 1;
+		return slot;
+	};
+
+	const render = (): void => {
+		renders += 1;
+		// An internal liveness bound, not a tunable: a component that re-renders
+		// this many times without settling is looping, and a hung test is a worse
+		// failure than a loud one.
+		assert.ok(renders < 50, "the settings tab re-rendered without settling");
+		cursor = 0;
+		tree = (component as () => unknown)();
+		while (pendingEffects.length > 0) (pendingEffects.shift() as () => unknown)();
+	};
+
+	const react = {
+		useState: (initial: unknown): [unknown, (next: unknown) => void] => {
+			const slot = cell();
+			if (!slot.initialised) {
+				slot.initialised = true;
+				slot.value = typeof initial === "function" ? (initial as () => unknown)() : initial;
+			}
+			return [
+				slot.value,
+				(next: unknown) => {
+					slot.value = typeof next === "function" ? (next as (previous: unknown) => unknown)(slot.value) : next;
+					render();
+				},
+			];
+		},
+		useCallback: (fn: unknown, deps: readonly unknown[]): unknown => {
+			const slot = cell();
+			if (!sameDeps(slot.deps, deps)) {
+				slot.deps = deps;
+				slot.value = fn;
+			}
+			return slot.value;
+		},
+		useEffect: (fn: () => unknown, deps: readonly unknown[]): void => {
+			const slot = cell();
+			if (!sameDeps(slot.deps, deps)) {
+				slot.deps = deps;
+				pendingEffects.push(fn);
+			}
+		},
+	};
+
+	const jsx = (type: unknown, props: Record<string, unknown>): StubElement => ({ type, props });
+
+	return {
+		modules: { react, "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: Symbol.for("react.fragment") } },
+		mount(target: () => unknown): void {
+			component = target;
+			render();
+		},
+		tree: () => tree,
+	};
+}
+
+/**
+ * Every element in a rendered tree, depth first.
+ * @param node - a tree, an element, an array of children, or a leaf.
+ * @param found - accumulator.
+ * @returns the elements found.
+ */
+function elements(node: unknown, found: StubElement[] = []): StubElement[] {
+	if (Array.isArray(node)) {
+		for (const child of node) elements(child, found);
+		return found;
+	}
+	if (typeof node !== "object" || node === null) return found;
+	const element = node as Partial<StubElement>;
+	if (typeof element.props !== "object" || element.props === null) return found;
+	found.push(element as StubElement);
+	return elements(element.props["children"], found);
+}
+
+/** Let every pending promise chain settle. */
+async function settle(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/** One call the tab made through the connection service. */
+interface RecordedCall {
+	readonly route: string;
+	readonly endpoint: string;
+	readonly payload: unknown;
+}
+
+/** A mounted settings tab and what its RPC client saw. */
+interface MountedTab {
+	/** Every call the tab made, in order. */
+	readonly calls: RecordedCall[];
+	/** The element tree of the most recent render. */
+	tree(): unknown;
+	/** The save button of the most recent render. */
+	saveButton(): StubElement;
+}
+
+/**
+ * Mount the real settings tab: `apply` builds it, so the component under test is
+ * the registered one, wired to the plugin's own envelope unwrap.
+ * @param answer - the gateway envelope (or rejection) for each endpoint.
+ * @returns the mounted tab handle.
+ */
+function mountSettingsTab(answer: (endpoint: string) => Promise<unknown>): MountedTab {
+	const renderer = createRenderer();
+	const calls: RecordedCall[] = [];
+	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
+	const { ctx, registrations } = contextStub({
+		rpc: {
+			call: async (route: string, endpoint: string, payload: unknown) => {
+				calls.push({ route, endpoint, payload });
+				return await answer(endpoint);
+			},
+		},
+	});
+	client.apply(ctx);
+
+	const registration = registrations[0];
+	assert.ok(registration !== undefined, "the settings section must be registered");
+	renderer.mount(registration.component as () => unknown);
+
+	return {
+		calls,
+		tree: () => renderer.tree(),
+		saveButton(): StubElement {
+			const button = elements(renderer.tree()).find((element) => element.type === "button");
+			assert.ok(button !== undefined, "the tab must render a save button");
+			return button;
+		},
+	};
 }
 
 test("the browser half is wrapped in the module-loader factory", async () => {
@@ -219,13 +440,29 @@ test("both dictionaries are registered, as a reversible effect", () => {
 	}
 });
 
-test("the shared panel key is one constant, carried into the browser artifact", () => {
+test("the browser half takes the shared panel key from src/index.ts and never restates it", async () => {
 	assert.equal(MAIN_PANEL_KEY, "dsh-buddy");
-	// The sidebar list id and the main panel key are the same string; the browser
-	// half must take it from `src/index.ts` rather than restating it, or task 8's
-	// button and panel can drift apart. Reading it off the built artifact is what
-	// proves the import survived bundling.
-	assert.equal(loadClient().MAIN_PANEL_KEY, "dsh-buddy");
+
+	// The sidebar list id and the main panel key are the same string, so task 8's
+	// button and the panel it selects must read one constant or they can drift
+	// apart — and nothing catches that drift until `selectPanel` throws in a
+	// browser.
+	//
+	// "Imported rather than redeclared" is a property of the *source*: bundling
+	// inlines the value either way, so no assertion against `lib/client.js` can
+	// tell a hand-restated constant from the shared one. Hence the source text —
+	// read as a string, which is not importing a `.tsx` module.
+	const source = await clientSourceText();
+	assert.match(
+		source,
+		/import\s*\{[^}]*\bMAIN_PANEL_KEY\b[^}]*\}\s*from\s*"\.\.\/index\.ts"/,
+		"the browser half must import MAIN_PANEL_KEY from the shared constants module",
+	);
+	assert.doesNotMatch(
+		source,
+		/(?:const|let|var)\s+MAIN_PANEL_KEY/,
+		"the browser half must never declare its own MAIN_PANEL_KEY",
+	);
 });
 
 test("the RPC caller addresses the api route and unwraps the payload", async () => {
@@ -263,4 +500,71 @@ test("an envelope that is not a success throws even when it carries no error", a
 			`a ${JSON.stringify(answer) ?? "undefined"} answer must not resolve`,
 		);
 	}
+});
+
+test("a persona that failed to load cannot be saved back over the files", async () => {
+	// The drafts start empty and are filled by the mount load. If that load fails
+	// — a dead endpoint, a host error, exactly what the envelope unwrap exists to
+	// surface — saving would send `{ patch: { soul: "", agents: "" } }` and
+	// truncate SOUL.md and AGENTS.md. The host cannot refuse that: it drops
+	// non-string fields and `""` is a string, indistinguishable from a user who
+	// cleared both boxes on purpose. So the refusal has to happen here.
+	const tab = mountSettingsTab(async () => ({ ok: false, error: { code: "EIO", message: "host is down" } }));
+	await settle();
+
+	assert.deepEqual(
+		tab.calls.map((call) => call.endpoint),
+		["buddyPersona/persona"],
+	);
+	const failure = elements(tab.tree()).find(
+		(element) => element.props["children"] === "buddyPersona/persona failed: EIO: host is down",
+	);
+	assert.ok(failure !== undefined, "the load failure must be shown, not swallowed");
+
+	const button = tab.saveButton();
+	assert.equal(button.props["disabled"], true, "save must be disabled until a load succeeds");
+
+	// `disabled` is a browser courtesy, not an invariant — the path itself must
+	// refuse too, or a stray click still truncates both files.
+	(button.props["onClick"] as () => void)();
+	await settle();
+	assert.deepEqual(
+		tab.calls.map((call) => call.endpoint),
+		["buddyPersona/persona"],
+		"no update may be produced by a tab that never loaded",
+	);
+});
+
+test("a loaded persona saves exactly the drafts the load produced", async () => {
+	const view = { soul: "a voice", agents: "some rules", home: "/home/buddy" };
+	const tab = mountSettingsTab(async (endpoint) =>
+		endpoint === "buddyPersona/persona"
+			? { ok: true, value: view }
+			: { ok: true, value: { ...view, lastWriteAt: "2026-09-12T00:00:00.000Z" } },
+	);
+
+	// Still in flight: the drafts are empty, so the gate must already hold.
+	assert.equal(tab.saveButton().props["disabled"], true, "save must be gated while the load is in flight");
+
+	await settle();
+	const button = tab.saveButton();
+	assert.equal(button.props["disabled"], false, "a loaded tab must be saveable, or the gate is just a dead button");
+
+	(button.props["onClick"] as () => void)();
+	// Synchronously after the click the write is in flight: no double submit.
+	assert.equal(tab.saveButton().props["disabled"], true, "save must be disabled while a write is in flight");
+
+	await settle();
+	assert.deepEqual(
+		tab.calls.map((call) => call.endpoint),
+		["buddyPersona/persona", "buddyPersona/updatePersona"],
+	);
+	// Proves the wiring too: `apply` hands the component the unwrapped caller,
+	// addressed at the gateway route with the endpoint's own `{ args }` body.
+	assert.deepEqual(tab.calls[1], {
+		route: "/api",
+		endpoint: "buddyPersona/updatePersona",
+		payload: { args: { patch: { soul: "a voice", agents: "some rules" } } },
+	});
+	assert.equal(tab.saveButton().props["disabled"], false, "the tab must be saveable again once the write settles");
 });

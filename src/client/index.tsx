@@ -10,19 +10,14 @@
  * module instead of being restated on either side.
  * @module dsh-buddy/client
  */
+// Imported, never restated: task 8's button and panel must address the same
+// string, and one shared constant is the only way they cannot drift. Nothing in
+// task 7 reads it yet, so esbuild drops it from the artifact — which is why the
+// "one constant" rule is pinned by a source-text assertion in
+// `test/client-ui.test.ts` rather than by anything read back off the bundle.
 import { MAIN_PANEL_KEY } from "../index.ts";
 import { createCall } from "./call.ts";
 import { createBuddySettingsSection } from "./settings.tsx";
-
-/**
- * The sidebar list id and the main panel key, re-exported.
- *
- * Re-exported rather than merely imported so the *built* artifact carries the
- * constant and a test can read it back: an import that silently stopped
- * resolving, or a key restated by hand on one of the two sides, is otherwise
- * invisible until the button is clicked in a browser and `selectPanel` throws.
- */
-export { MAIN_PANEL_KEY };
 
 /** Dictionary namespace owned by this plugin. */
 const NS = "settings.buddy";

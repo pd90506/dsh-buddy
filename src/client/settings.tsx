@@ -80,6 +80,17 @@ export function createBuddySettingsSection(deps: SettingsDeps): () => unknown {
 		}, [load]);
 
 		const save = async (): Promise<void> => {
+			// Never write before a successful load. `soul` and `agents` start empty,
+			// so a save attempted while the mount load is still in flight — or after
+			// it failed, which is exactly what the error banner above is reporting —
+			// would send `{ patch: { soul: "", agents: "" } }` and truncate both
+			// SOUL.md and AGENTS.md. The host cannot defend against that: its rule is
+			// to drop non-string fields, and `""` is a string, so "the user cleared
+			// this box" and "this box never loaded" look identical on the wire. Only
+			// this side knows which one it is, so the guard belongs here — on the
+			// button (`disabled`, below) and again on the path itself, because a
+			// disabled attribute is a browser courtesy, not an invariant.
+			if (view === undefined) return;
 			setBusy(true);
 			try {
 				const next = (await deps.call("buddyPersona/updatePersona", { patch: { soul, agents } })) as PersonaView;
@@ -115,7 +126,12 @@ export function createBuddySettingsSection(deps: SettingsDeps): () => unknown {
 				</section>
 
 				<div style={styles.row}>
-					<button style={styles.button} type="button" disabled={busy} onClick={() => void save()}>
+					<button
+						style={styles.button}
+						type="button"
+						disabled={busy || view === undefined}
+						onClick={() => void save()}
+					>
 						{deps.t("save")}
 					</button>
 					{view !== undefined && <span style={styles.hint}>{`${deps.t("homeLabel")} ${view.home}`}</span>}
