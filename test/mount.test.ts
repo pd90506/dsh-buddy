@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
@@ -58,6 +58,13 @@ interface MountOptions {
 interface Mounted {
 	/** The buddy home the settings plane handed over. */
 	readonly home: string;
+	/**
+	 * The throwaway `$DSH_HOME` this mount ran under, captured before it was
+	 * restored. The store row's boot installs the shipped preset under the
+	 * *harness* home (`dshHomePath()`), independent of `home` above, so a test
+	 * asserting on that install needs this path rather than `home`.
+	 */
+	readonly dshHome: string;
 	/** The `buddyPersona` service, or `undefined` while the row is waiting. */
 	persona(): ServiceProxy | undefined;
 	/** Every registered prompt variable, by name. */
@@ -120,100 +127,118 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 	const home = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-"));
 	if (options.soulOnDisk !== undefined) await writeFile(join(home, "SOUL.md"), options.soulOnDisk, "utf8");
 
-	const root = new Context() as unknown as Host;
-	const sections: string[] = [];
-	const contributions: unknown[] = [];
-	const variables = new Map<string, VariableProvider>();
-	const firstValues = new Map<string, string | undefined>();
-	let global: Record<string, unknown> = {};
+	// The store row's boot also installs the shipped preset under the *harness*
+	// home, resolved independently of `home` above via `dshHomePath()` reading
+	// `$DSH_HOME` at call time. Left unset, that call falls back to the real
+	// `~/.dsh`: on this machine Task 9 already populated
+	// `~/.dsh/.agent-presets/buddy/`, so the installer would silently return
+	// "kept" and the suite would look clean while still reaching outside
+	// itself; on a machine without that directory it would actually create
+	// files there. Every mount in this suite must be hermetic.
+	const previousDshHome = process.env["DSH_HOME"];
+	const dshHome = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-dsh-home-"));
+	process.env["DSH_HOME"] = dshHome;
 
-	const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
-		root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) });
-	};
-	const give = (ctx: unknown, key: string, value: unknown): void => {
-		(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
-	};
+	try {
+		const root = new Context() as unknown as Host;
+		const sections: string[] = [];
+		const contributions: unknown[] = [];
+		const variables = new Map<string, VariableProvider>();
+		const firstValues = new Map<string, string | undefined>();
+		let global: Record<string, unknown> = {};
 
-	sibling("fake-typert", (ctx) =>
-		give(ctx, "typert", {
-			register: (contribution: unknown) => {
-				contributions.push(contribution);
-				return () => undefined;
-			},
-		}),
-	);
-	sibling("fake-storage", (ctx) =>
-		give(ctx, "storageDomain", {
-			open: async () => ({
-				name: "buddy",
-				global: {
-					get: () => global,
-					set: async (next: Record<string, unknown>) => {
-						global = next;
+		const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
+			root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) });
+		};
+		const give = (ctx: unknown, key: string, value: unknown): void => {
+			(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
+		};
+
+		sibling("fake-typert", (ctx) =>
+			give(ctx, "typert", {
+				register: (contribution: unknown) => {
+					contributions.push(contribution);
+					return () => undefined;
+				},
+			}),
+		);
+		sibling("fake-storage", (ctx) =>
+			give(ctx, "storageDomain", {
+				open: async () => ({
+					name: "buddy",
+					global: {
+						get: () => global,
+						set: async (next: Record<string, unknown>) => {
+							global = next;
+						},
 					},
-				},
-				close: async () => undefined,
+					close: async () => undefined,
+				}),
+				get: () => undefined,
 			}),
-			get: () => undefined,
-		}),
-	);
-	sibling("fake-settings", (ctx) =>
-		give(ctx, "settings", {
-			installSection: (
-				_owner: unknown,
-				ns: string,
-				_schema: unknown,
-				_entry: unknown,
-				hooks: { setSource(source: () => { home: string }): void; onChange(): void },
-			) => {
-				sections.push(ns);
-				// `BuddyConfig` has exactly one field; emitting anything else here
-				// would let a row read a setting the schema does not have.
-				hooks.setSource(() => ({ home }));
-			},
-		}),
-	);
-
-	const systemPrompt = (): void =>
-		sibling("fake-system-prompt", (ctx) =>
-			give(ctx, "systemPrompt", {
-				variable: (varName: string, provider: VariableProvider) => {
-					variables.set(varName, provider);
-					// Snapshot the answer *at registration*, which is strictly
-					// before any asynchronous persona read can have landed.
-					firstValues.set(varName, provider({}));
-					return () => variables.delete(varName);
+		);
+		sibling("fake-settings", (ctx) =>
+			give(ctx, "settings", {
+				installSection: (
+					_owner: unknown,
+					ns: string,
+					_schema: unknown,
+					_entry: unknown,
+					hooks: { setSource(source: () => { home: string }): void; onChange(): void },
+				) => {
+					sections.push(ns);
+					// `BuddyConfig` has exactly one field; emitting anything else here
+					// would let a row read a setting the schema does not have.
+					hooks.setSource(() => ({ home }));
 				},
 			}),
 		);
-	if (options.withSystemPrompt !== false) systemPrompt();
 
-	if (options.withSessionQuery !== false) {
-		sibling("fake-session-query", (ctx) =>
-			give(ctx, "sessionQuery", {
-				listSessions: async (): Promise<readonly SessionStub[]> => options.sessions ?? [],
-				readTitle: async (sessionId: string) => options.titles?.[sessionId],
-			}),
-		);
+		const systemPrompt = (): void =>
+			sibling("fake-system-prompt", (ctx) =>
+				give(ctx, "systemPrompt", {
+					variable: (varName: string, provider: VariableProvider) => {
+						variables.set(varName, provider);
+						// Snapshot the answer *at registration*, which is strictly
+						// before any asynchronous persona read can have landed.
+						firstValues.set(varName, provider({}));
+						return () => variables.delete(varName);
+					},
+				}),
+			);
+		if (options.withSystemPrompt !== false) systemPrompt();
+
+		if (options.withSessionQuery !== false) {
+			sibling("fake-session-query", (ctx) =>
+				give(ctx, "sessionQuery", {
+					listSessions: async (): Promise<readonly SessionStub[]> => options.sessions ?? [],
+					readTitle: async (sessionId: string) => options.titles?.[sessionId],
+				}),
+			);
+		}
+
+		// Spread rather than passing the module namespace: namespace objects are
+		// sealed, and cordis annotates the plugin object it is handed.
+		const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): void => {
+			root.plugin({ name: row.name, inject: row.inject, apply: row.apply });
+		};
+		mountRow(storeRow as never);
+		mountRow(personaRow as never);
+		await settle();
+		return {
+			home,
+			dshHome,
+			persona: () => root.get("buddyPersona") as ServiceProxy | undefined,
+			variables,
+			firstValues,
+			sections,
+			contributions,
+			provideSystemPrompt: systemPrompt,
+		};
+	} finally {
+		if (previousDshHome === undefined) delete process.env["DSH_HOME"];
+		else process.env["DSH_HOME"] = previousDshHome;
 	}
-
-	// Spread rather than passing the module namespace: namespace objects are
-	// sealed, and cordis annotates the plugin object it is handed.
-	const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): void => {
-		root.plugin({ name: row.name, inject: row.inject, apply: row.apply });
-	};
-	mountRow(storeRow as never);
-	mountRow(personaRow as never);
-	await settle();
-	return {
-		home,
-		persona: () => root.get("buddyPersona") as ServiceProxy | undefined,
-		variables,
-		firstValues,
-		sections,
-		contributions,
-		provideSystemPrompt: systemPrompt,
-	};
 }
 
 test("the persona row names itself and declares its three hard dependencies", () => {
@@ -237,6 +262,20 @@ test("both rows mount and publish their services", async () => {
 test("the store installs its settings section", async () => {
 	const { sections } = await mount();
 	assert.deepEqual(sections, ["buddy"]);
+});
+
+test("mounting the store row for real installs the shipped preset under the harness home", async () => {
+	// This exercises `resolveTemplateDir` exactly as production does: the row
+	// runs from `src/store/index.ts` here (same as it would from the built
+	// `lib/store.js`), and a template path that silently didn't exist would be
+	// swallowed by the boot's own `.catch` — passing this suite while never
+	// actually installing anything. Reading the files back through the
+	// filesystem, rather than trusting an in-memory return value, is what
+	// would catch that regression.
+	const { dshHome } = await mount();
+	const presetDir = join(dshHome, ".agent-presets", "buddy");
+	assert.deepEqual((await readdir(presetDir)).sort(), ["agent.cordis.yml", "preset.yml"]);
+	assert.equal(await readFile(join(presetDir, "preset.yml"), "utf8"), await readFile(join("assets", "preset", "preset.yml"), "utf8"));
 });
 
 test("the row puts exactly one typert contribution on the wire", async () => {

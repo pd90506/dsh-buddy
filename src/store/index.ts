@@ -12,11 +12,13 @@
  * @module dsh-buddy/store
  */
 import { mkdir } from "node:fs/promises";
+import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { Service } from "@deepseek-ai/cordis";
 import type { Context } from "@deepseek-ai/cordis";
 import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../config.ts";
 import { resolveBuddyPaths, type BuddyPaths } from "../paths.ts";
 import { openStore, type BuddyDomainHandle } from "./domain.ts";
+import { installPreset, presetTargetDir, resolveTemplateDir } from "./preset.ts";
 
 declare module "@deepseek-ai/cordis" {
 	interface Context {
@@ -214,6 +216,19 @@ export function apply(ctx: PluginContext): void {
 			const opened = handle;
 			const paths = resolveBuddyPaths(readConfig().home);
 			await mkdir(paths.home, { recursive: true });
+			// The preset root follows the harness home (`dshHomePath()`), not the
+			// buddy home resolved above: it is the harness that reads authored
+			// presets, and a relocated buddy home must not hide the preset from it.
+			// `resolveTemplateDir` — not a raw relative expression off
+			// `import.meta.url` — because that expression lands one directory
+			// shallower from the built `lib/store.js` than it does from
+			// `src/store/index.ts`, which every test imports directly.
+			const templateDir = resolveTemplateDir(import.meta.url);
+			await installPreset(presetTargetDir(dshHomePath()), templateDir).catch((error: unknown) => {
+				// A missing preset degrades the product but must not stop the store:
+				// the panel, the settings tab and the endpoints all still work.
+				console.error(`dsh-buddy-store: preset install skipped: ${(error as Error).message}`);
+			});
 			new BuddyStore(ctx as unknown as Context, paths, opened);
 			return () => {
 				void opened.close().catch(() => undefined);
