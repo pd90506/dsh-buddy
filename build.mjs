@@ -46,3 +46,35 @@ for (const [entry, outfile] of hostEntries) {
 		logLevel: "info",
 	});
 }
+
+/**
+ * The `__ModuleLoader__` envelope.
+ *
+ * The CJS body esbuild emits lands *inside* the factory, so the `require` it
+ * calls for the externals is the factory's own parameter — the loader's resolver
+ * for platform seeds — and `module`/`exports` are function-local. Nothing but
+ * the single `load(...)` call is left at the top level of the artifact.
+ */
+const banner = `window.__ModuleLoader__.load({
+	id: "dsh-buddy",
+	factory: (require) => {
+		var module = { exports: {} };
+		var exports = module.exports;`;
+
+const footer = `		return module.exports;
+	}
+});`;
+
+await build({
+	entryPoints: ["src/client/index.tsx"],
+	outfile: "lib/client.js",
+	bundle: true,
+	format: "cjs",
+	platform: "browser",
+	target: "es2022",
+	jsx: "automatic",
+	external: ["react", "react/jsx-runtime"],
+	banner: { js: banner },
+	footer: { js: footer },
+	logLevel: "info",
+});
