@@ -41,11 +41,14 @@ function handleStub(initial: BuddyGlobal = {}): HandleStub {
  * Spin the event loop until `predicate` holds, so a test never depends on a
  * fixed sleep for cordis's asynchronous activation.
  * @param predicate - the condition to wait for.
+ * @param attempts - how many 5ms polls to spend before giving up; raise it only
+ * for a wait that is legitimately longer than a second, such as one gated by an
+ * internal liveness bound.
  * @returns resolution once it holds.
  * @throws when it never holds.
  */
-async function until(predicate: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 200; attempt += 1) {
+async function until(predicate: () => boolean, attempts = 200): Promise<void> {
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
 		if (predicate()) return;
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
@@ -288,6 +291,75 @@ test(
 			assert.equal(existsSync(store.paths.home), true, "the default home must exist after boot");
 
 			// And disposal completes rather than hanging on the same barrier.
+			await fiber.dispose();
+			await until(() => handle.closed);
+			assert.equal(ctx.get("buddyStore"), undefined);
+		} finally {
+			console.error = previousError;
+			scratch.restore();
+		}
+	},
+);
+
+test(
+	"a settings plane whose scoped injection never fires still boots the row and disposes it",
+	{ timeout: 10_000 },
+	async () => {
+		const scratch = scratchHome();
+		const ctx = new Context();
+		const handle = handleStub();
+		const logged: string[] = [];
+		const previousError = console.error;
+		console.error = (message: unknown) => {
+			logged.push(String(message));
+		};
+		try {
+			// `settings` is genuinely mounted, so `ctx.get("settings")` reports
+			// it and the boot takes the waiting branch.
+			ctx.provide("settings", settingsStub({ home: join(scratch.home, "never-delivered") }, []));
+			ctx.provide("storageDomain", {
+				open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+				get: () => undefined,
+			});
+
+			// But its scoped injection never runs. That is the withdrawal
+			// window: `settings` disappears between the effect body's
+			// `ctx.get("settings")` check and the scoped fiber's activation, so
+			// no callback ever executes and there is nothing for the barrier's
+			// `finally` to run in. A scoped fiber that never activates is
+			// indistinguishable — from this row — from an `inject` that never
+			// calls back, which is what the wrapper below installs. Without the
+			// bounded race the boot and `fiber.dispose()` both hang forever.
+			const withdrawnSettings = {
+				inject: ["storageDomain"],
+				apply: (inner: Context): void => {
+					const silenced = new Proxy(inner, {
+						get: (target, property) => {
+							if (property === "inject") return (): void => undefined;
+							const value = Reflect.get(target, property, target) as unknown;
+							return typeof value === "function" ? value.bind(target) : value;
+						},
+					});
+					(row.apply as unknown as (context: unknown) => void)(silenced);
+				},
+			} as unknown as Plugin;
+			const fiber = ctx.plugin(withdrawnSettings);
+
+			// The bound fires and the row boots on the documented default home
+			// — exactly the pre-barrier behaviour, never a hang. `until` is
+			// given room for the bound itself (200 polls is only 1s).
+			await until(() => ctx.get("buddyStore") !== undefined, 1_000);
+			const store = ctx.get("buddyStore") as BuddyStore;
+			assert.equal(store.paths.home, join(scratch.home, "buddy"));
+			assert.equal(existsSync(store.paths.home), true, "the default home must exist after boot");
+
+			// A degraded boot must be visible, not silent, and it uses the same
+			// log path as a boot failure.
+			assert.equal(logged.length, 1);
+			assert.match(logged[0] ?? "", /dsh-buddy-store: the settings plane did not supply its configuration within \d+ms/);
+
+			// And disposal resolves: cordis awaits the pending effect task
+			// first, so a boot that cannot finish is a fiber that cannot unload.
 			await fiber.dispose();
 			await until(() => handle.closed);
 			assert.equal(ctx.get("buddyStore"), undefined);

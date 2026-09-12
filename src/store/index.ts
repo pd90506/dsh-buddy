@@ -24,6 +24,28 @@ declare module "@deepseek-ai/cordis" {
 	}
 }
 
+/**
+ * How long the boot waits for the settings plane to hand over its configuration
+ * source before giving up and booting on the documented defaults.
+ *
+ * This is an **internal liveness bound, not a user-facing tunable**: it belongs
+ * to neither `Config` nor the settings tab, and no profile should ever be able
+ * to raise it. Its only job is to guarantee that the row — and therefore
+ * `fiber.dispose()`, which cordis cannot run until the pending effect task
+ * settles — always terminates, even when the scoped `settings` injection never
+ * fires at all (the service is withdrawn between the check below and the scoped
+ * fiber's activation, so there is no callback for a `finally` to run in).
+ *
+ * The value is three orders of magnitude above what the wait actually costs:
+ * `installSection` lands through a microtask chain, i.e. sub-millisecond, and
+ * the barrier is released in a `finally` even when it throws. Two seconds of
+ * headroom therefore cannot be consumed by a merely busy event loop, while
+ * still bounding the worst case well below anything a user would read as a
+ * hung plugin. Firing is not a failure: it degrades to the pre-barrier
+ * behaviour — boot on the default home — and says so in the log.
+ */
+const SETTINGS_SOURCE_TIMEOUT_MS = 2_000;
+
 /** Cordis plugin name used by loader diagnostics. */
 export const name = "dsh-buddy-store";
 
@@ -96,6 +118,28 @@ interface PluginContext {
 }
 
 /**
+ * Wait for the settings barrier, bounded by {@link SETTINGS_SOURCE_TIMEOUT_MS}.
+ *
+ * The timer is `unref`ed so a pending wait can never hold the process open, and
+ * cleared on the settled path so it can never fire after the boot moved on.
+ * @param settled - the barrier released once the configuration source is final.
+ * @returns `true` when the source settled in time, `false` when the bound fired.
+ */
+async function awaitSettingsSource(settled: Promise<void>): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const bounded = new Promise<boolean>((resolve) => {
+		timer = setTimeout(() => resolve(false), SETTINGS_SOURCE_TIMEOUT_MS);
+		// A liveness bound must not be a reason for the process to stay alive.
+		timer.unref();
+	});
+	try {
+		return await Promise.race([settled.then(() => true), bounded]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * Resolve configuration, open storage, and publish the service.
  * @param ctx - the plugin fiber's context.
  */
@@ -155,7 +199,17 @@ export function apply(ctx: PluginContext): void {
 		try {
 			// Only wait when a settings plane is really mounted: a profile
 			// without one must boot straight onto the documented defaults.
-			if (ctx.get("settings") !== undefined) await sourceSettled;
+			// The wait is *bounded*, because the barrier's `finally` only helps
+			// when the scoped callback runs at all: withdraw `settings` between
+			// this check and the scoped fiber's activation and nothing ever
+			// releases it, hanging the boot and the disposal with it. Losing
+			// the race costs the user's configured home for this run — the
+			// pre-barrier behaviour — and never the whole row.
+			if (ctx.get("settings") !== undefined && !(await awaitSettingsSource(sourceSettled))) {
+				console.error(
+					`dsh-buddy-store: the settings plane did not supply its configuration within ${SETTINGS_SOURCE_TIMEOUT_MS}ms; booting on the default home`,
+				);
+			}
 			handle = await openStore(ctx);
 			const opened = handle;
 			const paths = resolveBuddyPaths(readConfig().home);
