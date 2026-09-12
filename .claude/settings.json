@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/panda-nuc/repo/dsh-buddy/.claude/hooks/deny-broad-scans.sh",
+            "timeout": 10,
+            "statusMessage": "Checking scan scope"
+          }
+        ]
+      }
+    ]
+  }
+}
