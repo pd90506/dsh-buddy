@@ -412,6 +412,49 @@ test("the browser half injects slots, locale, connection, layout and sessions", 
 	assert.deepEqual(client.inject, ["slots", "locale", "connection", "layout", "sessions"]);
 });
 
+test("every cordis-injected service with a known declaring package is named in dsh.client.inject", async () => {
+	// A cordis `inject` entry is a hard dependency: Guard throws if the fiber's
+	// declared service has no provider loaded in the web shell. `dsh.client.inject`
+	// is this plugin's declaration of which client plugins the harness must load
+	// for that provider to exist — so every entry in `inject` needs a package here,
+	// or the plugin silently depends on some other plugin happening to be loaded.
+	//
+	// This is exactly the gap task 8 introduced and fixed: `sessions` was added to
+	// `inject` for the sidebar/main pair's `openSession`, but the package that
+	// declares `ctx.sessions` (found by reading its own
+	// `declare module '@deepseek-ai/cordis' { interface Context { sessions: ... } }`)
+	// was never added to the manifest.
+	const client = loadClient();
+	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+		dsh: { client: { inject: string[] } };
+	};
+	const declared = pkg.dsh.client.inject;
+
+	// One entry per cordis-injected service whose declaring package was
+	// confirmed by reading that package's own Context augmentation (see the
+	// task-8 fix report). `slots` is deliberately absent: `ctx.slots` is
+	// declared inside `@deepseek-ai/dsh-client-ui-renderer`'s types, which itself
+	// depends on `@deepseek-ai/dsh-client-ui-slots` for the `SlotRegistry` type —
+	// which of the two the manifest ought to name was not resolved, so asserting
+	// it here would either lock in a guess or silently pass either way.
+	const knownProviders: Record<string, string> = {
+		connection: "@deepseek-ai/dsh-client-connection",
+		locale: "@deepseek-ai/dsh-client-locale",
+		layout: "@deepseek-ai/dsh-client-ui-layout",
+		sessions: "@deepseek-ai/dsh-api-session-controller",
+	};
+
+	const asserted = client.inject.filter((service) => service in knownProviders);
+	assert.ok(asserted.length >= 3, "this assertion is vacuous unless it actually checks several known services");
+	for (const service of asserted) {
+		const provider = knownProviders[service] as string;
+		assert.ok(
+			declared.includes(provider),
+			`cordis inject "${service}" has no declaring package (${provider}) in dsh.client.inject`,
+		);
+	}
+});
+
 test("the settings tab registers into settings.section with a stable id, order and namespaced label", () => {
 	const client = loadClient();
 	const { ctx, registrations, injected } = contextStub();
