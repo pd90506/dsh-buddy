@@ -4,7 +4,7 @@
 
 **Goal:** Ship a walking skeleton of dsh-buddy: a left-sidebar button above Settings that takes over the centre panel with a working buddy conversation list, a Settings tab that edits a persona, and that persona genuinely reaching the model in buddy sessions only.
 
-**Architecture:** One repo, multiple cordis plugin rows, one bundle. Two host rows (`dsh-buddy/store` publishes `ctx.buddyStore`; `dsh-buddy/persona` publishes `ctx.buddyPersona`, registers the `buddySoul` prompt variable, and serves typert endpoints) plus one browser half declared through `dsh.client`, plus a `buddy` agent preset that references `{{buddySoul}}` through the shipped `@deepseek-ai/dsh-persona` row. Human/agent-authored content lives in plain files under the buddy home; derived state lives in the `buddy` storage domain.
+**Architecture:** One repo, multiple cordis plugin rows, one bundle. Two host rows (`dsh-buddy/store` publishes `ctx.buddyStore`; `dsh-buddy/persona` publishes `ctx.buddyPersona`, registers the `buddy_soul` prompt variable, and serves typert endpoints) plus one browser half declared through `dsh.client`, plus a `buddy` agent preset that references `{{buddy_soul}}` through the shipped `@deepseek-ai/dsh-persona` row. Human/agent-authored content lives in plain files under the buddy home; derived state lives in the `buddy` storage domain.
 
 **Tech Stack:** TypeScript compiled away by esbuild (DSH transforms nothing), `@deepseek-ai/cordis`, `@deepseek-ai/dsh-storage-domain`, `@deepseek-ai/dsh-home-paths`, `@deepseek-ai/schemastery`, React 19 (external), `node:test` + `node:assert/strict`.
 
@@ -21,8 +21,21 @@
 - **Never edit the shipped preset install.** `standard`, `minimal`, `ptc`, `cordis` under `@deepseek-ai/dsh-agent-presets/presets/` are read-only. Authored presets go to `~/.dsh/.agent-presets/<id>/`.
 - **Do not serialize live data.** Services, Sessions, Slots and their derivatives are never `JSON.stringify`d or deep-copied. Read only the leaf fields needed and build a small owned object.
 - Settings namespace: `buddy` (lowercase). Storage domain name: `buddy` (lowercase, per `UNIT_NAME_RE`).
-- Prompt variable name: `buddySoul`. Main panel key and sidebar list id: both exactly `dsh-buddy`.
+- Prompt variable name: `buddy_soul`. Main panel key and sidebar list id: both exactly `dsh-buddy`.
 - Node target `node22`; browser target `es2022`.
+
+> **Prompt variable name corrected in Task 11.** This plan, the spec, and eight
+> completed tasks originally pinned this value as the camelCase pairing of
+> `buddy` and a capitalized `Soul`, no separator. Real-harness boot in Task 11
+> failed there: `dsh-system-prompt`'s own `variable()` guard rejects any name
+> that does not match `VARIABLE_NAME = /^[a-z][a-z0-9_]*$/`
+> (`dsh-system-prompt/lib/index.js:58,295-296`), and camelCase fails that
+> regex. The value is `buddy_soul`; every occurrence below has been updated to
+> match, including the suggested commit message in Task 6's own instructions.
+> That does not rewrite the real Task 6 commit already in git history — it
+> still carries the old camelCase spelling verbatim in its message, since git
+> history is immutable and this rename only touches working-tree content and
+> documentation going forward.
 
 ---
 
@@ -78,7 +91,7 @@ dsh-buddy/
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
-  - `BUDDY_DOMAIN_NAME = 'buddy'`, `SETTINGS_NAMESPACE = 'buddy'`, `SOUL_VARIABLE = 'buddySoul'`, `MAIN_PANEL_KEY = 'dsh-buddy'` (from `src/index.ts`)
+  - `BUDDY_DOMAIN_NAME = 'buddy'`, `SETTINGS_NAMESPACE = 'buddy'`, `SOUL_VARIABLE = 'buddy_soul'`, `MAIN_PANEL_KEY = 'dsh-buddy'` (from `src/index.ts`)
   - `interface BuddyPaths { readonly home: string; readonly soul: string; readonly agents: string }`
   - `resolveBuddyPaths(configuredHome: string): BuddyPaths`
 
@@ -263,11 +276,11 @@ export const SETTINGS_NAMESPACE = "buddy";
 /**
  * The prompt variable the `buddy` agent preset interpolates.
  *
- * The preset's persona row carries the literal text `{{buddySoul}}`; this host
+ * The preset's persona row carries the literal text `{{buddy_soul}}`; this host
  * plugin registers the variable that fills it. Substituted values are NOT
  * scanned again by the renderer, so SOUL.md may contain `{{` freely.
  */
-export const SOUL_VARIABLE = "buddySoul";
+export const SOUL_VARIABLE = "buddy_soul";
 
 /**
  * The main-panel key AND the sidebar panel-list id.
@@ -1306,7 +1319,7 @@ git commit -m "feat: add the buddy persona typert endpoints"
 
 ---
 
-## Task 6: `dsh-buddy/persona` row and the `buddySoul` prompt variable
+## Task 6: `dsh-buddy/persona` row and the `buddy_soul` prompt variable
 
 **Files:**
 - Create: `src/persona/index.ts`
@@ -1439,7 +1452,7 @@ test("the store installs its settings section", async () => {
 	assert.deepEqual(sections, ["buddy"]);
 });
 
-test("the buddySoul prompt variable is registered and never returns undefined", async () => {
+test("the buddy_soul prompt variable is registered and never returns undefined", async () => {
 	const { variables } = await mount();
 	const provider = variables.get(SOUL_VARIABLE);
 	assert.notEqual(provider, undefined, "the persona row must register the prompt variable");
@@ -1465,7 +1478,7 @@ Expected: FAIL with `Cannot find module '../src/persona/index.ts'`.
  * Host row `dsh-buddy/persona`.
  *
  * It does three things: keeps the authored persona in memory so prompt assembly
- * never touches the disk, registers the `buddySoul` prompt variable the `buddy`
+ * never touches the disk, registers the `buddy_soul` prompt variable the `buddy`
  * agent preset interpolates, and serves the endpoints behind the panel and the
  * settings tab.
  *
@@ -1554,7 +1567,7 @@ export function apply(ctx: PluginContext): void {
 	});
 
 	// A variable rather than a section: inert until the buddy preset's persona
-	// row references `{{buddySoul}}`. The renderer does not re-scan substituted
+	// row references `{{buddy_soul}}`. The renderer does not re-scan substituted
 	// values, so a persona containing `{{` is carried through safely.
 	ctx.effect(() => {
 		const prompt = ctx.get("systemPrompt") as
@@ -1601,7 +1614,7 @@ Expected: `index.js  persona.js  store.js`; typecheck clean; all tests pass.
 
 ```bash
 git add src/persona/index.ts test/mount.test.ts build.mjs
-git commit -m "feat: add the buddy-persona row and the buddySoul prompt variable"
+git commit -m "feat: add the buddy-persona row and the buddy_soul prompt variable"
 ```
 
 ---
@@ -2152,7 +2165,7 @@ git commit -m "feat: add the dsh-buddy sidebar button, main panel and conversati
 - Modify: `package.json` (`files` must include `assets`)
 
 **Interfaces:**
-- Consumes: the `buddySoul` prompt variable (Task 6).
+- Consumes: the `buddy_soul` prompt variable (Task 6).
 - Produces: a mountable preset with id `buddy`, which stamps `SessionHeader.agentPreset === 'buddy'` on its sessions — the exact field Task 6's `listSessions` filters on; plus the shipped template `assets/preset/*`.
 
 **Why copy rather than author:** the composition skill warns that "a composition
@@ -2193,20 +2206,20 @@ Insert this as the **first** row, before every row copied from `standard`:
 # the deployment persona for this one session, which is exactly the boundary
 # that keeps Buddy's voice out of ordinary coding sessions.
 #
-# The prefix is a single reference to the `buddySoul` prompt variable, which the
+# The prefix is a single reference to the `buddy_soul` prompt variable, which the
 # host row `dsh-buddy/persona` registers from SOUL.md and AGENTS.md. The
 # renderer does not scan substituted values again, so a persona containing `{{`
 # is carried through verbatim — which matters because the agent will eventually
 # edit this file itself.
 #
 # If the dsh-buddy plugin is not installed, the variable is unregistered and
-# prompt assembly fails loudly with `unknown prompt variable "{{buddySoul}}"`.
+# prompt assembly fails loudly with `unknown prompt variable "{{buddy_soul}}"`.
 # That is the intended failure: a silent fallback would leave a session claiming
 # to be Buddy with none of Buddy's identity.
 - id: buddy-persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    prefix: '{{buddySoul}}'
+    prefix: '{{buddy_soul}}'
 ```
 
 - [ ] **Step 4: Mount-validate the preset**
@@ -2517,6 +2530,6 @@ git commit -m "fix: corrections from real-harness verification"
 - **Do not claim a step passed without running it.** Every "Expected:" line is a real assertion to observe.
 - **The browser half is a cordis plugin but not a patch row.** It reaches the boot graph through the package's `dsh.client` declaration; only the two host rows appear in `cordis.patch.yml`.
 - **No test file may import a `.tsx` module.** Node's type stripping does not handle JSX. Browser-half behaviour is asserted against the built `lib/client.js`, which also proves it compiles.
-- **The preset is inert until Task 11.** Task 9 writes it into the live user root while the plugin is not yet in the profile; a buddy session started in that window fails prompt assembly with `unknown prompt variable "{{buddySoul}}"`. That is the designed loud failure, not a bug — finish Task 11.
+- **The preset is inert until Task 11.** Task 9 writes it into the live user root while the plugin is not yet in the profile; a buddy session started in that window fails prompt assembly with `unknown prompt variable "{{buddy_soul}}"`. That is the designed loud failure, not a bug — finish Task 11.
 - **If `readTitle` is absent** from the live `sessionQuery` surface, Task 6's `listSessions` already degrades: the optional call is guarded and the summary falls back to an empty title, which the panel renders as "Untitled". Do not add a hard dependency on it.
 - **Phase 1 stops here.** Memory, skill curation, the scheduler, the board, and Telegram are later phases with their own plans. Do not start them because an interface looks ready.

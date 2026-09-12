@@ -26,20 +26,20 @@
 # the deployment persona for this one session, which is exactly the boundary
 # that keeps Buddy's voice out of ordinary coding sessions.
 #
-# The prefix is a single reference to the `buddySoul` prompt variable, which the
+# The prefix is a single reference to the `buddy_soul` prompt variable, which the
 # host row `dsh-buddy/persona` registers from SOUL.md and AGENTS.md. The
 # renderer does not scan substituted values again, so a persona containing `{{`
 # is carried through verbatim — which matters because the agent will eventually
 # edit this file itself.
 #
 # If the dsh-buddy plugin is not installed, the variable is unregistered and
-# prompt assembly fails loudly with `unknown prompt variable "{{buddySoul}}"`.
+# prompt assembly fails loudly with `unknown prompt variable "{{buddy_soul}}"`.
 # That is the intended failure: a silent fallback would leave a session claiming
 # to be Buddy with none of Buddy's identity.
 - id: buddy-persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    prefix: '{{buddySoul}}'
+    prefix: '{{buddy_soul}}'
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

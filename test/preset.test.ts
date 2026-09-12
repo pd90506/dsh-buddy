@@ -114,7 +114,7 @@ function personaPackageNameOccurrences(source: string): number {
 	return codeOnly.split(PERSONA_PACKAGE_NAME).length - 1;
 }
 
-test("the frozen buddy preset carries exactly one dsh-persona row, prefix-only and referencing buddySoul", () => {
+test("the frozen buddy preset carries exactly one dsh-persona row, prefix-only and referencing buddy_soul", () => {
 	const source = readFileSync(PRESET_PATH, "utf8");
 	const personaRows = personaRowConfigs(source);
 	const rawOccurrences = personaPackageNameOccurrences(source);
@@ -124,5 +124,5 @@ test("the frozen buddy preset carries exactly one dsh-persona row, prefix-only a
 		`found ${String(rawOccurrences)} occurrence(s) of "${PERSONA_PACKAGE_NAME}" outside comments, but the structured extractor recognised only ${String(personaRows.length)} row(s) — a persona row exists in a shape the extractor cannot parse`,
 	);
 	assert.equal(personaRows.length, 1, `expected exactly one @deepseek-ai/dsh-persona row, found ${String(personaRows.length)}`);
-	assert.deepEqual(personaRows[0], { prefix: "{{buddySoul}}" });
+	assert.deepEqual(personaRows[0], { prefix: "{{buddy_soul}}" });
 });

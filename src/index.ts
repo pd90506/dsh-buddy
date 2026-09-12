@@ -15,11 +15,11 @@ export const SETTINGS_NAMESPACE = "buddy";
 /**
  * The prompt variable the `buddy` agent preset interpolates.
  *
- * The preset's persona row carries the literal text `{{buddySoul}}`; this host
+ * The preset's persona row carries the literal text `{{buddy_soul}}`; this host
  * plugin registers the variable that fills it. Substituted values are NOT
  * scanned again by the renderer, so SOUL.md may contain `{{` freely.
  */
-export const SOUL_VARIABLE = "buddySoul";
+export const SOUL_VARIABLE = "buddy_soul";
 
 /**
  * The main-panel key AND the sidebar panel-list id.

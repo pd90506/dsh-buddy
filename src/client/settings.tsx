@@ -6,7 +6,7 @@
  * there is no credentials traffic — the persona is ordinary authored prose.
  *
  * The two documents are edited side by side but stay separate on disk, because
- * only SOUL.md reaches the prompt as `{{buddySoul}}`; merging them would put
+ * only SOUL.md reaches the prompt as `{{buddy_soul}}`; merging them would put
  * operating rules into the voice variable.
  * @module dsh-buddy/client/settings
  */

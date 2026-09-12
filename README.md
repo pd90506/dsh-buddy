@@ -10,10 +10,10 @@ Phase 1 is a walking skeleton, and it is **not finished**. Tasks 1–7 have land
 
 - the `buddy` settings section and the buddy home resolution (`<harness home>/buddy` by default);
 - the `dsh-buddy/store` row: the `buddy` storage domain, `ctx.buddyStore`;
-- the `dsh-buddy/persona` row: `SOUL.md` / `AGENTS.md` read-write, the `buddySoul` prompt variable, and the `buddyPersona/*` endpoints (`persona`, `updatePersona`, `sessions`);
+- the `dsh-buddy/persona` row: `SOUL.md` / `AGENTS.md` read-write, the `buddy_soul` prompt variable, and the `buddyPersona/*` endpoints (`persona`, `updatePersona`, `sessions`);
 - the browser half's **Settings → Buddy** tab, which edits both documents.
 
-Still to come: the sidebar button and the main panel it selects (Task 8), the `buddy` agent preset that actually references `{{buddySoul}}` (Tasks 9–10), and installation into a live profile with real-harness verification (Task 11).
+Still to come: the sidebar button and the main panel it selects (Task 8), the `buddy` agent preset that actually references `{{buddy_soul}}` (Tasks 9–10), and installation into a live profile with real-harness verification (Task 11).
 
 Until the preset exists, **the persona reaches no model**. The variable is registered and inert — which is the designed state, not a defect: a variable nobody references renders nowhere.
 
@@ -24,7 +24,7 @@ One package, three cordis plugins, one bundle.
 | Unit | Kind | Responsibility |
 | --- | --- | --- |
 | `dsh-buddy/store` | host row | Resolves the buddy home, opens the `buddy` storage domain, publishes `ctx.buddyStore`. Hard-injects `storageDomain`; reads `settings` through a scoped injection so it still boots without a settings plane. |
-| `dsh-buddy/persona` | host row | Holds the persona in memory, registers the `buddySoul` prompt variable, serves the `buddyPersona/*` typert endpoints. Hard-injects `buddyStore`, `typert`, `systemPrompt`; reads `sessionQuery` softly, per request. |
+| `dsh-buddy/persona` | host row | Holds the persona in memory, registers the `buddy_soul` prompt variable, serves the `buddyPersona/*` typert endpoints. Hard-injects `buddyStore`, `typert`, `systemPrompt`; reads `sessionQuery` softly, per request. |
 | `dsh-buddy/client` | browser half | The Settings tab today; the sidebar button and main panel next. Reaches the host only over `rpc.call('/api', 'buddyPersona/…')`. |
 
 The two host rows are inserted by `cordis.patch.yml` and are deliberately separate: each has its own effect scope, so a failure in one does not take the other down, and either can be disabled from a profile's own patch without touching code. The browser half is **not** a patch row — it reaches the boot graph through the package's `dsh.client` declaration.
@@ -39,7 +39,7 @@ Three planes, and the split is load-bearing:
 | Files under the buddy home | Prose a human or the agent authors | `SOUL.md` (voice), `AGENTS.md` (operating rules) |
 | Storage domain `buddy` | Derived state nothing can reconstruct | `lastPersonaWriteAt` |
 
-Authored content stays as ordinary Markdown on purpose: self-evolution edits it with plain file tools, and files stay greppable, diffable and backup-able. `SOUL.md` and `AGENTS.md` are two files rather than one because only the voice reaches the prompt variable — merging them would push operating rules into `{{buddySoul}}`.
+Authored content stays as ordinary Markdown on purpose: self-evolution edits it with plain file tools, and files stay greppable, diffable and backup-able. `SOUL.md` and `AGENTS.md` are two files rather than one because only the voice reaches the prompt variable — merging them would push operating rules into `{{buddy_soul}}`.
 
 ## Development
 

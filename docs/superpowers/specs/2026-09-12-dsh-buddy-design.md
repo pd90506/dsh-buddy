@@ -45,7 +45,7 @@
 | `ctx.systemPrompt.section({name, order, text})`，`text` 可为 `(ctx) => string` | `dsh-system-prompt/lib/types/index.d.ts:47-68` |
 | **人格行必须是 scope-only**：`dsh-system-prompt` 无条件注册 deployment persona，一个全局挂载的人格行会与它**冲突并响亮失败**；挂在 agent preset 里才会 shadow 掉它 | `$DSH/node_modules/@deepseek-ai/dsh-persona/lib/index.js:4-16` |
 | 官方 `@deepseek-ai/dsh-persona` 的 `prefix`/`suffix` 只接受**静态字符串**（`z.string()`） | `dsh-persona/lib/index.js:23-28` |
-| **但静态字符串不等于静态取值**：prompt 变量的 provider 在**每次 `assemble()` 都被重新调用**，所以 `prefix: '{{buddySoul}}'` 是动态的，改文件无需重载 | `dsh-system-prompt/lib/index.js:308-314` |
+| **但静态字符串不等于静态取值**：prompt 变量的 provider 在**每次 `assemble()` 都被重新调用**，所以 `prefix: '{{buddy_soul}}'` 是动态的，改文件无需重载 | `dsh-system-prompt/lib/index.js:308-314` |
 | 渲染器**不会二次扫描被替换进去的值**，`{{` 若无配对 `}}` 按字面散文处理 | `dsh-system-prompt/lib/index.js:106-107, 171-172` |
 | 同名 prompt 变量重复注册会抛错；错误信息提示按 agent 作用域注册可得每-agent 取值 | `dsh-system-prompt/lib/index.js:190` |
 | agent preset = 一个目录，含 `agent.cordis.yml`（行列表）+ `preset.yml`（`name`/`description`/`order`）；用户 preset 根目录为 `<dshHome>/.agent-presets/` | `dsh-agent-presets/lib/index.js:182,195`；`presets/minimal/` |
@@ -110,17 +110,24 @@ could change an agent's tools but never its identity"。
 
 | 半边 | 平面 | 职责 |
 |---|---|---|
-| `buddy-persona`（我们写） | host composition | `SOUL.md` / `AGENTS.md` 文件读写 + 设置页 typert 端点；发布 `ctx.buddyPersona`；注册 prompt **变量** `buddySoul`。**不注册任何 prompt section** |
-| `@deepseek-ai/dsh-persona`（官方现成） | 仅 `buddy` preset | preset 里一行 `prefix: '{{buddySoul}}'` |
+| `buddy-persona`（我们写） | host composition | `SOUL.md` / `AGENTS.md` 文件读写 + 设置页 typert 端点；发布 `ctx.buddyPersona`；注册 prompt **变量** `buddy_soul`。**不注册任何 prompt section** |
+| `@deepseek-ai/dsh-persona`（官方现成） | 仅 `buddy` preset | preset 里一行 `prefix: '{{buddy_soul}}'` |
+
+> **prompt 变量名已在 Task 11 订正。** 本文档与已完成的八个任务原先都把这个值钉死为驼峰形式——
+> `buddy` 与首字母大写的 `Soul` 直接拼接，中间没有分隔符。真实 harness 装配时才发现
+> `dsh-system-prompt` 自己的 `VARIABLE_NAME` 校验正则 `/^[a-z][a-z0-9_]*$/`
+> （`dsh-system-prompt/lib/index.js:58`）会拒绝任何驼峰名，装配直接抛出「invalid prompt
+> variable name」并报出那个确切的驼峰字符串，整个 harness 起不来。现在的值是 `buddy_soul`；
+> 不要因为看到旧文档或旧任务记录就把它改回驼峰。
 
 **为什么不自写 preset-only 行**（评审中一度提出，核实源码后否决）：否决理由曾是「`prefix` 是静态
 字符串，改了 `SOUL.md` 必须重载才生效」。这个结论不成立——变量 provider 在**每次 `assemble()` 都会
-被重新调用**（`dsh-system-prompt/lib/index.js:308-314`），所以 `'{{buddySoul}}'` 这个静态字符串
+被重新调用**（`dsh-system-prompt/lib/index.js:308-314`），所以 `'{{buddy_soul}}'` 这个静态字符串
 承载的是动态取值，保存即生效。既然官方行已经满足需求，自写行只会多出一个子路径导出、一套测试，
 并且要自行重现 dsh-persona 规避 deployment persona 冲突的那套处理。
 
 **变量而非 section，是一道结构性隔离**：变量在被引用前完全惰性。人格只出现在 buddy preset 的
-那一行 `{{buddySoul}}` 里，所以它**在结构上**到不了普通编码会话——这比「注册时挑对 scope」更难写错。
+那一行 `{{buddy_soul}}` 里，所以它**在结构上**到不了普通编码会话——这比「注册时挑对 scope」更难写错。
 
 **为什么人格文本可以放心含 `{{`**：渲染器不会二次扫描被替换进去的值
 （`dsh-system-prompt/lib/index.js:106-107, 171-172`）。这对一个**将来由 Agent 自己编辑**的文件是硬要求。
@@ -155,9 +162,9 @@ Settings → dsh-buddy 标签页写 persona
    ↓ typert 端点
 buddy-persona 写 $DSH_HOME/buddy/SOUL.md
    ↓
-buddy-persona 注册 prompt 变量 buddySoul（provider 每次 assemble 重调）
+buddy-persona 注册 prompt 变量 buddy_soul（provider 每次 assemble 重调）
    ↓
-buddy preset 的 @deepseek-ai/dsh-persona 行：prefix: '{{buddySoul}}'
+buddy preset 的 @deepseek-ai/dsh-persona 行：prefix: '{{buddy_soul}}'
    ↓
 新建 buddy 会话，模型语气真的变了            ← 可验收
 ```
@@ -280,8 +287,8 @@ domain 名须小写（`UNIT_NAME_RE`）。
 | 存储数据 schema 漂移 | 响亮失败（`invalid-record`），不静默吞掉 |
 | `SOUL.md` 不存在 | 回落到内置默认人格文本。**绝不返回空串**：空 `prefix` 会把 deployment persona 遮蔽掉却不放任何东西进去，得到一个没有任何身份的会话 |
 | `SOUL.md` 读取失败 | 同上回落到默认人格，不抛出。人格损坏绝不能阻止会话启动 |
-| `buddySoul` provider 返回 `undefined` | 不允许发生。渲染器对「被引用但本次装配无取值」的变量直接抛错，会打挂每一个 buddy 会话 |
-| dsh-buddy 未安装但 `buddy` preset 仍在 | 装配以 `unknown prompt variable "{{buddySoul}}"` 响亮失败。**这是期望行为**：静默回落会得到一个自称 Buddy 却没有 Buddy 身份的会话 |
+| `buddy_soul` provider 返回 `undefined` | 不允许发生。渲染器对「被引用但本次装配无取值」的变量直接抛错，会打挂每一个 buddy 会话 |
+| dsh-buddy 未安装但 `buddy` preset 仍在 | 装配以 `unknown prompt variable "{{buddy_soul}}"` 响亮失败。**这是期望行为**：静默回落会得到一个自称 Buddy 却没有 Buddy 身份的会话 |
 | 面板注册失败 | 按钮同时不注册 —— 二者同生同死 |
 | `buddy` preset 目录已存在 | **一律不覆盖**，只记一条日志（用户可能已手改） |
 | 技能写入前快照失败 | 拒绝写入（快照是写入的前置条件，不是尽力而为） |

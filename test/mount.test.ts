@@ -246,7 +246,7 @@ test("the persona row names itself and declares its three hard dependencies", ()
 	// `systemPrompt` is hard, not soft: cordis's `get` is strict and answers
 	// `undefined` unless the providing fiber is already active, so a row that
 	// merely `get`s it at boot would register no variable at all — and every
-	// buddy session would then fail assembly on `{{buddySoul}}`. Carrying the
+	// buddy session would then fail assembly on `{{buddy_soul}}`. Carrying the
 	// persona to the model is this row's entire purpose.
 	assert.deepEqual(personaRow.inject, ["buddyStore", "typert", "systemPrompt"]);
 });
@@ -286,7 +286,7 @@ test("the row puts exactly one typert contribution on the wire", async () => {
 	assert.equal(contributions.length, 1);
 });
 
-test("the buddySoul prompt variable is registered and never returns undefined", async () => {
+test("the buddy_soul prompt variable is registered and never returns undefined", async () => {
 	const { variables } = await mount();
 	const provider = variables.get(SOUL_VARIABLE);
 	assert.notEqual(provider, undefined, "the persona row must register the prompt variable");

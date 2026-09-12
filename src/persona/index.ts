@@ -2,13 +2,13 @@
  * Host row `dsh-buddy/persona`.
  *
  * It does three things: keeps the authored persona in memory so prompt assembly
- * never touches the disk, registers the `buddySoul` prompt variable the `buddy`
+ * never touches the disk, registers the `buddy_soul` prompt variable the `buddy`
  * agent preset interpolates, and serves the endpoints behind the panel and the
  * settings tab.
  *
  * The persona reaches the model only through the preset. This row registers a
  * *variable*, not a section: a variable is inert until some section references
- * it, and only the `buddy` preset's persona row does (`prefix: '{{buddySoul}}'`).
+ * it, and only the `buddy` preset's persona row does (`prefix: '{{buddy_soul}}'`).
  * That is what keeps buddy's voice structurally out of ordinary coding sessions
  * — stronger than picking the right scope at registration time.
  * @module dsh-buddy/persona
@@ -28,7 +28,7 @@ export const name = "dsh-buddy-persona";
  * `systemPrompt` is deliberately *not* read with `ctx.get`. Cordis's `get` is
  * strict: it answers `undefined` unless the providing fiber is already active,
  * so a soft read at boot would silently register no variable, and every buddy
- * session would then fail assembly with `unknown prompt variable "{{buddySoul}}"`.
+ * session would then fail assembly with `unknown prompt variable "{{buddy_soul}}"`.
  * Carrying the persona to the model is this row's whole purpose, and a profile
  * without a prompt plane cannot run an agent at all — so waiting is correct.
  *
@@ -132,7 +132,7 @@ export function apply(ctx: PluginContext): void {
 	});
 
 	// A variable rather than a section: inert until the buddy preset's persona
-	// row references `{{buddySoul}}`. The renderer does not re-scan substituted
+	// row references `{{buddy_soul}}`. The renderer does not re-scan substituted
 	// values, so a persona containing `{{` is carried through verbatim.
 	//
 	// Registered before the initial read, and `soulForPrompt` is non-empty on

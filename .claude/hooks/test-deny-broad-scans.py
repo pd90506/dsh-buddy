@@ -29,7 +29,7 @@ CASES = [
     ("allow", "ls ~", "one-level ls of ~ is not a scan"),
     ("allow", 'find src -name "*.ts"', "find into a specific directory"),
     ("allow", "find node_modules/@deepseek-ai -maxdepth 2 -name package.json", "find into a named package tree"),
-    ("allow", "grep -rn buddySoul src/", "recursive grep into a specific directory"),
+    ("allow", "grep -rn buddy_soul src/", "recursive grep into a specific directory"),
     ("allow", "rg persona test/", "rg into a specific directory"),
     ("allow", "npm run check", "an ordinary build command"),
     ("allow", "du -sh node_modules", "du of a named directory"),
