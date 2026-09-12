@@ -31,6 +31,7 @@ const hostExternal = [...Object.keys(dependencies), ...Object.keys(peerDependenc
 const hostEntries = [
 	["src/index.ts", "lib/index.js"],
 	["src/store/index.ts", "lib/store.js"],
+	["src/persona/index.ts", "lib/persona.js"],
 ];
 
 for (const [entry, outfile] of hostEntries) {
