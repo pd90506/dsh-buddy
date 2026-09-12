@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/panda-nuc/repo/dsh-buddy/.claude/hooks/deny-broad-scans.sh",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/deny-broad-scans.sh",
             "timeout": 10,
             "statusMessage": "Checking scan scope"
           }
