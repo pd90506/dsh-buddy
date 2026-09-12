@@ -117,10 +117,10 @@ dsh-buddy/
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-layout"
@@ -167,6 +167,8 @@ dsh-buddy/
 > - `main` added as `lib/index.js` (no `./` prefix — the checker's `files` matcher compares literally). The rows still resolve through `exports`; this is only the fallback for a resolver that ignores `exports`.
 >
 > Two `dsh-plugin-dev check` findings are **deliberately not fixed**: `readme-five-langs` (five-language READMEs are that toolkit's own publishing convention; this plugin is `private`) and `packageManager` (it wants pnpm pinned; this repo is npm-managed with a `package-lock.json`).
+
+> **`dsh.client.inject` corrected in Task 8.** This list as originally drafted named two packages that do not exist in the DSH install — `@deepseek-ai/dsh-client-runtime` and `@deepseek-ai/dsh-client-ui-slots` — and omitted the packages that actually declare two of the services the browser half injects. The list is a bundle **arrival-order** declaration (`@deepseek-ai/dsh-client-modules/lib/client.js:265-268` walks it and *silently ignores* any entry absent from the graph), not a per-service provider contract, which is why a phantom entry never produced a symptom and why the shipped `dsh-telegram` carries the same dead `dsh-client-runtime` entry to this day. `ctx.slots` is declared by `dsh-client-ui-renderer`, `ctx.sessions` by `dsh-api-session-controller`. `test/client-ui.test.ts` now pins every injected service to its declaring package with no exemptions.
 
 - [ ] **Step 2: Create `tsconfig.json`**
 
