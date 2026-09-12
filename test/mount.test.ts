@@ -233,6 +233,22 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 		};
 		mountRow(storeRow as never);
 		mountRow(personaRow as never);
+
+		// `$DSH_HOME` must still be in effect at the moment the store row's boot
+		// reads `dshHomePath()` (`src/store/index.ts:226-227`), and that read
+		// happens strictly before `new BuddyStore(...)` publishes `buddyStore`
+		// (the preset install is `await`ed first). Waiting on the *publish*,
+		// rather than a fixed number of event-loop turns, is what makes this
+		// observation rather than a race: on a loaded machine a fixed `settle()`
+		// can resolve before the boot reaches that point, letting the restored
+		// env var below (in `finally`) leak the real `~/.dsh` into `dshHomePath()`
+		// instead. By the time `buddyStore` is observed, that read is already
+		// behind us, so `$DSH_HOME` is safe to restore.
+		await until(() => root.get("buddyStore") !== undefined);
+		// The persona row depends on `buddyStore` but is not itself gated by
+		// `$DSH_HOME`, so the remaining settle — giving its own mount, the
+		// prompt-variable registration, and the typert contribution room to
+		// land — does not need the real env var held any longer.
 		await settle();
 		return {
 			home,
