@@ -115,25 +115,36 @@ export function apply(ctx: PluginContext): void {
 
 	// Scoped injection so the row still mounts without the settings plane.
 	ctx.inject(["settings"], (scoped) => {
-		// `FALLBACK_CONFIG`, not `{}`: `entry` is the base layer *and* the value
-		// dsh-settings replays raw — unresolved by the schema — through
-		// `setSource(() => entry)` when the provider detaches. With `{}` the
-		// post-detach `readConfig().home` is `undefined` and `resolveBuddyPaths`
-		// throws on `.trim()`.
-		scoped.settings?.installSection(ctx, SETTINGS_NAMESPACE, Config, FALLBACK_CONFIG, {
-			setSource: (source) => {
-				readConfig = source;
-			},
-			// Phase 1 reads `home` once at boot: moving the home under a live
-			// plugin would strand the open domain and the editor's file handles.
-			// A change takes effect on the next start, which the settings tab says.
-			onChange: () => undefined,
-		});
-		// `installSection` calls `setSource` synchronously, so the source is
-		// final the moment it returns — and releasing the barrier here (rather
-		// than inside `setSource`) also unblocks a settings plane that installs
-		// nothing at all.
-		settleSource();
+		// `finally`, not a trailing statement: `installSection` throws on a
+		// duplicate namespace and on a stored section that fails the schema (a
+		// user writing `home = 3` under `[buddy]` is enough). A barrier left
+		// dangling there would hang the boot *and* the disposal, because cordis
+		// awaits the pending effect task before it disposes — so the whole row,
+		// and every dependent, would wait forever on one malformed setting.
+		// The throw still propagates: settling the barrier only releases the
+		// boot onto the documented defaults, it does not swallow the failure.
+		try {
+			// `FALLBACK_CONFIG`, not `{}`: `entry` is the base layer *and* the
+			// value dsh-settings replays raw — unresolved by the schema —
+			// through `setSource(() => entry)` when the provider detaches. With
+			// `{}` the post-detach `readConfig().home` is `undefined` and
+			// `resolveBuddyPaths` throws on `.trim()`.
+			scoped.settings?.installSection(ctx, SETTINGS_NAMESPACE, Config, FALLBACK_CONFIG, {
+				setSource: (source) => {
+					readConfig = source;
+				},
+				// Phase 1 reads `home` once at boot: moving the home under a live
+				// plugin would strand the open domain and the editor's file handles.
+				// A change takes effect on the next start, which the settings tab says.
+				onChange: () => undefined,
+			});
+		} finally {
+			// `installSection` calls `setSource` synchronously, so the source is
+			// final the moment it returns — and releasing the barrier here
+			// (rather than inside `setSource`) also unblocks a settings plane
+			// that installs nothing at all.
+			settleSource();
+		}
 	});
 
 	// Async effect form (`fiber.d.ts:51`, overload on `:159`): cordis tracks the

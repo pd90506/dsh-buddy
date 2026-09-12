@@ -181,9 +181,11 @@ interface InstalledSection {
  * `SettingsProvider.installSection` does.
  * @param resolved - the settings value a user document resolves to.
  * @param sections - sink the registration is recorded into.
+ * @param order - sink recording *when* the installation happened relative to
+ * the storage open, so the boot's ordering barrier is observable.
  * @returns the stand-in service value.
  */
-function settingsStub(resolved: BuddyConfig, sections: InstalledSection[]): unknown {
+function settingsStub(resolved: BuddyConfig, sections: InstalledSection[], order: string[] = []): unknown {
 	return {
 		installSection: (
 			owner: unknown,
@@ -192,6 +194,7 @@ function settingsStub(resolved: BuddyConfig, sections: InstalledSection[]): unkn
 			entry: unknown,
 			hooks: InstalledSection["hooks"],
 		): void => {
+			order.push("install");
 			sections.push({ owner, ns, schema, entry, hooks });
 			hooks.setSource(() => resolved);
 			hooks.onChange();
@@ -205,10 +208,15 @@ test("a home set through the settings plane is the home the store boots on", asy
 	const handle = handleStub();
 	const userHome = join(scratch.home, "somewhere-else");
 	const sections: InstalledSection[] = [];
+	/** Every ordering-relevant step of the boot, in the order it happened. */
+	const order: string[] = [];
 	try {
-		ctx.provide("settings", settingsStub({ home: userHome }, sections));
+		ctx.provide("settings", settingsStub({ home: userHome }, sections, order));
 		ctx.provide("storageDomain", {
-			open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+			open: async () => {
+				order.push("open");
+				return { name: "buddy", global: handle.global, close: handle.close };
+			},
 			get: () => undefined,
 		});
 		ctx.plugin(storeRow);
@@ -230,10 +238,65 @@ test("a home set through the settings plane is the home the store boots on", asy
 		assert.equal(section.ns, SETTINGS_NAMESPACE);
 		assert.equal(section.ns, "buddy");
 		assert.equal(section.schema, Config);
+
+		// The barrier itself, pinned by *ordering* rather than by timing: with
+		// `await sourceSettled` the boot cannot reach `openStore` until the
+		// scoped injection has installed the section; without it the effect
+		// body runs straight into `storageDomain.open` and the injection lands
+		// later, during that open's resolution — i.e. ["open", "install"].
+		assert.deepEqual(order, ["install", "open"]);
 	} finally {
 		scratch.restore();
 	}
 });
+
+test(
+	"a settings section that fails to install still boots the row and disposes it",
+	{ timeout: 10_000 },
+	async () => {
+		const scratch = scratchHome();
+		const ctx = new Context();
+		const handle = handleStub();
+		const logged: string[] = [];
+		const previousError = console.error;
+		console.error = (message: unknown) => {
+			logged.push(String(message));
+		};
+		try {
+			// `installSection` throws on a duplicate namespace and on a stored
+			// section that fails the schema — `home = 3` under `[buddy]` is
+			// enough. The barrier the boot waits on must still be released, or
+			// the row hangs forever: no service for any dependent row, and a
+			// `dispose()` that never resolves because cordis awaits the pending
+			// effect task first.
+			ctx.provide("settings", {
+				installSection: (): void => {
+					throw new Error('settings namespace "buddy" is already registered');
+				},
+			});
+			ctx.provide("storageDomain", {
+				open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+				get: () => undefined,
+			});
+			const fiber = ctx.plugin(storeRow);
+
+			// The row boots on the documented defaults: a broken section costs
+			// the user their `buddy.home`, not the whole plugin.
+			await until(() => ctx.get("buddyStore") !== undefined);
+			const store = ctx.get("buddyStore") as BuddyStore;
+			assert.equal(store.paths.home, join(scratch.home, "buddy"));
+			assert.equal(existsSync(store.paths.home), true, "the default home must exist after boot");
+
+			// And disposal completes rather than hanging on the same barrier.
+			await fiber.dispose();
+			await until(() => handle.closed);
+			assert.equal(ctx.get("buddyStore"), undefined);
+		} finally {
+			console.error = previousError;
+			scratch.restore();
+		}
+	},
+);
 
 test("the composition entry is the fallback config, so a settings detach stays usable", async () => {
 	const scratch = scratchHome();
