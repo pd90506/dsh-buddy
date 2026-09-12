@@ -33,12 +33,16 @@ test("a written persona round-trips", async () => {
 test("a partial write leaves the other file alone", async () => {
 	const p = await paths();
 	await writePersona(p, { soul: "A", agents: "B" });
-	await writePersona(p, { soul: "C" });
+	const returned = await writePersona(p, { soul: "C" });
 	const document = await readPersona(p);
 	assert.equal(document.soul, "C");
 	assert.equal(document.agents, "B");
 	// Belt and braces: the untouched file on disk, not just the read-back view.
 	assert.equal(await readFile(p.agents, "utf8"), "B");
+	// The write answers with what is on disk, not an echo of its own argument:
+	// Task 5's gateway returns this to the editor, which would otherwise be told
+	// the rules are blank and could save that blank straight back.
+	assert.deepEqual(returned, document);
 });
 
 test("an unreadable SOUL.md degrades to the default instead of throwing", async () => {
