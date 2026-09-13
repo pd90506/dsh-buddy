@@ -78,6 +78,7 @@ function harness(): {
 		writeConfig: async (patch) => {
 			written.push(patch);
 		},
+		telegramSessionIds: async () => ["s-tg"],
 	};
 	const instance = new TelegramGateway(ctx as never, deps);
 	const contribution = contributions[0];
@@ -122,6 +123,11 @@ test("the gateway answers through the cordis service proxy (live-failure regress
 	assert.deepEqual(await dispatch(service, "status", []), STATUS);
 	assert.deepEqual(dispatch(service, "config", []), CONFIG);
 	assert.deepEqual(await dispatch(service, "updateConfig", [{ enabled: false }]), CONFIG);
+});
+
+test("telegram session ids are reachable through the service proxy", async () => {
+	const { service } = harness();
+	assert.deepEqual(await service.telegramSessionIds?.(), ["s-tg"]);
 });
 
 test("every endpoint the contribution advertises is callable through the proxy", async () => {

@@ -55,6 +55,12 @@ interface MountOptions {
 	/** Titles keyed by session id; a missing id means the session has no title. */
 	readonly titles?: Readonly<Record<string, { title: string; updatedAt: number }>>;
 	/**
+	 * Mount a `buddyTelegram` sibling whose `telegramSessionIds()` answers these
+	 * ids; omitted entirely (rather than an empty array) so a test can also cover
+	 * the plane being absent altogether.
+	 */
+	readonly telegramSessionIds?: readonly string[];
+	/**
 	 * Make `AGENTS.md` a named pipe instead of an ordinary file, *before* the
 	 * rows mount. `readOr` (`src/persona/soul.ts`) blocks on `readFile` until a
 	 * writer opens the other end, which is what lets a test hold the boot's
@@ -225,6 +231,14 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 				give(ctx, "sessionQuery", {
 					listSessions: async (): Promise<readonly SessionStub[]> => options.sessions ?? [],
 					readTitle: async (sessionId: string) => options.titles?.[sessionId],
+				}),
+			);
+		}
+
+		if (options.telegramSessionIds !== undefined) {
+			sibling("fake-buddy-telegram", (ctx) =>
+				give(ctx, "buddyTelegram", {
+					telegramSessionIds: async () => options.telegramSessionIds ?? [],
 				}),
 			);
 		}
@@ -428,9 +442,9 @@ test("only buddy sessions reach the panel, as owned summaries, newest first", as
 	// ordering, *and* that each summary is a small owned object built from leaf
 	// fields — a spread of the live record would carry `header` and `live` here.
 	assert.deepEqual(sessions, [
-		{ sessionId: "delta", title: "Delta", updatedAt: 20, cwd: "/d" },
-		{ sessionId: "alpha", title: "Alpha", updatedAt: 10, cwd: "/a" },
-		{ sessionId: "untitled", title: "", updatedAt: 0, cwd: "" },
+		{ sessionId: "delta", title: "Delta", updatedAt: 20, cwd: "/d", source: "web" },
+		{ sessionId: "alpha", title: "Alpha", updatedAt: 10, cwd: "/a", source: "web" },
+		{ sessionId: "untitled", title: "", updatedAt: 0, cwd: "", source: "web" },
 	]);
 });
 
@@ -441,6 +455,50 @@ test("sessions answers empty without a session-query plane", async () => {
 	const persona = mounted.persona();
 	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
 	assert.deepEqual(await dispatch(persona, "sessions", []), []);
+});
+
+test("sessions are tagged by whether a Telegram chat created them", async () => {
+	const mounted = await mount({
+		sessions: [
+			{ header: { id: "s-tg", cwd: "/a", agentPreset: BUDDY_PRESET_ID }, live: true },
+			{ header: { id: "s-web", cwd: "/b", agentPreset: BUDDY_PRESET_ID }, live: true },
+		],
+		titles: {
+			"s-tg": { title: "From Telegram", updatedAt: 10 },
+			"s-web": { title: "From the web", updatedAt: 5 },
+		},
+		telegramSessionIds: ["s-tg"],
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+
+	const sessions = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+
+	assert.deepEqual(
+		sessions.map((session) => [session.sessionId, session.source]),
+		[
+			["s-tg", "telegram"],
+			["s-web", "web"],
+		],
+	);
+});
+
+test("sessions all report source web when the Telegram plane is absent", async () => {
+	// `buddyTelegram` is soft and read at request time: a profile without the
+	// Telegram row must still get a mounted persona row and a web-only list.
+	const mounted = await mount({
+		sessions: [
+			{ header: { id: "s-tg", cwd: "/a", agentPreset: BUDDY_PRESET_ID }, live: true },
+			{ header: { id: "s-web", cwd: "/b", agentPreset: BUDDY_PRESET_ID }, live: true },
+		],
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+
+	const sessions = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+
+	assert.ok(sessions.length > 0);
+	for (const session of sessions) assert.equal(session.source, "web");
 });
 
 test("preferences are served through the proxy with the conversation cwd", async () => {

@@ -28,6 +28,8 @@ export interface BuddySessionSummary {
 	readonly updatedAt: number;
 	/** Working directory the session was created in; empty when it has none. */
 	readonly cwd: string;
+	/** Whether a Telegram chat created this conversation. */
+	readonly source: "telegram" | "web";
 }
 
 /** What the settings tab renders and edits. */

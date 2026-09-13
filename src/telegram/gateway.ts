@@ -85,6 +85,8 @@ export interface GatewayDeps {
 	readonly readConfig: () => TelegramConfig;
 	/** Merge a patch into the `telegram` settings section. */
 	readonly writeConfig: (patch: Record<string, unknown>) => Promise<void>;
+	/** Ids of every session a Telegram chat created. */
+	readonly telegramSessionIds: () => Promise<string[]>;
 }
 
 /**
@@ -154,5 +156,14 @@ export class TelegramGateway extends TypertRemoteService {
 		}
 		if (Object.keys(clean).length > 0) await this.deps.writeConfig(clean);
 		return this.deps.readConfig();
+	}
+
+	/**
+	 * Ids of every session a Telegram chat created, including ones `/new` has
+	 * since unbound. For the Buddy folder's source badge; not a wire endpoint.
+	 * @returns session ids.
+	 */
+	async telegramSessionIds(): Promise<string[]> {
+		return await this.deps.telegramSessionIds();
 	}
 }

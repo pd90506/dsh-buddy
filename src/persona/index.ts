@@ -124,6 +124,9 @@ export function apply(ctx: PluginContext): void {
 		if (query === undefined) return [];
 		const records = await query.listSessions();
 		const mine = records.filter((record) => record.header.agentPreset === BUDDY_PRESET_ID);
+		// Soft and per request: without the Telegram row every conversation is a web one.
+		const telegram = ctx.get("buddyTelegram") as { telegramSessionIds(): Promise<string[]> } | undefined;
+		const fromTelegram = new Set((await telegram?.telegramSessionIds().catch(() => [])) ?? []);
 		const summaries = await Promise.all(
 			mine.map(async (record): Promise<BuddySessionSummary> => {
 				// Only leaf fields are read and a fresh object is built: session
@@ -134,6 +137,7 @@ export function apply(ctx: PluginContext): void {
 					title: title?.title ?? "",
 					updatedAt: title?.updatedAt ?? 0,
 					cwd: record.header.cwd ?? "",
+					source: fromTelegram.has(record.header.id) ? "telegram" : "web",
 				};
 			}),
 		);

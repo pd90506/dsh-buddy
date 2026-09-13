@@ -272,6 +272,7 @@ export function apply(ctx: PluginContext): void {
 			if (settings === undefined) throw new Error("dsh-buddy-telegram: the settings service is unavailable");
 			await settings.update(SETTINGS_NAMESPACE, patch);
 		},
+		telegramSessionIds: async () => (store === undefined ? [] : [...store.origins.keys()]),
 	});
 
 	ctx.effect(

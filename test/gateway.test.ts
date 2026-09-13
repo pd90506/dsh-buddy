@@ -34,7 +34,7 @@ import { FALLBACK_CONFIG, type BuddyConfig } from "../src/config.ts";
 const VIEW: PersonaView = { soul: "Voice.", agents: "", home: "/tmp/buddy" };
 
 /** The session list the stub hands back. */
-const SESSIONS: BuddySessionSummary[] = [{ sessionId: "s1", title: "First", updatedAt: 1, cwd: "/tmp" }];
+const SESSIONS: BuddySessionSummary[] = [{ sessionId: "s1", title: "First", updatedAt: 1, cwd: "/tmp", source: "web" }];
 
 /** The preferences view the stub hands back. */
 const PREFERENCES: PreferencesView = {
