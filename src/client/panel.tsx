@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
 import type { Call } from "./call.ts";
 import { visibleModules, type PanelModule } from "./modules.ts";
 import type { Notifier } from "./notifier.ts";
-import type { PanelSectionId } from "../config.ts";
+import type { PanelSectionId } from "../index.ts";
 
 /** Collaborators supplied by the plugin's `apply`. */
 export interface PanelDeps {

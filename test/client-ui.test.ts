@@ -40,6 +40,28 @@ test("the browser half is wrapped in the module-loader factory", async () => {
 	assert.equal(typeof client.apply, "function");
 });
 
+test("the built bundle stays free of schemastery and cosmokit, requiring only react", async () => {
+	// `src/client/settings.tsx` (and, transitively, anything else under
+	// `src/client/**`) must never pull a *value* import from `../config.ts`:
+	// that module builds a schemastery `z.object(...)` at load time, and
+	// esbuild has no way to tree-shake a side-effecting module evaluation out
+	// of a bundle. A stray value import drags cosmokit and schemastery — none
+	// of which the browser half ever calls — into `lib/client.js` in full.
+	const text = await bundleText();
+	assert.doesNotMatch(text, /schemastery/, "schemastery must never reach the browser bundle");
+	assert.doesNotMatch(text, /cosmokit/, "cosmokit must never reach the browser bundle");
+	assert.doesNotMatch(text, /node_modules\//, "no external package source should be inlined into the browser bundle");
+
+	const required = [...text.matchAll(/require\(\s*"([^"]+)"\s*\)/g)].map((match) => match[1]);
+	assert.ok(required.length > 0, "the bundle must still require its externals");
+	for (const name of required) {
+		assert.ok(
+			name === "react" || name === "react/jsx-runtime",
+			`unexpected require("${name}") in the browser bundle — only react and react/jsx-runtime may stay external`,
+		);
+	}
+});
+
 test("the browser half injects slots, locale, connection, layout, sessions, the remote session namespace, the remote credentials namespace and the remote workspace namespace", () => {
 	const client = loadClient();
 	// `remote` and `remote.session` are what "New Buddy conversation" needs to

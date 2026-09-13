@@ -3,7 +3,7 @@
  * panel itself never changes shape to accommodate them.
  * @module dsh-buddy/client/modules
  */
-import type { PanelSectionId } from "../config.ts";
+import type { PanelSectionId } from "../index.ts";
 
 /** One main-panel module. */
 export interface PanelModule<C> {

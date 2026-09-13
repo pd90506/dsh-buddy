@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Call } from "./call.ts";
 import type { Notifier } from "./notifier.ts";
-import { PANEL_SECTION_IDS, type PanelSectionId } from "../config.ts";
+import { PANEL_SECTION_IDS, type PanelSectionId } from "../index.ts";
 
 /** Collaborators supplied by the plugin's `apply`. */
 export interface SettingsDeps {

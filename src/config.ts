@@ -12,15 +12,10 @@
  * @module dsh-buddy/config
  */
 import z from "@deepseek-ai/schemastery";
-import { SETTINGS_NAMESPACE } from "./index.ts";
+import { SETTINGS_NAMESPACE, PANEL_SECTION_IDS, type PanelSectionId } from "./index.ts";
 
-export { SETTINGS_NAMESPACE };
-
-/** Main-panel module ids, in display order. */
-export const PANEL_SECTION_IDS = ["soul", "agents", "model", "telegram"] as const;
-
-/** One main-panel module id. */
-export type PanelSectionId = (typeof PANEL_SECTION_IDS)[number];
+export { SETTINGS_NAMESPACE, PANEL_SECTION_IDS };
+export type { PanelSectionId };
 
 /** Buddy's own default model; all-empty means "follow the global default". */
 export interface BuddyModelDefault {

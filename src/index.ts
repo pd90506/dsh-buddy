@@ -51,3 +51,18 @@ export const BUDDY_PRESET_ID = "buddy";
  * SOUL.md and AGENTS.md, and self-modification is a later phase's decision.
  */
 export const BUDDY_WORKSPACE_DEFAULT = "~/buddy-workspace";
+
+/**
+ * Main-panel module ids, in display order.
+ *
+ * Lives here, not in `src/config.ts`, because this module is import-free while
+ * `config.ts` builds a schemastery `z.object(...)` at load time: a browser-half
+ * file importing the ids as a *value* from `config.ts` would drag schemastery
+ * and cosmokit into `lib/client.js` whole, since esbuild cannot tree-shake a
+ * side-effecting module evaluation out of a bundle. `config.ts` re-exports both
+ * names so host-side code keeps a single import path.
+ */
+export const PANEL_SECTION_IDS = ["soul", "agents", "model", "telegram"] as const;
+
+/** One main-panel module id. */
+export type PanelSectionId = (typeof PANEL_SECTION_IDS)[number];
