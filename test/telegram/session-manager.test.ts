@@ -115,11 +115,13 @@ function deps(options: {
 	presetId?: string;
 	buddyModel?: { provider: string; model: string } | undefined;
 	log?: (line: string) => void;
+	workspaceRegistry?: Record<string, unknown> | undefined;
 }): ConstructorParameters<typeof SessionManager>[0] {
 	return {
 		get: (name: string) => {
 			if (name === "agents") return options.agents;
 			if (name === "agentPresets") return options.presets;
+			if (name === "workspaceRegistry") return options.workspaceRegistry;
 			if (name === "agentDefaultModel") {
 				return options.defaults === undefined ? undefined : { currentSelection: () => options.defaults };
 			}
@@ -129,6 +131,35 @@ function deps(options: {
 		log: options.log ?? (() => undefined),
 		presetId: options.presetId ?? "buddy",
 		buddyModel: () => options.buddyModel,
+	};
+}
+
+/** A workspace registry stub whose `create` returns a fixed path and records attach calls. */
+function workspaceRegistryStub(
+	path: string,
+	options: { attachFails?: string } = {},
+): {
+	registry: { create(requestedPath: string): Promise<{ path: string; attachSession(sessionId: unknown): Promise<unknown> }> };
+	createdWith: string[];
+	attached: unknown[];
+} {
+	const createdWith: string[] = [];
+	const attached: unknown[] = [];
+	return {
+		createdWith,
+		attached,
+		registry: {
+			create: async (requestedPath: string) => {
+				createdWith.push(requestedPath);
+				return {
+					path,
+					attachSession: async (sessionId: unknown) => {
+						attached.push(sessionId);
+						if (options.attachFails !== undefined) throw new Error(options.attachFails);
+					},
+				};
+			},
+		},
 	};
 }
 
@@ -171,6 +202,75 @@ test("a first contact creates a session with the default model and an absolute c
 	assert.deepEqual(created[0]?.["agentOptions"], { provider: "deepseek-official", model: "deepseek-flash" });
 	assert.equal(typeof created[0]?.["setup"], "function");
 	assert.equal(records.get("42")?.provider, "deepseek-official");
+});
+
+test("a new session is created inside its workspace and attached to it (R7)", async () => {
+	const created: Record<string, unknown>[] = [];
+	const agents = {
+		get: () => undefined,
+		create: async (options: Record<string, unknown>) => {
+			created.push(options);
+			return { agent: agentStub(String(options["sessionId"])), dispose: () => undefined };
+		},
+		resume: async () => {
+			throw new Error("resume must not be called when no binding is stored");
+		},
+	};
+	const { store } = storeStub();
+	const { registry, createdWith, attached } = workspaceRegistryStub("/real/telegram-work");
+	const manager = new SessionManager(deps({ store, agents, presets: presetStub().service, workspaceRegistry: registry }));
+
+	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
+	assert.deepEqual(createdWith, ["/tmp/telegram-work"]);
+	assert.deepEqual(created[0]?.["meta"], { cwd: "/real/telegram-work", agentPreset: "buddy" });
+	// attachSession must run only after the session itself was created.
+	assert.deepEqual(attached, [resolved.sessionId]);
+});
+
+test("without a workspace registry a new session keeps the configured cwd and logs why", async () => {
+	const created: Record<string, unknown>[] = [];
+	const agents = {
+		get: () => undefined,
+		create: async (options: Record<string, unknown>) => {
+			created.push(options);
+			return { agent: agentStub(String(options["sessionId"])), dispose: () => undefined };
+		},
+		resume: async () => {
+			throw new Error("unused");
+		},
+	};
+	const { store } = storeStub();
+	const lines: string[] = [];
+	const manager = new SessionManager(deps({ store, agents, presets: presetStub().service, log: (line) => lines.push(line) }));
+
+	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
+	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work", agentPreset: "buddy" });
+	assert.ok(lines.some((line) => line.includes("workspace registry unavailable")));
+});
+
+test("a workspace attach failure does not undo the session creation", async () => {
+	const created: Record<string, unknown>[] = [];
+	const agents = {
+		get: () => undefined,
+		create: async (options: Record<string, unknown>) => {
+			created.push(options);
+			return { agent: agentStub(String(options["sessionId"])), dispose: () => undefined };
+		},
+		resume: async () => {
+			throw new Error("unused");
+		},
+	};
+	const { store, records } = storeStub();
+	const { registry } = workspaceRegistryStub("/real/telegram-work", { attachFails: "workspace is gone" });
+	const lines: string[] = [];
+	const manager = new SessionManager(
+		deps({ store, agents, presets: presetStub().service, workspaceRegistry: registry, log: (line) => lines.push(line) }),
+	);
+
+	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
+	assert.equal(resolved.created, true);
+	assert.equal(records.get("42")?.sessionId, String(resolved.sessionId));
+	assert.ok(lines.some((line) => line.includes("workspace attach failed") && line.includes("workspace is gone")));
 });
 
 test("a new session is labelled so the GUI groups it recognizably (R7)", async () => {

@@ -116,6 +116,18 @@ interface SessionStoreLike {
 	flush(session: unknown): Promise<void>;
 }
 
+/**
+ * The `ctx.workspaceRegistry` slice used here.
+ *
+ * `create` is idempotent by canonical path and its `attachSession` requires the
+ * session's own header `cwd` to equal `workspace.path` — which is exactly why a
+ * new session's `meta.cwd` is set to `workspace.path` rather than the requested
+ * `defaultCwd` before `agents.create` runs.
+ */
+interface WorkspaceRegistryLike {
+	create(path: string): Promise<{ readonly path: string; attachSession(sessionId: unknown): Promise<unknown> }>;
+}
+
 /** One preset id, as the roster reports it. */
 export interface AgentPresetRef {
 	/** The resolved preset id. */
@@ -648,15 +660,34 @@ export class SessionManager {
 		// `agents.create()` does not create the directory the way the session
 		// controller's own path does, so it is created here first.
 		await mkdir(defaultCwd, { recursive: true });
+		const registry = this.#deps.get("workspaceRegistry") as WorkspaceRegistryLike | undefined;
+		let cwd = defaultCwd;
+		let workspace: Awaited<ReturnType<WorkspaceRegistryLike["create"]>> | undefined;
+		if (registry === undefined) {
+			this.#deps.log("workspace registry unavailable: session is not attached to a workspace");
+		} else {
+			workspace = await registry.create(defaultCwd);
+			cwd = workspace.path;
+		}
 		const ref = this.#selectionRef(sessionId, undefined);
 		if (ref.current === undefined) ref.current = this.#defaultSelection();
 		const handle = await agents.create({
 			sessionId,
-			meta: { cwd: defaultCwd, agentPreset: presetId },
+			meta: { cwd, agentPreset: presetId },
 			...this.#agentOptions(ref.current),
 			setup: this.#setupFor(() => ref, presetId),
 		});
 		this.#adopt(String(sessionId), handle);
+		if (workspace !== undefined) {
+			try {
+				await workspace.attachSession(sessionId);
+			} catch (error) {
+				// The session is fully usable from Telegram either way — a failed
+				// attach only means it will not show up grouped under the workspace
+				// in the GUI, which is not worth rolling the creation back over.
+				this.#deps.log(`workspace attach failed: ${(error as Error).message}`);
+			}
+		}
 		await this.#deps.store.chats.put(chatId, {
 			sessionId: String(sessionId),
 			...(ref.current === undefined
