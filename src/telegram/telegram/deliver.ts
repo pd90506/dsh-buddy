@@ -100,12 +100,12 @@ type ResolvedItem =
 
 /** Human label per refusal code; the detail from the resolver is appended. */
 const REFUSAL_LABELS: Record<MediaRefusalCode, string> = {
-	"outside-cwd": "不在工作目录内",
-	missing: "文件不存在",
-	"not-file": "不是普通文件",
-	"too-large": "超过 Telegram 的上限",
-	unreadable: "读不出来",
-	"not-media": "不是可发送的媒体",
+	"outside-cwd": "outside the working directory",
+	missing: "file not found",
+	"not-file": "not a regular file",
+	"too-large": "over Telegram's size limit",
+	unreadable: "unreadable",
+	"not-media": "not sendable media",
 };
 
 /**
@@ -132,7 +132,7 @@ export async function planReply(parts: readonly TurnPart[], options: DeliverOpti
 		if (plan.kind === "refused") {
 			resolved.push({
 				kind: "notice",
-				text: `[未发送：${labelOf(candidate.source)}（${REFUSAL_LABELS[plan.code]}${plan.detail === "" ? "" : `：${plan.detail}`}）]`,
+				text: `[Not sent: ${labelOf(candidate.source)} (${REFUSAL_LABELS[plan.code]}${plan.detail === "" ? "" : `: ${plan.detail}`})]`,
 			});
 			continue;
 		}
@@ -169,7 +169,7 @@ export async function planReply(parts: readonly TurnPart[], options: DeliverOpti
 
 	const outbound = assemble(resolved);
 	if (skippedByBudget > 0) {
-		outbound.push(notice(`（还有 ${String(skippedByBudget)} 个媒体未发送）`));
+		outbound.push(notice(`(${String(skippedByBudget)} more media item(s) not sent)`));
 	}
 	number(outbound);
 	return outbound;
@@ -258,7 +258,7 @@ function labelOf(source: MediaSource): string {
 	// The attachment's own name, never the resolver's detail: that carries a size or
 	// a media type, and `image/svg+xml` basenames to nonsense.
 	const name = source.ref.name;
-	return name === undefined || name === "" ? "附件" : name;
+	return name === undefined || name === "" ? "attachment" : name;
 }
 
 /** The caption to send, escaped and cut to Telegram's ceiling. */

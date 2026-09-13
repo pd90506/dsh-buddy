@@ -79,7 +79,7 @@ test("tapping allow resolves allowed-once and repaints the prompt", async () => 
 	// The body is composed as Telegram HTML and has to reach the wire as markup.
 	// Running it through the agent-text renderer escaped it a second time, so the
 	// phone showed the literal text `<b>需要你的许可</b>`.
-	assert.match(sends[0]?.text ?? "", /<b>需要你的许可<\/b>/);
+	assert.match(sends[0]?.text ?? "", /<b>Approval needed<\/b>/);
 	assert.match(sends[0]?.text ?? "", /<code>bash<\/code>/);
 	assert.ok(!(sends[0]?.text ?? "").includes("&lt;b&gt;"), "the prompt's own markup must not be escaped");
 
@@ -89,7 +89,7 @@ test("tapping allow resolves allowed-once and repaints the prompt", async () => 
 	assert.equal(await pending, "allowed-once");
 	assert.deepEqual(answers, ["cb-1"], "the callback must be acknowledged immediately");
 	assert.equal(edits.length, 1);
-	assert.match(edits[0]?.text ?? "", /已允许/);
+	assert.match(edits[0]?.text ?? "", /Allowed/);
 });
 
 test("tapping deny resolves rejected", async () => {
@@ -99,7 +99,7 @@ test("tapping deny resolves rejected", async () => {
 	await tick();
 	await bridge.handleCallback(`ap:n:${tokenOf(sends[0] ?? {})}`, "cb-2");
 	assert.equal(await pending, "rejected");
-	assert.match(edits[0]?.text ?? "", /已拒绝/);
+	assert.match(edits[0]?.text ?? "", /Denied/);
 });
 
 test("an unanswered prompt fails closed at the timeout", async () => {
@@ -113,7 +113,7 @@ test("an unanswered prompt fails closed at the timeout", async () => {
 	});
 	const outcome = await bridge.handler({ agent: { session: { id: "session-1" } }, toolName: "bash" }, async () => "unavailable");
 	assert.equal(outcome, "rejected", "no answer must never mean approval");
-	assert.match(edits[0]?.text ?? "", /过期/);
+	assert.match(edits[0]?.text ?? "", /Expired/);
 });
 
 test("a press arriving after the timeout cannot claim approval", async () => {
@@ -186,9 +186,9 @@ test("the prompt's markup survives, and an untrusted tool name still cannot inje
 	await tick();
 
 	const text = sends[0]?.text ?? "";
-	assert.match(text, /<b>需要你的许可<\/b>/, "the prompt's own markup must reach the wire");
+	assert.match(text, /<b>Approval needed<\/b>/, "the prompt's own markup must reach the wire");
 	assert.match(text, /<code>&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/code>/, "the tool name must be escaped inside it");
-	assert.match(text, /原因：a &amp; b/, "so must the reason");
+	assert.match(text, /Reason: a &amp; b/, "so must the reason");
 	assert.ok(!text.includes("<script>"), "an untrusted tool name must not become markup");
 
 	await bridge.handleCallback(`ap:n:${tokenOf(sends[0] ?? {})}`, "cb-hostile");

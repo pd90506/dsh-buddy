@@ -71,7 +71,7 @@ export function attachmentOf(message: TelegramMessage): InboundAttachment | unde
 /** The one refusal message for an attachment over the download ceiling. */
 function tooLarge(): FileRefusal {
 	const limitMb = Math.floor(MAX_INBOUND_BYTES / (1024 * 1024));
-	return { kind: "too-large", message: `这个文件超过 ${String(limitMb)}MB，Telegram 不允许 bot 下载。` };
+	return { kind: "too-large", message: `This file is over ${String(limitMb)} MB; Telegram does not let bots download it.` };
 }
 
 /** Reduce a Telegram-supplied name to something safe to join onto a directory. */
@@ -103,7 +103,7 @@ export async function receiveInboundFile(
 	try {
 		const file = await api.getFile(attachment.fileId);
 		if (file.file_path === undefined) {
-			return { kind: "failed", message: "Telegram 没有给出文件路径，无法下载。" };
+			return { kind: "failed", message: "Telegram returned no file path, so the file cannot be downloaded." };
 		}
 		const bytes = await api.downloadFile(file.file_path);
 		if (bytes.byteLength > MAX_INBOUND_BYTES) return tooLarge();
@@ -116,6 +116,6 @@ export async function receiveInboundFile(
 		return { path, name, size: bytes.byteLength };
 	} catch (error) {
 		log(`inbound file failed: ${(error as Error).message}`);
-		return { kind: "failed", message: "文件下载失败，请再发一次。" };
+		return { kind: "failed", message: "The file download failed. Please send it again." };
 	}
 }

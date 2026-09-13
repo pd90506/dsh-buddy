@@ -529,7 +529,7 @@ test("/stop cancels the running turn and answers in the chat (R18)", async () =>
 	await h.runtime.handleUpdate(message(42, "/stop", 2));
 	assert.equal(h.cancellations(), 1);
 	assert.ok(
-		h.sent.some((body) => String(body["text"]).includes("停止")),
+		h.sent.some((body) => String(body["text"]).includes("Stop requested")),
 		"the user must be told",
 	);
 	gate.resolve();
@@ -543,10 +543,10 @@ test("/help reports the directory, the model and the state (R16)", async () => {
 	await h.runtime.handleUpdate(message(42, "/help"));
 	await settle(20);
 	const help = String(h.sent[0]?.["text"] ?? "");
-	assert.match(help, /工作目录/);
-	assert.match(help, /模型/);
-	assert.match(help, /状态/);
-	assert.match(help, /运行中/, "the state must be the live one, not a placeholder");
+	assert.match(help, /Working directory/);
+	assert.match(help, /Model/);
+	assert.match(help, /Status/);
+	assert.match(help, /running/, "the state must be the live one, not a placeholder");
 	await h.runtime.stop();
 });
 
@@ -558,7 +558,7 @@ test("/new drops the binding so the next message starts a fresh session (R17)", 
 	await settle(20);
 	assert.deepEqual(h.forgotten, ["session-old"]);
 	assert.equal(h.records.has("42"), false, "the binding must be cleared");
-	assert.ok(h.sent.some((body) => String(body["text"]).includes("新会话")));
+	assert.ok(h.sent.some((body) => String(body["text"]).includes("new conversation")));
 	await h.runtime.stop();
 });
 
@@ -581,7 +581,7 @@ test("/stop cancels the turn that is running, not a session the command invented
 	assert.deepEqual(h.cancelled, ["session-runtime"], "the running agent must be the one cancelled");
 	assert.equal(h.ensured.length, resolvedForNew, "/stop must not resolve — and so create — a session");
 	assert.ok(
-		h.sent.some((body) => String(body["text"]).includes("已请求停止")),
+		h.sent.some((body) => String(body["text"]).includes("Stop requested")),
 		`the user must be told; sent: ${JSON.stringify(h.sent)}`,
 	);
 	await h.runtime.stop();
@@ -604,10 +604,10 @@ test("picking a model before the chat has a session says so instead of pretendin
 
 	const texts = h.edits.map((body) => String(body["text"]));
 	assert.ok(
-		texts.some((text) => text.includes("还没有会话")),
+		texts.some((text) => text.includes("no conversation yet")),
 		`the refusal must be explicit; edits: ${JSON.stringify(texts)}`,
 	);
-	assert.ok(!texts.some((text) => text.includes("已切到")), "and it must not claim success");
+	assert.ok(!texts.some((text) => text.includes("Switched to")), "and it must not claim success");
 });
 
 test("a button press from a stranger is acknowledged but never acted on", async () => {
@@ -730,7 +730,7 @@ test("a media refusal reaches the phone as one line instead of vanishing (R29)",
 	await settle();
 
 	assert.equal(h.uploads.length, 0);
-	const notices = h.sent.map((body) => String(body["text"])).filter((text) => text.includes("未发送"));
+	const notices = h.sent.map((body) => String(body["text"])).filter((text) => text.includes("Not sent"));
 	assert.equal(notices.length, 1);
 	assert.match(notices[0] ?? "", /escape\.png/);
 	await h.runtime.stop();
@@ -775,7 +775,7 @@ test("a media upload that fails on the wire says so instead of going quiet (R29,
 	// The photo, its document fallback, and the notice all belong to one reply: the
 	// reader ends up with text plus one line naming what did not arrive.
 	assert.equal(h.uploads.length >= 2, true, "the document fallback must be attempted");
-	const notices = h.sent.map((body) => String(body["text"])).filter((text) => text.includes("未发送"));
+	const notices = h.sent.map((body) => String(body["text"])).filter((text) => text.includes("Not sent"));
 	assert.equal(notices.length, 1);
 	assert.match(notices[0] ?? "", /chart\.png/);
 	assert.match(notices[0] ?? "", /PHOTO_INVALID_DIMENSIONS/);

@@ -209,7 +209,7 @@ export class ModelMenu {
 		const rows: TelegramInlineButton[][] = group.models.map((model, index) => [
 			{ text: `${model.id === currentModel ? "• " : ""}${model.name}`, callback_data: MODEL_CALLBACK.model(providerIndex, index) },
 		]);
-		rows.push([{ text: "← 换 provider", callback_data: MODEL_CALLBACK.back }]);
+		rows.push([{ text: "← Change provider", callback_data: MODEL_CALLBACK.back }]);
 		return rows;
 	}
 }

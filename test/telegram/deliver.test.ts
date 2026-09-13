@@ -142,7 +142,7 @@ test("a file outside the working directory is refused with a line of text, not s
 	);
 	assert.equal(out.length, 1);
 	assert.equal(out[0]?.kind, "text");
-	assert.match(textOf(out), /不在工作目录/);
+	assert.match(textOf(out), /outside the working directory/);
 	assert.match(textOf(out), /secret\.png/);
 });
 
@@ -159,7 +159,7 @@ test("an over-sized image becomes a document, and an over-sized document is refu
 		out.map((item) => item.kind),
 		["document", "text"],
 	);
-	assert.match(textOf(out), /超过/);
+	assert.match(textOf(out), /over Telegram's size limit/);
 });
 
 test("a gif stays a document so it keeps animating", async () => {
@@ -252,7 +252,7 @@ test("a turn over the media budget reports what it could not send", async () => 
 	const out = await planReply(parts, options(io));
 	const sent = out.filter((item) => item.kind === "album" || item.kind === "photo").length;
 	assert.ok(sent < 12, "the budget must bite");
-	assert.match(textOf(out), /还有 \d+ 个媒体未发送/);
+	assert.match(textOf(out), /\d+ more media item\(s\) not sent/);
 });
 
 test("renderMarkdown off falls back to escaped text and no inline markup", async () => {
@@ -285,7 +285,7 @@ test("an unreadable file is reported instead of crashing the reply", async () =>
 		out.map((item) => item.kind),
 		["text", "text"],
 	);
-	assert.match(textOf(out), /读不出来|读不到/);
+	assert.match(textOf(out), /unreadable/);
 });
 
 test("an image-only turn produces media and no placeholder text", async () => {
@@ -320,5 +320,5 @@ test("more web images than the turn allows are reported, not silently dropped (R
 	const out = await planReply([{ kind: "text", text: many }], options(io));
 	const photos = out.filter((item) => item.kind === "photo-url").length;
 	assert.equal(photos, 10);
-	assert.match(textOf(out), /还有 2 个媒体未发送/);
+	assert.match(textOf(out), /2 more media item\(s\) not sent/);
 });

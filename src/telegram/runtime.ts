@@ -49,10 +49,10 @@ const POLL_ERROR_BACKOFF_MS = 3000;
 
 /** The commands published to Telegram's menu and answered here. */
 export const COMMANDS: readonly { command: string; description: string }[] = [
-	{ command: "help", description: "怎么用这个 bot" },
-	{ command: "new", description: "开一条新会话（当前目录）" },
-	{ command: "model", description: "换这个 chat 用的模型" },
-	{ command: "stop", description: "停掉正在跑的这一轮" },
+	{ command: "help", description: "How to use this bot" },
+	{ command: "new", description: "Start a new conversation (same directory)" },
+	{ command: "model", description: "Change the model for this chat" },
+	{ command: "stop", description: "Stop the current turn" },
 ];
 
 /** Collaborators of {@link TelegramRuntime}. */
@@ -202,7 +202,7 @@ export class TelegramRuntime {
 			// string that happens to embed the request URL).
 			this.#detail =
 				error instanceof TelegramApiError && error.isUnauthorized
-					? "token 无效或已被吊销"
+					? "The token is invalid or has been revoked"
 					: (error as Error).message;
 			await this.#recordStatus();
 			this.#deps.log(`telegram: startup failed: ${this.#detail}`);
@@ -284,7 +284,7 @@ export class TelegramRuntime {
 				}
 				if (error instanceof TelegramApiError && error.isUnauthorized) {
 					this.#state = "error";
-					this.#detail = "token 无效或已被吊销";
+					this.#detail = "The token is invalid or has been revoked";
 					await this.#recordStatus();
 					this.#deps.log("telegram: polling stopped: token rejected");
 					return;
@@ -372,7 +372,7 @@ export class TelegramRuntime {
 			await this.#send(chatId, message.message_thread_id, stored.message);
 			return undefined;
 		}
-		const note = `[用户发来一个文件，已保存到 ${stored.path}]`;
+		const note = `[The user sent a file, saved to ${stored.path}]`;
 		return text === "" ? note : `${text}\n\n${note}`;
 	}
 
@@ -390,7 +390,7 @@ export class TelegramRuntime {
 			// before it — resolving the session, which can fail on its own.
 			const detail = (error as Error).message;
 			this.#deps.log(`turn never started: ${detail}`);
-			await this.#send(chatId, route?.threadId, `这一轮没起来：${detail}`).catch(() => undefined);
+			await this.#send(chatId, route?.threadId, `This turn never started: ${detail}`).catch(() => undefined);
 		}
 	}
 
@@ -407,13 +407,13 @@ export class TelegramRuntime {
 		try {
 			const parts = await this.#deps.manager.runTurn(resolved.chat, text);
 			if (parts.length === 0) {
-				await this.#send(chatId, resolved.threadId, "（这一轮没有产生文本输出）");
+				await this.#send(chatId, resolved.threadId, "(This turn produced no text output)");
 			} else {
 				await this.#deliver(chatId, resolved.threadId, parts, resolved.cwd);
 			}
 		} catch (error) {
 			this.#deps.log(`turn failed: ${(error as Error).message}`);
-			await this.#send(chatId, resolved.threadId, `这一轮出错了：${(error as Error).message}`);
+			await this.#send(chatId, resolved.threadId, `This turn failed: ${(error as Error).message}`);
 		} finally {
 			this.#running.delete(chatId);
 			this.#stopTyping(chatId);
@@ -522,7 +522,7 @@ export class TelegramRuntime {
 			// A file that never left the machine must say so: silence reads as "the
 			// agent forgot to attach it".
 			if (failure !== undefined && item.kind !== "text") {
-				await this.#send(chatId, threadId, `[未发送：${outboundLabel(item)}（${failure}）]`);
+				await this.#send(chatId, threadId, `[Not sent: ${outboundLabel(item)} (${failure})]`);
 			}
 		}
 	}
@@ -724,7 +724,7 @@ export class TelegramRuntime {
 					await this.#deps.store.chats.delete(key);
 				}
 				this.#deps.menu.close(key);
-				await this.#send(key, threadId, "好，下一条消息会开一条新会话（目录不变）。");
+				await this.#send(key, threadId, "OK. Your next message starts a new conversation (same directory).");
 				return;
 			}
 			case "stop": {
@@ -733,11 +733,11 @@ export class TelegramRuntime {
 				// "nothing is running" then would be a lie.
 				const running = this.#running.get(key);
 				if (running === undefined) {
-					await this.#send(key, threadId, "现在没有在跑的回合。");
+					await this.#send(key, threadId, "Nothing is running right now.");
 					return;
 				}
 				this.#deps.manager.cancel(running);
-				await this.#send(key, threadId, "已请求停止。");
+				await this.#send(key, threadId, "Stop requested.");
 				return;
 			}
 			case "model": {
@@ -745,7 +745,7 @@ export class TelegramRuntime {
 				return;
 			}
 			default: {
-				await this.#send(key, threadId, `不认识的命令：/${name}。发 /help 看用法。`);
+				await this.#send(key, threadId, `Unknown command: /${name}. Send /help for usage.`);
 			}
 		}
 	}
@@ -755,24 +755,24 @@ export class TelegramRuntime {
 		const catalog = await loadCatalog(this.#deps.get);
 		const api = this.#api;
 		if (catalog === undefined) {
-			await this.#send(chatId, threadId, "这个 profile 没有挂载模型目录服务，换不了模型。");
+			await this.#send(chatId, threadId, "This profile has no model catalog service, so the model cannot be changed.");
 			return;
 		}
 		this.#deps.menu.open(chatId, catalog);
 		const record = this.#deps.store.chats.get(chatId);
 		const current = record?.model;
 		if (args.trim() !== "") {
-			await this.#send(chatId, threadId, "这个版本还不支持 /model <名字>，请用按钮选。");
+			await this.#send(chatId, threadId, "/model <name> is not supported yet. Pick with the buttons.");
 		}
 		if (api === undefined) return;
 		const rows = this.#deps.menu.providerKeyboard(chatId, record?.provider);
 		if (rows.length === 0) {
-			await this.#send(chatId, threadId, "没有可用的模型。");
+			await this.#send(chatId, threadId, "No models are available.");
 			return;
 		}
 		await api.sendMessage({
 			chatId: Number(chatId),
-			text: plainToTelegramHtml(current === undefined ? "选一个 provider：" : `当前模型：${current}\n选一个 provider：`),
+			text: plainToTelegramHtml(current === undefined ? "Pick a provider:" : `Current model: ${current}\nPick a provider:`),
 			threadId,
 			keyboard: rows,
 		});
@@ -805,7 +805,7 @@ export class TelegramRuntime {
 				.editMessageText({
 					chatId: message.chat.id,
 					messageId: message.message_id,
-					text: plainToTelegramHtml("选一个模型："),
+					text: plainToTelegramHtml("Pick a model:"),
 					keyboard: this.#deps.menu.modelKeyboard(chatId, providerIndex, currentModel),
 				})
 				.catch((error: unknown) => {
@@ -831,7 +831,7 @@ export class TelegramRuntime {
 					.editMessageText({
 						chatId: message.chat.id,
 						messageId: message.message_id,
-						text: plainToTelegramHtml(`这个模型用不了：${verdict.message}`),
+						text: plainToTelegramHtml(`This model cannot be used: ${verdict.message}`),
 						keyboard: [],
 					})
 					.catch(() => undefined);
@@ -846,7 +846,7 @@ export class TelegramRuntime {
 					.editMessageText({
 						chatId: message.chat.id,
 						messageId: message.message_id,
-						text: plainToTelegramHtml("这个 chat 还没有会话，先发一条消息，再选模型。"),
+						text: plainToTelegramHtml("This chat has no conversation yet. Send a message first, then pick a model."),
 						keyboard: [],
 					})
 					.catch(() => undefined);
@@ -859,7 +859,7 @@ export class TelegramRuntime {
 				.editMessageText({
 					chatId: message.chat.id,
 					messageId: message.message_id,
-					text: plainToTelegramHtml(`已切到 ${provider.name} / ${model.name}（只影响这个 chat）`),
+					text: plainToTelegramHtml(`Switched to ${provider.name} / ${model.name} (this chat only)`),
 					keyboard: [],
 				})
 				.catch(() => undefined);
@@ -870,7 +870,7 @@ export class TelegramRuntime {
 				.editMessageText({
 					chatId: message.chat.id,
 					messageId: message.message_id,
-					text: plainToTelegramHtml("选一个 provider："),
+					text: plainToTelegramHtml("Pick a provider:"),
 					keyboard: this.#deps.menu.providerKeyboard(chatId, record?.provider),
 				})
 				.catch(() => undefined);
@@ -942,9 +942,9 @@ function outboundLabel(item: Outbound): string {
 		case "photo-url":
 			return item.url;
 		case "album":
-			return `${String(item.items.length)} 张图片`;
+			return `${String(item.items.length)} image(s)`;
 		default:
-			return "文本";
+			return "text";
 	}
 }
 
@@ -986,21 +986,21 @@ function helpText(
 	state: "off" | "starting" | "running" | "error",
 	model: string | undefined,
 ): string {
-	const stateLabel = { off: "已停止", starting: "启动中…", running: "运行中", error: "出错" }[state];
+	const stateLabel = { off: "off", starting: "starting…", running: "running", error: "error" }[state];
 	return [
-		"我是这台机器上 DeepSeek Harness 的遥控器。直接发消息给我，agent 会在本机干活。",
+		"I'm Buddy, running inside DeepSeek Harness on this machine. Message me and I'll work here.",
 		"",
-		"命令：",
-		"/new — 开一条新会话（目录不变）",
-		"/model — 换这个 chat 用的模型（不影响桌面端默认）",
-		"/stop — 停掉正在跑的这一轮",
-		"/help — 这条说明",
+		"Commands:",
+		"/new — start a new conversation (same working directory)",
+		"/model — change the model for this chat (desktop default unaffected)",
+		"/stop — stop the current turn",
+		"/help — this message",
 		"",
-		`工作目录：${config.defaultCwd}`,
-		`模型：${model ?? "（跟随默认）"}`,
-		`状态：${stateLabel}`,
-		`权限级别：${config.permissionPreset}`,
+		`Working directory: ${config.defaultCwd}`,
+		`Model: ${model ?? "(follows default)"}`,
+		`Status: ${stateLabel}`,
+		`Permission level: ${config.permissionPreset}`,
 		"",
-		"发文件给我会存到工作目录的 downloads/ 里。",
+		"Files you send me are saved under downloads/ in the working directory.",
 	].join("\n");
 }

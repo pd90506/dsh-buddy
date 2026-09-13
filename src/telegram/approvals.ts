@@ -103,17 +103,17 @@ export class ApprovalBridge {
 		// helper: those would either re-interpret the tags or escape them, and the
 		// prompt once arrived on the phone as the literal text `<b>需要你的许可</b>`.
 		const text = [
-			`<b>需要你的许可</b>`,
-			`工具：<code>${escapeHtml(tool)}</code>`,
-			...(request.reason === undefined ? [] : [`原因：${escapeHtml(request.reason)}`]),
+			`<b>Approval needed</b>`,
+			`Tool: <code>${escapeHtml(tool)}</code>`,
+			...(request.reason === undefined ? [] : [`Reason: ${escapeHtml(request.reason)}`]),
 			``,
-			`${Math.round(timeoutMs / 1000)} 秒内不点按视为拒绝。`,
+			`No answer within ${Math.round(timeoutMs / 1000)} seconds counts as a denial.`,
 		].join("\n");
 
 		const keyboard: TelegramInlineButton[][] = [
 			[
-				{ text: "允许一次", callback_data: `ap:y:${token}` },
-				{ text: "拒绝", callback_data: `ap:n:${token}` },
+				{ text: "Allow once", callback_data: `ap:y:${token}` },
+				{ text: "Deny", callback_data: `ap:n:${token}` },
 			],
 		];
 
@@ -184,10 +184,10 @@ export class ApprovalBridge {
 		if (api === undefined || pending.messageId === undefined) return;
 		const label =
 			outcome === "allowed-once"
-				? "✅ 已允许（仅这一次）"
+				? "✅ Allowed (this once)"
 				: cause === "timeout"
-					? "⌛ 已过期，按拒绝处理"
-					: "❌ 已拒绝";
+					? "⌛ Expired, treated as denied"
+					: "❌ Denied";
 		void api
 			.editMessageText({
 				chatId: pending.chatId,
