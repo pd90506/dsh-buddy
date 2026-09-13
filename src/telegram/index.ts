@@ -23,6 +23,7 @@ import { TelegramGateway } from "./gateway.ts";
 import { ApprovalBridge } from "./approvals.ts";
 import { migrateLegacySettings, type MigrationSettings } from "./migrate.ts";
 import { ModelMenu } from "./model.ts";
+import { legacyBotActive, OCCUPIED_DETAIL } from "./occupancy.ts";
 import { TelegramRuntime } from "./runtime.ts";
 import { SessionManager } from "./session.ts";
 import { openStore, type TelegramStore } from "./store.ts";
@@ -98,6 +99,7 @@ export function apply(ctx: PluginContext): void {
 	let manager: SessionManager | undefined;
 	let runtime: TelegramRuntime | undefined;
 	let stopped = false;
+	let occupied = false;
 
 	const approvals = new ApprovalBridge({
 		api: () => runtime?.api(),
@@ -115,6 +117,14 @@ export function apply(ctx: PluginContext): void {
 	const sync = async (): Promise<void> => {
 		if (runtime === undefined || stopped) return;
 		const config = readConfig();
+		// Before the enable check on purpose: the Telegram module must explain an
+		// occupied bot even while Buddy's own switch is still off.
+		occupied = legacyBotActive((service) => ctx.get(service));
+		if (occupied) {
+			await runtime.stop();
+			log("dsh-telegram still holds the bot; not polling");
+			return;
+		}
 		const token = await readToken(ctx);
 		if (!config.enabled || token === undefined) {
 			await runtime.stop();
@@ -234,9 +244,16 @@ export function apply(ctx: PluginContext): void {
 		resync();
 	}) as never);
 
+	// The legacy plugin's own switch decides whether this row may poll.
+	ctx.on("settings/updated", ((ns: unknown) => {
+		if (ns === "telegram") resync();
+	}) as never);
+
 	new TelegramGateway(ctx, {
 		status: async () => ({
-			...(runtime?.status() ?? { state: "off" as const, sessions: 0 }),
+			...(occupied
+				? { ...(runtime?.status() ?? { sessions: 0 }), state: "error" as const, detail: OCCUPIED_DETAIL }
+				: (runtime?.status() ?? { state: "off" as const, sessions: 0 })),
 			// Posture is reported, never the value. A credentials hiccup must not
 			// take the runtime state down with it: the tab's most useful line is
 			// whether the bot is running, and that has nothing to do with secrets.

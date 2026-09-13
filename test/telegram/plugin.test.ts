@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { apply, inject, name } from "../../src/telegram/index.ts";
 import { TELEGRAM_TOKEN_KEY } from "../../src/telegram/credential-key.ts";
 import { TELEGRAM_TOKEN_REF } from "../../src/telegram/credentials.ts";
+import { OCCUPIED_DETAIL } from "../../src/telegram/occupancy.ts";
 
 /** A storage domain stub with one empty table and a global slot. */
 function domainStub(): unknown {
@@ -378,4 +379,58 @@ test("shutdown unwinds every effect without touching the network", async () => {
 	assert.doesNotThrow(() => {
 		for (const dispose of disposers) dispose();
 	});
+});
+
+test("stays down and reports occupied while dsh-telegram still polls the bot", async () => {
+	// A mounted, enabled dsh-telegram row occupies the token. Buddy's own switch
+	// is on and a token would resolve, but the occupancy check runs before the
+	// token is ever read, so the runtime must never be asked to start and the
+	// status must explain why instead of reporting a plain "off".
+	let reads = 0;
+	let hooks: { onChange(): void } | undefined;
+	const { ctx, provided } = contextStub({
+		loader: { entries: () => [{ options: { name: "dsh-telegram" }, disabled: false }] },
+		settings: {
+			installSection: (_owner: unknown, _ns: string, _schema: unknown, _entry: unknown, accepted: unknown) => {
+				hooks = accepted as { onChange(): void };
+				(accepted as { setSource: (source: () => unknown) => void }).setSource(() => ({
+					enabled: true,
+					ownerUserId: "42",
+					defaultCwd: "/tmp/x",
+					permissionPreset: "workspace-write",
+					renderMarkdown: true,
+					mediaDelivery: "all",
+				}));
+			},
+			describe: () => [],
+			update: async () => undefined,
+			get: (ns: string) => (ns === "telegram" ? { enabled: true } : undefined),
+		},
+		credentials: {
+			resolve: async () => {
+				reads += 1;
+				return { value: "110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw" };
+			},
+			describe: async () => ({ configured: true, writable: true }),
+		},
+	});
+	apply(ctx as never);
+	await settle();
+
+	const gateway = provided.get("buddyTelegram") as {
+		status(): Promise<{ state: string; detail?: string; sessions: number }>;
+	};
+	const status = await gateway.status();
+	assert.equal(status.state, "error");
+	assert.equal(status.detail, OCCUPIED_DETAIL);
+
+	// Boot's own diagnostic line reads the token once regardless (it only reports
+	// presence, never starts anything); a reconcile triggered afterwards must not
+	// read it again, because `sync()` returns on the occupancy check before ever
+	// calling `readToken`.
+	const afterBoot = reads;
+	if (hooks === undefined) assert.fail("the settings section must hand the plugin its hooks");
+	hooks.onChange();
+	await settle();
+	assert.equal(reads, afterBoot, "the token must never be read again while dsh-telegram still holds the bot");
 });
