@@ -45,6 +45,16 @@ export const chatRecordSchema = z.object({
 /** Stored shape of one chat binding. */
 export type ChatRecord = z.infer<typeof chatRecordSchema>;
 
+/** Where a session came from: the chat that created it. Never deleted by `/new`. */
+export const originRecordSchema = z.object({
+	chatId: z.string(),
+	/** ISO-8601. */
+	createdAt: z.string(),
+});
+
+/** Stored shape of one session origin. */
+export type OriginRecord = z.infer<typeof originRecordSchema>;
+
 /**
  * Domain-wide singletons.
  *
@@ -72,13 +82,15 @@ export const telegramDomainSpec = defineDomain({
 	name: TELEGRAM_DOMAIN_NAME,
 	version: 1,
 	global: { schema: globalSchema, initial: {} },
-	tables: { chats: domainTable(chatRecordSchema) },
+	tables: { chats: domainTable(chatRecordSchema), origins: domainTable(originRecordSchema) },
 });
 
 /** An opened domain plus the accessors the rest of the plugin uses. */
 export interface TelegramStore {
 	/** chat id (as a string) → session binding. */
 	readonly chats: KvTable<string, ChatRecord>;
+	/** session id → the chat that created it. */
+	readonly origins: KvTable<string, OriginRecord>;
 	/** Domain-wide singletons, including the polling cursor. */
 	readonly global: DomainGlobal<TelegramGlobal>;
 	/** Release the backend unit. Called from the owning `ctx.effect`. */
@@ -121,6 +133,7 @@ export async function openStore(ctx: StoreContext): Promise<TelegramStore> {
 	}
 	return {
 		chats: domain.table("chats"),
+		origins: domain.table("origins"),
 		global: domain.global,
 		close: async (): Promise<void> => {
 			await domain.close();

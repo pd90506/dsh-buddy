@@ -26,9 +26,14 @@ function agentStub(sessionId: string): AgentLike {
 }
 
 /** A storage stub recording writes. */
-function storeStub(initial?: ChatRecord): { store: TelegramStore; records: Map<string, ChatRecord> } {
+function storeStub(initial?: ChatRecord): {
+	store: TelegramStore;
+	records: Map<string, ChatRecord>;
+	origins: Map<string, { chatId: string; createdAt: string }>;
+} {
 	const records = new Map<string, ChatRecord>();
 	if (initial !== undefined) records.set("42", initial);
+	const origins = new Map<string, { chatId: string; createdAt: string }>();
 	const store = {
 		chats: {
 			get: (key: string) => records.get(key),
@@ -37,10 +42,17 @@ function storeStub(initial?: ChatRecord): { store: TelegramStore; records: Map<s
 			},
 			delete: async (key: string) => records.delete(key),
 		},
+		origins: {
+			get: (key: string) => origins.get(key),
+			put: async (key: string, value: { chatId: string; createdAt: string }) => {
+				origins.set(key, value);
+			},
+			entries: () => origins.entries(),
+		},
 		global: { get: () => ({}), set: async () => undefined },
 		close: async () => undefined,
 	} as unknown as TelegramStore;
-	return { store, records };
+	return { store, records, origins };
 }
 
 /** A preset roster stub recording what the manager asked for and mounted. */
@@ -100,6 +112,8 @@ function deps(options: {
 	agents: Record<string, unknown>;
 	defaults?: { provider: string; model: string } | undefined;
 	presets?: Record<string, unknown> | undefined;
+	presetId?: string;
+	buddyModel?: { provider: string; model: string } | undefined;
 	log?: (line: string) => void;
 }): ConstructorParameters<typeof SessionManager>[0] {
 	return {
@@ -113,6 +127,8 @@ function deps(options: {
 		},
 		store: options.store,
 		log: options.log ?? (() => undefined),
+		presetId: options.presetId ?? "buddy",
+		buddyModel: () => options.buddyModel,
 	};
 }
 
@@ -141,12 +157,17 @@ test("a first contact creates a session with the default model and an absolute c
 	};
 	const { store, records } = storeStub();
 	const manager = new SessionManager(
-		deps({ store, agents, defaults: { provider: "deepseek-official", model: "deepseek-flash" } }),
+		deps({
+			store,
+			agents,
+			defaults: { provider: "deepseek-official", model: "deepseek-flash" },
+			presets: presetStub().service,
+		}),
 	);
 
 	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
 	assert.equal(resolved.created, true);
-	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work" });
+	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work", agentPreset: "buddy" });
 	assert.deepEqual(created[0]?.["agentOptions"], { provider: "deepseek-official", model: "deepseek-flash" });
 	assert.equal(typeof created[0]?.["setup"], "function");
 	assert.equal(records.get("42")?.provider, "deepseek-official");
@@ -165,7 +186,7 @@ test("a new session is labelled so the GUI groups it recognizably (R7)", async (
 		},
 	};
 	const { store } = storeStub();
-	const base = deps({ store, agents });
+	const base = deps({ store, agents, presets: presetStub().service });
 	const manager = new SessionManager({
 		...base,
 		get: (name: string) => (name === "sessionTitle" ? { rename: (_s: unknown, title: string) => renamed.push({ title }) } : base.get(name)),
@@ -208,7 +229,7 @@ test("a stored session that is gone from disk is replaced, not fatal", async () 
 		}),
 	};
 	const { store, records } = storeStub({ sessionId: "session-gone", updatedAt: "2026-09-10T00:00:00.000Z" });
-	const manager = new SessionManager(deps({ store, agents }));
+	const manager = new SessionManager(deps({ store, agents, presets: presetStub().service }));
 
 	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
 	assert.equal(resumed, 1);
@@ -266,7 +287,7 @@ test("a chat-local model choice is stored without touching the global default", 
 	assert.deepEqual(saved, [], "a chat-local switch must not write the global default");
 });
 
-test("a new session is composed from the deployment's default preset (R32)", async () => {
+test("a new session is composed from the buddy preset, never the deployment default", async () => {
 	const created: Record<string, unknown>[] = [];
 	const agents = {
 		get: () => undefined,
@@ -278,27 +299,71 @@ test("a new session is composed from the deployment's default preset (R32)", asy
 			throw new Error("unused");
 		},
 	};
-	const presets = presetStub();
-	const { store } = storeStub();
+	const presets = presetStub("standard");
+	const { store, origins } = storeStub();
 	const manager = new SessionManager(deps({ store, agents, presets: presets.service }));
 
-	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-
-	// The preset id is durable session metadata, so it is written at creation and
-	// not re-derived on every resume.
-	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work", agentPreset: "standard" });
-	assert.deepEqual(presets.resolved, [undefined], "the configured default is resolved, not a hard-coded id");
-
-	// The join happens inside the agent factory's setup hook — the one supported
-	// call site — while the agent is still unpublished.
+	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
+	assert.deepEqual(presets.resolved, ["buddy"]);
+	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work", agentPreset: "buddy" });
 	const setup = created[0]?.["setup"] as (ctx: unknown, agent: unknown) => Promise<void>;
 	const ctx = ctxStub();
 	await setup(ctx, agentStub("session-new"));
-	assert.deepEqual(presets.mounted, [{ agentCtx: ctx, id: "standard" }]);
+	assert.deepEqual(presets.mounted, [{ agentCtx: ctx, id: "buddy" }]);
+	assert.equal(origins.get(String(resolved.sessionId))?.chatId, "42", "a created session records its Telegram origin");
 });
 
-test("a resumed session joins the preset its header recorded (R32)", async () => {
-	const resumed = agentWithPreset("session-live", "standard");
+test("a profile without the preset roster refuses to create a session", async () => {
+	let createCalls = 0;
+	const agents = {
+		get: () => undefined,
+		create: async () => {
+			createCalls += 1;
+			throw new Error("create must not run");
+		},
+		resume: async () => {
+			throw new Error("unused");
+		},
+	};
+	const { store, records, origins } = storeStub();
+	const manager = new SessionManager(deps({ store, agents }));
+	await assert.rejects(() => manager.ensure("42", "Test Chat", "/tmp/telegram-work"), /^Error: Buddy preset unavailable: /);
+	assert.equal(createCalls, 0);
+	assert.equal(records.size, 0);
+	assert.equal(origins.size, 0);
+});
+
+test("an unresolvable buddy preset refuses to create a session", async () => {
+	let createCalls = 0;
+	const agents = {
+		get: () => undefined,
+		create: async () => {
+			createCalls += 1;
+			throw new Error("create must not run");
+		},
+		resume: async () => {
+			throw new Error("unused");
+		},
+	};
+	const presets = presetStub();
+	const missing = {
+		...presets.service,
+		resolve: async () => {
+			throw new Error('agent-presets: preset "buddy" not found');
+		},
+	};
+	const { store, records } = storeStub();
+	const manager = new SessionManager(deps({ store, agents, presets: missing }));
+	await assert.rejects(
+		() => manager.ensure("42", "Test Chat", "/tmp/telegram-work"),
+		/Buddy preset unavailable: agent-presets: preset "buddy" not found/,
+	);
+	assert.equal(createCalls, 0);
+	assert.equal(records.size, 0);
+});
+
+test("a resumed session joins the preset its header recorded", async () => {
+	const resumed = agentWithPreset("session-live", "buddy");
 	const recorder = resumeRecorder(resumed);
 	const agents = {
 		get: () => undefined,
@@ -310,15 +375,12 @@ test("a resumed session joins the preset its header recorded (R32)", async () =>
 	const presets = presetStub();
 	const { store } = storeStub({ sessionId: "session-live", updatedAt: "2026-09-10T00:00:00.000Z" });
 	const manager = new SessionManager(deps({ store, agents, presets: presets.service }));
-
 	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-	// Drive the captured hook the way the factory does: with the resumed agent,
-	// whose header names the preset the session was composed from.
 	await recorder.hook()(ctxStub(), resumed);
-	assert.deepEqual(presets.mounted.map((entry) => entry.id), ["standard"]);
+	assert.deepEqual(presets.mounted.map((entry) => entry.id), ["buddy"]);
 });
 
-test("a session created before presets existed is upgraded to the default (R32)", async () => {
+test("a resumed session whose header records no preset joins the buddy preset", async () => {
 	const legacy = agentWithPreset("session-legacy", undefined);
 	const recorder = resumeRecorder(legacy);
 	const agents = {
@@ -331,37 +393,12 @@ test("a session created before presets existed is upgraded to the default (R32)"
 	const presets = presetStub("standard");
 	const { store } = storeStub({ sessionId: "session-legacy", updatedAt: "2026-09-10T00:00:00.000Z" });
 	const manager = new SessionManager(deps({ store, agents, presets: presets.service }));
-
 	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
 	await recorder.hook()(ctxStub(), legacy);
-	// Same behaviour as the GUI opening that session: the header says nothing, so
-	// the deployment default applies.
-	assert.deepEqual(presets.mounted.map((entry) => entry.id), ["standard"]);
+	assert.deepEqual(presets.mounted.map((entry) => entry.id), ["buddy"]);
 });
 
-test("a profile without the preset roster still creates sessions (R32)", async () => {
-	const created: Record<string, unknown>[] = [];
-	const agents = {
-		get: () => undefined,
-		create: async (options: Record<string, unknown>) => {
-			created.push(options);
-			return { agent: agentStub("session-plain"), dispose: () => undefined };
-		},
-		resume: async () => {
-			throw new Error("unused");
-		},
-	};
-	const { store } = storeStub();
-	const manager = new SessionManager(deps({ store, agents }));
-	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-
-	assert.equal(resolved.created, true);
-	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work" }, "no preset id is invented");
-	const setup = created[0]?.["setup"] as (ctx: unknown, agent: unknown) => Promise<void>;
-	await setup(ctxStub(), agentStub("session-plain"));
-});
-
-test("a failing preset mount surfaces as a creation failure (R32)", async () => {
+test("a failing preset mount surfaces as a creation failure", async () => {
 	const created: Record<string, unknown>[] = [];
 	const agents = {
 		get: () => undefined,
@@ -382,18 +419,13 @@ test("a failing preset mount surfaces as a creation failure (R32)", async () => 
 	};
 	const { store } = storeStub();
 	const manager = new SessionManager(deps({ store, agents, presets: failing }));
-	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-	assert.equal(resolved.created, true);
-
-	// The join is installed while the agent is still unpublished, so a rejection
-	// here rolls the whole creation back rather than publishing a bare agent.
+	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
 	const setup = created[0]?.["setup"] as (ctx: unknown, agent: unknown) => Promise<void>;
 	await assert.rejects(() => setup(ctxStub(), agentStub("session-x")), /preset broke/);
 });
 
-test("a profile without a preset roster says so in the log (R32)", async () => {
+test("a new session starts on the buddy default model when one is set", async () => {
 	const created: Record<string, unknown>[] = [];
-	const logs: string[] = [];
 	const agents = {
 		get: () => undefined,
 		create: async (options: Record<string, unknown>) => {
@@ -405,14 +437,35 @@ test("a profile without a preset roster says so in the log (R32)", async () => {
 		},
 	};
 	const { store } = storeStub();
-	const manager = new SessionManager(deps({ store, agents, log: (line) => logs.push(line) }));
+	const manager = new SessionManager(
+		deps({
+			store,
+			agents,
+			presets: presetStub().service,
+			defaults: { provider: "global-p", model: "global-m" },
+			buddyModel: { provider: "buddy-p", model: "buddy-m" },
+		}),
+	);
 	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-	assert.deepEqual(logs, [], "nothing is logged before the agent factory calls setup");
+	assert.deepEqual(created[0]?.["agentOptions"], { provider: "buddy-p", model: "buddy-m" });
+});
 
-	// The hook is where the absence matters — an agent without a preset has no
-	// tools beyond the host-scope ones — so it is where the line belongs.
-	const setup = created[0]?.["setup"] as (ctx: unknown, agent: unknown) => Promise<void>;
-	await setup(ctxStub(), agentStub("session-plain"));
-	assert.equal(logs.length, 1);
-	assert.match(logs[0] ?? "", /no roster/);
+test("without a buddy default a new session starts on the global default", async () => {
+	const created: Record<string, unknown>[] = [];
+	const agents = {
+		get: () => undefined,
+		create: async (options: Record<string, unknown>) => {
+			created.push(options);
+			return { agent: agentStub(String(options["sessionId"])), dispose: () => undefined };
+		},
+		resume: async () => {
+			throw new Error("unused");
+		},
+	};
+	const { store } = storeStub();
+	const manager = new SessionManager(
+		deps({ store, agents, presets: presetStub().service, defaults: { provider: "global-p", model: "global-m" } }),
+	);
+	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
+	assert.deepEqual(created[0]?.["agentOptions"], { provider: "global-p", model: "global-m" });
 });

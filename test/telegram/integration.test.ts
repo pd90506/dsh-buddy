@@ -230,6 +230,7 @@ test("a message travels the whole path and its reply reaches the Bot API", async
 	const turns: string[] = [];
 	const globalState: Record<string, unknown> = {};
 	const records = new Map<string, ChatRecord>();
+	const origins = new Map<string, { chatId: string; createdAt: string }>();
 	const store = {
 		chats: {
 			get: (key: string) => records.get(key),
@@ -237,6 +238,13 @@ test("a message travels the whole path and its reply reaches the Bot API", async
 				records.set(key, value);
 			},
 			delete: async (key: string) => records.delete(key),
+		},
+		origins: {
+			get: (key: string) => origins.get(key),
+			put: async (key: string, value: { chatId: string; createdAt: string }) => {
+				origins.set(key, value);
+			},
+			entries: () => origins.entries(),
 		},
 		global: {
 			get: () => globalState,

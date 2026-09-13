@@ -15,7 +15,8 @@
  * so a profile that lacks one degrades instead of failing to mount.
  * @module dsh-buddy-telegram
  */
-import { BUDDY_WORKSPACE_DEFAULT } from "../index.ts";
+import { BUDDY_PRESET_ID, BUDDY_WORKSPACE_DEFAULT } from "../index.ts";
+import { selectionFromDefault } from "../model-selection.ts";
 import { Config, DEFAULT_MEDIA_DELIVERY, resolveDefaultCwd, SETTINGS_NAMESPACE, type TelegramConfig } from "./config.ts";
 import { describeToken, readToken, TELEGRAM_TOKEN_REF } from "./credentials.ts";
 import { TelegramGateway } from "./gateway.ts";
@@ -37,6 +38,7 @@ interface PluginContext {
 	on(event: string, listener: (...args: never[]) => unknown): () => void;
 	effect(effect: () => (() => void) | void, label?: string): void;
 	inject(services: string[], callback: (scoped: PluginContext) => void): void;
+	buddyStore: { config(): import("../config.ts").BuddyConfig };
 	settings?: {
 		installSection(
 			owner: unknown,
@@ -136,7 +138,14 @@ export function apply(ctx: PluginContext): void {
 
 	const boot = async (): Promise<void> => {
 		store = await openStore(ctx);
-		manager = new SessionManager({ get: (service) => ctx.get(service), store, log });
+		manager = new SessionManager({
+			get: (service) => ctx.get(service),
+			store,
+			log,
+			presetId: BUDDY_PRESET_ID,
+			// `buddyStore` is a declared hard dependency, so the property read is safe.
+			buddyModel: () => selectionFromDefault(ctx.buddyStore.config().model),
+		});
 		runtime = new TelegramRuntime({
 			get: (service) => ctx.get(service),
 			store,

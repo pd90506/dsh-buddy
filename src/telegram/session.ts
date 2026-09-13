@@ -27,6 +27,7 @@ import { brandString } from "@deepseek-ai/dsh-brand";
 import { installModelSelection } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { SessionId } from "@deepseek-ai/dsh-session";
+import { resolveModelSelection, type ModelSelection as BuddyModelSelection } from "../model-selection.ts";
 import type { AttachmentRefLike } from "./telegram/media.ts";
 import type { ChatRecord, TelegramStore } from "./store.ts";
 
@@ -91,6 +92,10 @@ export interface SessionDeps {
 	readonly store: TelegramStore;
 	/** Diagnostic sink; never receives the token. */
 	readonly log: (line: string) => void;
+	/** The only preset this manager composes sessions from. */
+	readonly presetId: string;
+	/** Buddy's default model, read at creation time. */
+	readonly buddyModel: () => BuddyModelSelection | undefined;
 }
 
 /** Handle returned by `agents.create` / `agents.resume`. */
@@ -120,10 +125,10 @@ export interface AgentPresetRef {
 /**
  * The `ctx.agentPresets` slice used here.
  *
- * Both members are load-bearing: `resolve(undefined)` answers the deployment's
- * configured default (a user setting, so it is read per call rather than cached),
- * and `mount` is the harness's one supported way to bring a preset into an agent
- * — it must be called from the agent factory's `setup` hook, while the agent is
+ * Both members are load-bearing: `resolve` is used only to confirm Buddy's own
+ * preset id resolves (this manager always passes one, never `undefined`), and
+ * `mount` is the harness's one supported way to bring a preset into an agent —
+ * it must be called from the agent factory's `setup` hook, while the agent is
  * still unpublished, so a broken preset rolls the creation back instead of
  * publishing a bare agent.
  */
@@ -546,15 +551,16 @@ export class SessionManager {
 	}
 
 	/**
-	 * The deployment's default model selection.
+	 * The deployment's global default model selection.
 	 *
 	 * A session created without `agentOptions` gets an empty provider/model pair,
 	 * and the first request then fails to resolve a route. Every session this
 	 * plugin creates therefore starts from the same selection the GUI would
-	 * apply, unless the chat has already chosen one of its own.
-	 * @returns the default selection, when the service is mounted and configured.
+	 * apply, unless the chat has already chosen one of its own or Buddy has its
+	 * own default configured.
+	 * @returns the global default selection, when the service is mounted and configured.
 	 */
-	#defaultSelection(): ModelSelection | undefined {
+	#globalSelection(): ModelSelection | undefined {
 		const service = this.#deps.get("agentDefaultModel") as { currentSelection(): ModelSelection } | undefined;
 		if (service === undefined) return undefined;
 		try {
@@ -564,6 +570,32 @@ export class SessionManager {
 			this.#deps.log(`default model unavailable: ${(error as Error).message}`);
 			return undefined;
 		}
+	}
+
+	/**
+	 * The model a session starts on when its chat has not chosen one: Buddy's
+	 * default, then the deployment's global default.
+	 *
+	 * `resolveModelSelection` takes `../model-selection.ts`'s own `ModelSelection`
+	 * shape, which (unlike this module's) does not admit an explicit
+	 * `reasoningEffort: undefined` under `exactOptionalPropertyTypes` — so the
+	 * global selection is rebuilt at this boundary rather than widening either
+	 * type's shape.
+	 * @returns the selection, when any is configured.
+	 */
+	#defaultSelection(): ModelSelection | undefined {
+		const global = this.#globalSelection();
+		return resolveModelSelection(
+			undefined,
+			this.#deps.buddyModel(),
+			global === undefined
+				? undefined
+				: {
+						provider: global.provider,
+						model: global.model,
+						...(global.reasoningEffort === undefined ? {} : { reasoningEffort: global.reasoningEffort }),
+					},
+		);
 	}
 
 	/** The options one `agents.create`/`resume` call needs to pin a model. */
@@ -607,6 +639,10 @@ export class SessionManager {
 
 	/** Create a fresh session for a chat and remember the binding. */
 	async #create(chatId: string, chatTitle: string, defaultCwd: string): Promise<ResolvedChat> {
+		// Resolved before anything else: a profile without Buddy's preset must
+		// refuse the whole creation rather than leave a directory, a handle, or a
+		// chat binding behind for a session that was never composed as Buddy.
+		const presetId = await this.#presetId();
 		const agents = this.#agents();
 		const sessionId = brandString<SessionId>(`session-${randomUUID()}`);
 		// `agents.create()` does not create the directory the way the session
@@ -614,12 +650,9 @@ export class SessionManager {
 		await mkdir(defaultCwd, { recursive: true });
 		const ref = this.#selectionRef(sessionId, undefined);
 		if (ref.current === undefined) ref.current = this.#defaultSelection();
-		// Resolved before creation because the id is durable session metadata: it is
-		// what a later resume reads back to rejoin the same composition.
-		const presetId = await this.#defaultPresetId();
 		const handle = await agents.create({
 			sessionId,
-			meta: { cwd: defaultCwd, ...(presetId === undefined ? {} : { agentPreset: presetId }) },
+			meta: { cwd: defaultCwd, agentPreset: presetId },
 			...this.#agentOptions(ref.current),
 			setup: this.#setupFor(() => ref, presetId),
 		});
@@ -635,27 +668,27 @@ export class SessionManager {
 					}),
 			updatedAt: new Date().toISOString(),
 		});
+		await this.#deps.store.origins.put(String(sessionId), { chatId, createdAt: new Date().toISOString() });
 		this.#label(handle.agent, chatTitle);
 		return { sessionId, agent: handle.agent, created: true };
 	}
 
 	/**
-	 * The deployment's default agent preset, when a roster is mounted.
+	 * Resolve Buddy's preset, or refuse.
 	 *
-	 * Read per session rather than cached: the default is a user setting and the
-	 * harness re-reads it on every call, so a change must apply to the next
-	 * session without a restart. A roster that cannot resolve is not fatal — the
-	 * session is created without one, exactly as before this existed.
-	 * @returns the preset id, or undefined when there is no roster or it failed.
+	 * Never falls back: a Telegram chat with Buddy that silently ran on the
+	 * deployment's default preset would be an agent without Buddy's voice
+	 * answering under Buddy's name.
+	 * @returns the resolved preset id.
+	 * @throws `Buddy preset unavailable: …` when there is no roster or the id does not resolve.
 	 */
-	async #defaultPresetId(): Promise<string | undefined> {
+	async #presetId(): Promise<string> {
 		const presets = this.#presets();
-		if (presets === undefined) return undefined;
+		if (presets === undefined) throw new Error("Buddy preset unavailable: this profile mounts no agent preset roster");
 		try {
-			return (await presets.resolve(undefined)).id;
+			return (await presets.resolve(this.#deps.presetId)).id;
 		} catch (error) {
-			this.#deps.log(`preset resolution failed: ${(error as Error).message}`);
-			return undefined;
+			throw new Error(`Buddy preset unavailable: ${(error as Error).message}`);
 		}
 	}
 
@@ -668,10 +701,10 @@ export class SessionManager {
 	 * The pre-publication setup hook for one agent.
 	 *
 	 * Two things happen here, and both must: the chat-local model selection is
-	 * installed, and the agent joins its agent preset. The harness documents this
-	 * hook as the only supported mount site — it runs while the agent is still
-	 * unpublished, so a rejected composition rolls the whole creation back rather
-	 * than publishing an agent that is missing its tools.
+	 * installed, and the agent joins Buddy's fixed agent preset. The harness
+	 * documents this hook as the only supported mount site — it runs while the
+	 * agent is still unpublished, so a rejected composition rolls the whole
+	 * creation back rather than publishing an agent that is missing its tools.
 	 * @param refOf - lazily builds the model-selection ref (the ref must be the
 	 * one this manager keeps updating, so it is looked up per call).
 	 * @param fallbackPresetId - id to join when the session's header records none.
@@ -682,15 +715,11 @@ export class SessionManager {
 			installModelSelection(agentCtx as never, refOf() as never);
 			const presets = this.#presets();
 			if (presets === undefined) {
-				// Not fatal, but it is the difference between an agent with tools and
-				// one without, so it must be visible in the log rather than silent.
-				this.#deps.log("agent preset unavailable: this profile mounts no roster, so the session has host-scope tools only");
-				return;
+				throw new Error("Buddy preset unavailable: this profile mounts no agent preset roster");
 			}
-			// The header wins: a session created under the default may later be
-			// opened while the default has changed, and it must keep its own preset.
-			const id = storedPreset(agent) ?? fallbackPresetId ?? (await this.#defaultPresetId());
-			if (id === undefined) return;
+			// The header wins: a session created under Buddy's preset may later be
+			// resumed after the id changed, and it must keep its own preset.
+			const id = storedPreset(agent) ?? fallbackPresetId ?? (await this.#presetId());
 			await presets.mount(agentCtx, id);
 		};
 	}
