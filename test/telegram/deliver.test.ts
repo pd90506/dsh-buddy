@@ -86,6 +86,24 @@ test("a long reply is split, and every text chunk carries its ordinal", async ()
 	});
 });
 
+test("two separate assistant messages are two messages, not a numbered split", async () => {
+	// Each assistant message is its own part now, the way DSH shows them as
+	// separate bubbles. Distinct messages are not a length-split, so they carry no
+	// (i/n) counter — that counter is only for one message Telegram had to cut.
+	const { io } = world();
+	const out = await planReply(
+		[{ kind: "text", text: "first thought" }, { kind: "text", text: "second thought" }],
+		options(io),
+	);
+	const texts = out.filter((item) => item.kind === "text");
+	assert.equal(texts.length, 2, "two messages, one per assistant message");
+	assert.deepEqual(
+		texts.map((item) => (item.kind === "text" ? item.plain : "")),
+		["first thought", "second thought"],
+		"no (i/n) suffix on distinct messages",
+	);
+});
+
 test("an image written into a sentence is delivered where the sentence says it is", async () => {
 	const { io } = world({ files: { "/w/chart.png": bytes(2048) } });
 	const out = await planReply(

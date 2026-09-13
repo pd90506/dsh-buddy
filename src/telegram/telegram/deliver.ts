@@ -171,7 +171,6 @@ export async function planReply(parts: readonly TurnPart[], options: DeliverOpti
 	if (skippedByBudget > 0) {
 		outbound.push(notice(`(${String(skippedByBudget)} more media item(s) not sent)`));
 	}
-	number(outbound);
 	return outbound;
 }
 
@@ -180,30 +179,10 @@ function candidatesOf(parts: readonly TurnPart[], options: DeliverOptions, limit
 	const candidates: Candidate[] = [];
 	for (const part of parts) {
 		if (part.kind === "text") {
-			const plans = options.renderMarkdown ? planMarkdown(part.text, { limit }) : textOnly(part.text, limit);
-			for (const plan of plans) {
-				if (plan.kind === "text") {
-					for (const chunk of plan.chunks) candidates.push({ kind: "text", html: chunk.html, plain: chunk.plain });
-					continue;
-				}
-				if (!allows(options.mediaDelivery, "markdown")) continue;
-				// A web image without an image extension is not something Telegram will
-				// fetch as a photo, so it stays a link rather than becoming a complaint.
-				if (/^https?:\/\//i.test(plan.src) && !isImageUrl(plan.src)) {
-					const label = plan.alt === "" ? plan.src : plan.alt;
-					candidates.push({
-						kind: "text",
-						html: `<a href="${escapeHtmlAttribute(plan.src)}">${escapeHtml(label)}</a>`,
-						plain: label,
-					});
-					continue;
-				}
-				candidates.push({
-					kind: "media",
-					source: sourceOf(plan.src),
-					...(plan.alt === "" ? {} : { caption: plan.alt }),
-				});
-			}
+			// Each assistant message is numbered on its own: an (i/n) counter marks a
+			// single message Telegram's length ceiling forced apart, not two distinct
+			// messages, which arrive un-numbered the way DSH shows them.
+			candidates.push(...numberTextRun(textPartCandidates(part.text, options, limit)));
 			continue;
 		}
 		if (!allows(options.mediaDelivery, part.via)) continue;
@@ -214,6 +193,58 @@ function candidatesOf(parts: readonly TurnPart[], options: DeliverOptions, limit
 		});
 	}
 	return candidates;
+}
+
+/** The candidates one assistant message produces: its text chunks and any images lifted from its prose, in reading order. */
+function textPartCandidates(text: string, options: DeliverOptions, limit: number): Candidate[] {
+	const candidates: Candidate[] = [];
+	const plans = options.renderMarkdown ? planMarkdown(text, { limit }) : textOnly(text, limit);
+	for (const plan of plans) {
+		if (plan.kind === "text") {
+			for (const chunk of plan.chunks) candidates.push({ kind: "text", html: chunk.html, plain: chunk.plain });
+			continue;
+		}
+		if (!allows(options.mediaDelivery, "markdown")) continue;
+		// A web image without an image extension is not something Telegram will
+		// fetch as a photo, so it stays a link rather than becoming a complaint.
+		if (/^https?:\/\//i.test(plan.src) && !isImageUrl(plan.src)) {
+			const label = plan.alt === "" ? plan.src : plan.alt;
+			candidates.push({
+				kind: "text",
+				html: `<a href="${escapeHtmlAttribute(plan.src)}">${escapeHtml(label)}</a>`,
+				plain: label,
+			});
+			continue;
+		}
+		candidates.push({
+			kind: "media",
+			source: sourceOf(plan.src),
+			...(plan.alt === "" ? {} : { caption: plan.alt }),
+		});
+	}
+	return candidates;
+}
+
+/**
+ * Number the text messages of ONE assistant message, in place of a global count.
+ *
+ * The `(i/n)` counter tells the reader a single message was cut by Telegram's
+ * per-message ceiling, so it spans only that message's own chunks — and only
+ * text ones, so an image lifted from the middle of the prose does not make the
+ * numbering lie. A message that fits in one piece is left unmarked.
+ * @param candidates - one text part's candidates, in reading order.
+ * @returns the same candidates, with `(i/n)` on the text ones when there is more than one.
+ */
+function numberTextRun(candidates: readonly Candidate[]): Candidate[] {
+	const textCount = candidates.reduce((count, candidate) => count + (candidate.kind === "text" ? 1 : 0), 0);
+	if (textCount <= 1) return [...candidates];
+	let index = 0;
+	return candidates.map((candidate) => {
+		if (candidate.kind !== "text") return candidate;
+		index += 1;
+		const suffix = ordinalSuffix(index, textCount);
+		return { kind: "text", html: candidate.html + suffix, plain: candidate.plain + suffix };
+	});
 }
 
 /** Non-Markdown mode: text chunks only, no media extraction. */
@@ -319,23 +350,4 @@ function assemble(resolved: readonly ResolvedItem[]): Outbound[] {
 	return outbound;
 }
 
-/**
- * Number the text messages of one reply.
- *
- * Telegram's per-message ceiling is what forces the split, so the reader is told
- * which piece they are missing: `(2/3)` on every text message, and only text
- * messages — an image between two of them is not a "part" of the text.
- * @param outbound - the outbound sequence, numbered in place.
- */
-function number(outbound: Outbound[]): void {
-	const texts = outbound.filter((item) => item.kind === "text");
-	if (texts.length <= 1) return;
-	let index = 0;
-	outbound.forEach((item, position) => {
-		if (item.kind !== "text") return;
-		index += 1;
-		const suffix = ordinalSuffix(index, texts.length);
-		outbound[position] = { kind: "text", html: item.html + suffix, plain: item.plain + suffix };
-	});
-}
 

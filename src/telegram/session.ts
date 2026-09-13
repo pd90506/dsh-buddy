@@ -262,8 +262,11 @@ export function foldTurnParts(events: readonly SessionEventLike[], baseline: num
 		}
 
 		if (event.type === "assistant/message") {
+			// One part per assistant message, never merged: DSH shows each message as
+			// its own bubble, and Telegram should send each as its own message rather
+			// than gluing a turn's separate thoughts into one wall of text.
 			const text = messageText((data as { message?: unknown }).message);
-			if (text.trim() !== "") appendText(parts, text);
+			if (text.trim() !== "") parts.push({ kind: "text", text });
 			continue;
 		}
 
@@ -278,16 +281,6 @@ export function foldTurnParts(events: readonly SessionEventLike[], baseline: num
 	}
 
 	return parts;
-}
-
-/** Append text to the last text part, or start a new one. */
-function appendText(parts: TurnPart[], text: string): void {
-	const last = parts[parts.length - 1];
-	if (last?.kind === "text") {
-		parts[parts.length - 1] = { kind: "text", text: `${last.text}\n\n${text}` };
-		return;
-	}
-	parts.push({ kind: "text", text });
 }
 
 /** The turn this delivery owns: the first one that opened at or after `baseline`. */

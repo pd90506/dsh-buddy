@@ -782,11 +782,13 @@ test("a flood response retries the same message and keeps the rest of the reply 
 	await h.runtime.handleUpdate(message(42, "讲两段"));
 	await settle();
 
-	// Both messages arrive: the flooded one is retried rather than dropped.
+	// Both messages arrive: the flooded one is retried rather than dropped. Two
+	// separate assistant messages go out as two un-numbered messages — the (i/n)
+	// counter is only for one message Telegram's length limit forced apart.
 	assert.equal(h.sent.length, 2);
 	assert.deepEqual(
 		h.sent.map((body) => body["text"]),
-		["第一段 (1/2)", "第二段 (2/2)"],
+		["第一段", "第二段"],
 	);
 	await h.runtime.stop();
 });

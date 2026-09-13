@@ -153,6 +153,21 @@ test("foldTurnParts keeps the reading order of text, delivered files and tool im
 	]);
 });
 
+test("foldTurnParts keeps separate assistant messages separate, even across a tool call", () => {
+	// DSH shows each assistant message as its own bubble; a tool call between two
+	// of them produces no part, so it must not glue them into one Telegram message.
+	const events = [
+		event(10, "turn/start", { turn: 2 }),
+		assistant(11, 2, "first thought"),
+		toolCall(12, 2, "call-1", "run_bash"),
+		assistant(13, 2, "second thought"),
+	];
+	assert.deepEqual(foldTurnParts(events, 10), [
+		{ kind: "text", text: "first thought" },
+		{ kind: "text", text: "second thought" },
+	]);
+});
+
 test("foldTurnParts never forwards an image the agent only looked at", () => {
 	const events = [
 		event(1, "turn/start", { turn: 1 }),
