@@ -11,7 +11,7 @@
  * Only the methods this plugin uses are implemented, and only the update fields
  * it reads are typed: Telegram's schema is far larger than any one bridge needs,
  * and a narrower surface is a smaller thing to keep correct.
- * @module dsh-telegram/telegram/api
+ * @module dsh-buddy/telegram/telegram/api
  */
 import { setTimeout as delay } from "node:timers/promises";
 

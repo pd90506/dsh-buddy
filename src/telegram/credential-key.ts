@@ -8,7 +8,7 @@
  * the two spellings have to be the same string. Written twice, a rename on one
  * side would not fail any test; it would silently leave the bot with no token and
  * the tab reporting one.
- * @module dsh-telegram/credential-key
+ * @module dsh-buddy/telegram/credential-key
  */
 
 /** Credentials key for the Telegram bot token; a POSIX identifier, as required. */

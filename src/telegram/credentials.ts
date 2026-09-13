@@ -11,7 +11,7 @@
  * which the credentials service resolves ahead of the stored record, so
  * `resolve` is the only correct accessor — reading the stored record directly
  * would miss the environment case.
- * @module dsh-telegram/credentials
+ * @module dsh-buddy/telegram/credentials
  */
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
 import { TELEGRAM_TOKEN_KEY } from "./credential-key.ts";

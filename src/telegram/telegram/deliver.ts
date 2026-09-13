@@ -16,7 +16,7 @@
  *
  * Everything the resolver needs is injected ({@link MediaIo}), which is what lets
  * the whole policy be tested without a disk, a network or a bot token.
- * @module dsh-telegram/telegram/deliver
+ * @module dsh-buddy/telegram/telegram/deliver
  */
 import { basename } from "node:path";
 import type { MediaDelivery } from "../config.ts";

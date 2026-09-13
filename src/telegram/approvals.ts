@@ -22,7 +22,7 @@
  *
  * Only sessions this plugin created are answerable here; anything else is passed
  * to the next listener (the browser, in a normal deployment) with `next()`.
- * @module dsh-telegram/approvals
+ * @module dsh-buddy/telegram/approvals
  */
 import { randomBytes } from "node:crypto";
 import type { TelegramApi, TelegramInlineButton } from "./telegram/api.ts";

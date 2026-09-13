@@ -23,7 +23,7 @@
  * Nothing here sends anything or formats user-facing text: a refusal is a code
  * plus a detail string, and the caller renders it. File system and attachment
  * access arrive as {@link MediaIo} so a test needs no disk and no store.
- * @module dsh-telegram/telegram/media
+ * @module dsh-buddy/telegram/telegram/media
  */
 import { basename, isAbsolute, join, sep } from "node:path";
 

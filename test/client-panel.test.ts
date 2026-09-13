@@ -424,6 +424,79 @@ test("a failed workspace create is shown, and no session is created or opened", 
 	assert.ok(!panel.actions.some((action) => action.service === "sessions.open"));
 });
 
+test("the panel clears a stale preferences error once a notified reload succeeds (R9)", async () => {
+	// Composite mount as in R8, so the settings tab's toggle can fire the shared
+	// `preferencesChanged` notifier the panel subscribes to. The panel is listed
+	// first here (unlike R8) so its own initial `buddyPersona/preferences` call —
+	// the very first RPC either component issues — is the one made to fail;
+	// every later call to that endpoint (the settings tab's own initial load,
+	// and the panel's post-notify reload) succeeds.
+	const renderer = createRenderer();
+	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
+	let prefs = { ...PREFS, panel: { sections: { soul: true, agents: true, model: true, telegram: true } } };
+	let preferencesCalls = 0;
+	const FAILED_LOAD = "buddyPersona/preferences failed: EIO: host is down";
+	const { ctx, registrations } = contextStub({
+		rpc: {
+			call: async (_route: string, endpoint: string, payload: unknown) => {
+				if (endpoint === "buddyPersona/preferences") {
+					preferencesCalls += 1;
+					if (preferencesCalls === 1) return { ok: false, error: { code: "EIO", message: "host is down" } };
+					return { ok: true, value: prefs };
+				}
+				if (endpoint === "buddyPersona/updatePreferences") {
+					const patch = (payload as { args: { patch: { panel: { sections: Record<string, boolean> } } } }).args.patch;
+					prefs = { ...prefs, panel: { sections: { ...prefs.panel.sections, ...patch.panel.sections } } };
+					return { ok: true, value: prefs };
+				}
+				if (endpoint === "buddyPersona/persona") return { ok: true, value: { soul: "", agents: "", home: "/h" } };
+				if (endpoint === "buddyTelegram/config") {
+					return {
+						ok: true,
+						value: { enabled: false, ownerUserId: "", defaultCwd: "", permissionPreset: "workspace-write", renderMarkdown: true, mediaDelivery: "all" },
+					};
+				}
+				if (endpoint === "buddyTelegram/status") {
+					return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
+				}
+				throw new Error(`unexpected endpoint: ${endpoint}`);
+			},
+		},
+		remote: {
+			session: {
+				modelCatalog: async () => ({
+					ok: true,
+					value: { default: { provider: "", model: "" }, routableProviders: [], groups: [], failures: [] },
+				}),
+			},
+		},
+	});
+	client.apply(ctx);
+	const settingsReg = registrations.find((r) => r.options.name === "settings.section");
+	const mainReg = registrations.find((r) => r.options.name === "main");
+	assert.ok(settingsReg !== undefined && mainReg !== undefined);
+
+	const Root = (): unknown => [
+		{ type: mainReg.component, props: {} },
+		{ type: settingsReg.component, props: {} },
+	];
+	renderer.mount(Root as () => unknown);
+	await settle();
+
+	const [panelTreeBefore] = renderer.tree() as [unknown, unknown];
+	assert.ok(texts(panelTreeBefore).includes(FAILED_LOAD), "the panel's own failed load shows its error");
+
+	// Toggling a settings switch is the only path that fires
+	// `preferencesChanged.notify()`, which is what makes the panel reload.
+	const soulCheckbox = elements(renderer.tree()).find((e) => e.type === "input" && e.props["name"] === "soul");
+	assert.ok(soulCheckbox !== undefined, "the settings tab's soul checkbox");
+	(soulCheckbox.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } });
+	await settle();
+
+	const [panelTreeAfter] = renderer.tree() as [unknown, unknown];
+	assert.ok(!texts(panelTreeAfter).includes(FAILED_LOAD), "a successful reload must clear the earlier error");
+});
+
 test("the main panel drops a module the settings tab just hid, without remounting (R8)", async () => {
 	// The settings tab and the main panel are two independent slot registrations
 	// from the SAME `apply(ctx)` call, mounted here as siblings of one composite

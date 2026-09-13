@@ -22,7 +22,7 @@
  * ever split mid-line is a single line longer than an entire message — cut at a
  * character boundary, as escaped text, where inline formatting is meaningless
  * anyway.
- * @module dsh-telegram/telegram/render
+ * @module dsh-buddy/telegram/telegram/render
  */
 import {
 	parseMarkdown,

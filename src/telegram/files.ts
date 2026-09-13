@@ -8,7 +8,7 @@
  * subdirectory of the session's working directory rather than its root: they are
  * this chat's material, and keeping them in one place keeps them out of the way
  * of the agent's own files, while staying somewhere the user can find them.
- * @module dsh-telegram/files
+ * @module dsh-buddy/telegram/files
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";

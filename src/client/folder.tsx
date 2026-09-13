@@ -28,7 +28,7 @@ export interface FolderDeps {
 	openSession(sessionId: string): void;
 	list: { getSnapshot(): { current?: string | undefined }; subscribe(listener: () => void): () => void };
 	expanded: { read(): boolean; write(value: boolean): void };
-	/** Debounce for reloads triggered by session-list changes; tests pass 0. */
+	/** Debounce for reloads triggered by session-list changes; production uses 500ms, tests wait past it. */
 	reloadDelayMs: number;
 }
 

@@ -16,7 +16,7 @@
  *
  * Buttons carry indices rather than identifiers: `callback_data` is capped at 64
  * bytes, and provider-qualified model ids routinely exceed that.
- * @module dsh-telegram/model
+ * @module dsh-buddy/telegram/model
  */
 import type { TelegramInlineButton } from "./telegram/api.ts";
 import type { ModelSelection } from "./session.ts";

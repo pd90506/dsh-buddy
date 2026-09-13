@@ -10,7 +10,7 @@
  *
  * The window resets on every part, so a paste of ten fragments stays one turn,
  * while a genuinely separate message sent a few seconds later starts its own.
- * @module dsh-telegram/telegram/merge
+ * @module dsh-buddy/telegram/telegram/merge
  */
 
 /** How long a chat waits for a follow-up fragment before flushing. */

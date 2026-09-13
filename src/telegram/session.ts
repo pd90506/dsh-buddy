@@ -19,7 +19,7 @@
  * The agent/session surfaces are typed structurally rather than imported: this
  * is an out-of-tree plugin whose `@deepseek-ai/*` copies must stay external, and
  * only a documented slice of each object is used here.
- * @module dsh-telegram/session
+ * @module dsh-buddy/telegram/session
  */
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -148,8 +148,13 @@ export interface AgentPresetsLike {
 	/** Preset mounted when a caller names none. */
 	readonly defaultId: string;
 	/**
-	 * Resolve a preset id, or the configured default when omitted.
-	 * @param id - requested preset, or undefined for the configured default.
+	 * Resolve a preset id.
+	 *
+	 * This manager always passes Buddy's own preset id here, never `undefined` —
+	 * `#presetId` then checks the resolved id back against what was asked for,
+	 * because a roster's `resolve` may fall back to its own configured default
+	 * instead of rejecting an id it does not know.
+	 * @param id - requested preset.
 	 */
 	resolve(id?: string): Promise<AgentPresetRef>;
 	/**
@@ -716,11 +721,21 @@ export class SessionManager {
 	async #presetId(): Promise<string> {
 		const presets = this.#presets();
 		if (presets === undefined) throw new Error("Buddy preset unavailable: this profile mounts no agent preset roster");
+		let resolved: AgentPresetRef;
 		try {
-			return (await presets.resolve(this.#deps.presetId)).id;
+			resolved = await presets.resolve(this.#deps.presetId);
 		} catch (error) {
 			throw new Error(`Buddy preset unavailable: ${(error as Error).message}`);
 		}
+		// A roster's `resolve` may fall back to its own configured default rather
+		// than rejecting when the requested id does not match one it knows — this
+		// manager always passes Buddy's own preset id, and a silently accepted
+		// fallback would run the session under some other preset's tools and
+		// prompt while still answering under Buddy's name.
+		if (resolved.id !== this.#deps.presetId) {
+			throw new Error(`Buddy preset unavailable: roster resolved "${resolved.id}" instead of "${this.#deps.presetId}"`);
+		}
+		return resolved.id;
 	}
 
 	/** The preset roster, or undefined in a profile that mounts none. */

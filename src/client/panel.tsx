@@ -63,6 +63,7 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 					panel: { sections: Record<PanelSectionId, boolean> };
 				};
 				setSections(prefs.panel.sections);
+				setError(undefined);
 			} catch (cause) {
 				// Visibility is a convenience: on failure every module shows.
 				setSections({});

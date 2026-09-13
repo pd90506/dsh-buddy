@@ -21,7 +21,7 @@
  * hours, so a bridge that restarts without a cursor is handed a day of backlog
  * and would re-answer old messages. The cursor lives in the storage domain and is
  * written after each handled update.
- * @module dsh-telegram/runtime
+ * @module dsh-buddy/telegram/runtime
  */
 import { readFile, realpath, stat } from "node:fs/promises";
 import type { TelegramConfig } from "./config.ts";

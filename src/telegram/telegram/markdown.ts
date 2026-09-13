@@ -23,7 +23,7 @@
  * expandable), thematic breaks, and GFM pipe tables. Not recognized (kept
  * literal): setext headings, reference links, footnotes, inline HTML, nested
  * quotes, indented code blocks.
- * @module dsh-telegram/telegram/markdown
+ * @module dsh-buddy/telegram/telegram/markdown
  */
 
 /** Nesting limit for inline markup; deeper input stays literal. */

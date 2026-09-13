@@ -462,6 +462,41 @@ test("an unresolvable buddy preset refuses to create a session", async () => {
 	assert.equal(records.size, 0);
 });
 
+test("a roster that resolves to a different preset than requested refuses to create a session (R9)", async () => {
+	// A roster's `resolve` is documented to fall back to its own configured
+	// default when a request does not match a known preset, rather than
+	// rejecting outright — dsh-agent-presets' own contract. This manager must
+	// never accept that fallback silently: an agent composed from "standard"
+	// instead of "buddy" would answer under Buddy's name without Buddy's voice.
+	let createCalls = 0;
+	const agents = {
+		get: () => undefined,
+		create: async () => {
+			createCalls += 1;
+			throw new Error("create must not run");
+		},
+		resume: async () => {
+			throw new Error("unused");
+		},
+	};
+	const fallingBack = {
+		defaultId: "standard",
+		resolve: async () => ({ id: "standard" }),
+		mount: async () => {
+			throw new Error("mount must not run");
+		},
+	};
+	const { store, records, origins } = storeStub();
+	const manager = new SessionManager(deps({ store, agents, presets: fallingBack }));
+	await assert.rejects(
+		() => manager.ensure("42", "Test Chat", "/tmp/telegram-work"),
+		/^Error: Buddy preset unavailable: roster resolved "standard" instead of "buddy"$/,
+	);
+	assert.equal(createCalls, 0);
+	assert.equal(records.size, 0);
+	assert.equal(origins.size, 0);
+});
+
 test("a resumed session joins the preset its header recorded", async () => {
 	const resumed = agentWithPreset("session-live", "buddy");
 	const recorder = resumeRecorder(resumed);
