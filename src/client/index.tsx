@@ -324,13 +324,11 @@ export function apply(ctx: any): void {
 				}
 			},
 		},
-		// Coalesces multiple listener notifications fired within the same tick
-		// (e.g. every effect re-subscription still live at once) into a single
-		// reload rather than one per listener; not a real UX debounce window —
-		// `test/client-folder.test.ts` drives this end to end with only real
-		// (non-fake) timers, which is why this stays at 0 rather than growing
-		// into a user-noticeable delay.
-		reloadDelayMs: 0,
+		// `ctx.sessions.list` changes on every streaming/title snapshot, so this
+		// must coalesce rapid-fire notifications into one reload rather than
+		// firing `buddyPersona/sessions` per snapshot while the folder is open.
+		// `test/client-folder.test.ts` proves the coalescing with real timers.
+		reloadDelayMs: 500,
 	});
 
 	// Directly above Settings: `sidebar.footer.action` renders in the foot area

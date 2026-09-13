@@ -102,10 +102,18 @@ test("the open conversation is highlighted and a session-list change reloads the
 	(byLabel(folder.tree(), "settings.buddy:expand").props["onClick"] as () => void)();
 	await settle();
 	assert.equal(byLabel(folder.tree(), "settings.buddy:untitled").props["aria-current"], "true");
+	const before = folder.calls.length;
+	// Three list changes in quick succession — the shape of a streaming/title
+	// snapshot storm — must coalesce into a single reload once the debounce
+	// window elapses, not one `buddyPersona/sessions` call per snapshot.
 	folder.changeList("s-tg");
+	folder.changeList("s-tg");
+	folder.changeList("s-tg");
+	// Real time, past the production 500ms debounce; this test drives the
+	// actual `reloadDelayMs` the plugin ships, not a fake-timer stand-in.
+	await new Promise((resolve) => setTimeout(resolve, 600));
 	await settle();
-	await settle();
-	assert.equal(folder.calls.length, 2);
+	assert.equal(folder.calls.length, before + 1, "three rapid list changes must coalesce into exactly one reload");
 	assert.equal(byLabel(folder.tree(), "Telegram: Panda").props["aria-current"], "true");
 });
 
