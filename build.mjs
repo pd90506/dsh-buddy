@@ -8,7 +8,7 @@
  *
  * The browser half is bundled to `lib/client.js` in dsh's `__ModuleLoader__`
  * factory format: a CJS body wrapped in a factory whose `require` resolves
- * platform seeds (`react`, `react/jsx-runtime`).
+ * platform seeds (`react`, `react/jsx-runtime`, `@deepseek-ai/dsh-client-ui-primitives`).
  *
  * DSH transforms nothing it loads, so TypeScript and JSX must both be gone by
  * the time the artifacts land.
@@ -74,7 +74,9 @@ await build({
 	platform: "browser",
 	target: "es2022",
 	jsx: "automatic",
-	external: ["react", "react/jsx-runtime"],
+	// The shared UI kit is a platform seed too: bundling a copy would give
+	// look-alike buttons instead of the harness's own.
+	external: ["react", "react/jsx-runtime", "@deepseek-ai/dsh-client-ui-primitives"],
 	banner: { js: banner },
 	footer: { js: footer },
 	logLevel: "info",

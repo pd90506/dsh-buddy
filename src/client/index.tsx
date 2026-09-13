@@ -8,9 +8,9 @@
  * {@link MAIN_PANEL_KEY} is imported from the shared constants module instead
  * of being restated on either side.
  *
- * The main panel is a module table (Soul, Agents, Model, Telegram, New Buddy
- * conversation); the Settings tab surfaces Buddy's own settings, not the
- * conversations, which the sidebar folder lists directly above Settings.
+ * The main panel is a module table (Soul, Agents, Model, Telegram); the
+ * Settings tab surfaces Buddy's own settings, not the conversations, which the
+ * sidebar folder lists directly above Settings.
  * @module dsh-buddy/client
  */
 // Imported, never restated: the sidebar folder (sidebar.footer.action) and the
@@ -20,12 +20,14 @@
 // tell a hand-restated constant from the shared one — which is why the "one
 // constant" rule is pinned by a source-text assertion in
 // `test/client-ui.test.ts` instead.
-import { MAIN_PANEL_KEY, BUDDY_PRESET_ID } from "../index.ts";
-import { selectionFromDefault } from "../model-selection.ts";
+import { MAIN_PANEL_KEY } from "../index.ts";
 import { TELEGRAM_TOKEN_KEY } from "../telegram/credential-key.ts";
 import { createCall } from "./call.ts";
 import { createDocumentModule } from "./document-module.tsx";
 import { createBuddyFolder } from "./folder.tsx";
+import { installCss } from "./css.ts";
+import { FOLDER_CSS, FOLDER_CSS_ID } from "./folder-css.ts";
+import { FORM_CSS, FORM_CSS_ID } from "./form-css.ts";
 import { createModelModule } from "./model-module.tsx";
 import type { PanelModule } from "./modules.ts";
 import { createNotifier } from "./notifier.ts";
@@ -52,11 +54,9 @@ const SECTION_ORDER = 27;
  *
  * `connection` carries the RPC caller for this plugin's own `buddyPersona/*`
  * endpoints; `layout` selects the main panel; `sessions` opens a conversation;
- * `remote.workspace` creates (or adopts) the workspace a new conversation
- * attaches to; `remote.session` creates a buddy conversation with its preset
- * and model; `remote.credentials` is what the Telegram module writes the bot
- * token through — `remote` alone carries only `$on`/`$mount`, not the
- * namespace.
+ * `remote.session` supplies the model catalog; `remote.credentials` is what
+ * the Telegram module writes the bot token through — `remote` alone carries
+ * only `$on`/`$mount`, not the namespace.
  */
 export const inject = [
 	"slots",
@@ -67,13 +67,11 @@ export const inject = [
 	"remote",
 	"remote.session",
 	"remote.credentials",
-	"remote.workspace",
 ];
 
 const en = {
 	nav: "Buddy",
 	panelTitle: "Buddy",
-	newConversation: "New Buddy conversation",
 	soulTitle: "Soul",
 	soulHint: "Voice, attitude and opinions. Saved to SOUL.md and used by buddy conversations only.",
 	agentsTitle: "Agents",
@@ -144,7 +142,6 @@ const en = {
 const zh: typeof en = {
 	nav: "Buddy",
 	panelTitle: "Buddy",
-	newConversation: "新建 Buddy 对话",
 	soulTitle: "Soul",
 	soulHint: "声音、态度与观点。保存到 SOUL.md，仅对 buddy 对话生效。",
 	agentsTitle: "Agents",
@@ -219,6 +216,9 @@ export function apply(ctx: any): void {
 	const t = ctx.locale.bind(NS);
 	ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-buddy: dictionaries");
 
+	ctx.effect(() => installCss(globalThis.document, FORM_CSS_ID, FORM_CSS), "dsh-buddy: form stylesheet");
+	ctx.effect(() => installCss(globalThis.document, FOLDER_CSS_ID, FOLDER_CSS), "dsh-buddy: sidebar folder stylesheet");
+
 	// rpc.call resolves with the gateway's { ok, value | error } envelope; see
 	// ./call.ts for why unwrapping it exactly once matters.
 	const call = createCall(rpc);
@@ -280,42 +280,7 @@ export function apply(ctx: any): void {
 		ctx.layout.selectPanel(null);
 	};
 
-	const newConversation = async (): Promise<void> => {
-		const session = ctx.remote?.session;
-		if (session === undefined) throw new Error("remote.session is not mounted");
-		const workspace = ctx.remote?.workspace;
-		if (workspace === undefined) throw new Error("remote.workspace is not mounted");
-		const prefs = (await call("buddyPersona/preferences", {})) as {
-			model: { provider: string; model: string; reasoningEffort: string };
-			conversationCwd: string;
-		};
-		const ws = remoteValue(await workspace.create({ path: prefs.conversationCwd }), "workspace create") as {
-			workspace: { workspaceId: string };
-		};
-		const created = remoteValue(
-			await session.create({ workspaceId: ws.workspace.workspaceId, agentPreset: BUDDY_PRESET_ID }),
-			"session create",
-		) as { sessionId: string };
-		const selection = selectionFromDefault(prefs.model);
-		let modelError: Error | undefined;
-		if (selection !== undefined) {
-			try {
-				remoteValue(await session.selectModel({ sessionId: created.sessionId, ...selection }), "model selection");
-			} catch (cause) {
-				// The session itself was created successfully — a failed model
-				// selection is not a failed conversation, so it still gets opened.
-				// The error is only reported, not swallowed: rethrown below, once
-				// the session everyone can see it exists is in place.
-				modelError = cause as Error;
-			}
-		}
-		// A raw remote create bypasses the client list; refresh before opening.
-		await ctx.sessions.refresh();
-		openSession(created.sessionId);
-		if (modelError !== undefined) throw modelError;
-	};
-
-	const BuddyPanel = createBuddyPanel({ call, t, modules, newConversation, preferencesChanged });
+	const BuddyPanel = createBuddyPanel({ call, t, modules, preferencesChanged });
 
 	// One shared constant for both registrations, so the id and the key cannot
 	// drift apart in a later edit.

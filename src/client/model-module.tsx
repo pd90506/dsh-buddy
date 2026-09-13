@@ -4,7 +4,10 @@
  * @module dsh-buddy/client/model-module
  */
 import { useCallback, useEffect, useState } from "react";
+import { Button, Switch } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { Call } from "./call.ts";
+import { FORM_CLASS } from "./form-css.ts";
+import { Select } from "./select.tsx";
 
 /** `dsh-api-session-controller`'s `ModelCatalog`, trimmed to what is read. */
 export interface ModelCatalog {
@@ -32,16 +35,6 @@ export interface ModelModuleDeps {
 	catalog(): Promise<ModelCatalog>;
 }
 
-const styles = {
-	block: { display: "flex", flexDirection: "column", gap: 10 },
-	field: { display: "flex", flexDirection: "column", gap: 4 },
-	label: { fontSize: 13, fontWeight: 500 },
-	hint: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", margin: 0 },
-	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)", margin: 0 },
-	input: { fontSize: 13, padding: "6px 8px", borderRadius: 6, border: "0.5px solid var(--dsw-alias-border-l2)" },
-	row: { display: "flex", alignItems: "center", gap: 8 },
-	button: { padding: "6px 14px", borderRadius: 6, cursor: "pointer" },
-} as const;
 
 const EMPTY: Draft = { provider: "", model: "", reasoningEffort: "" };
 
@@ -75,7 +68,7 @@ export function createModelModule(deps: ModelModuleDeps): () => unknown {
 		}, [load]);
 
 		if (draft === undefined || catalog === undefined) {
-			return error === undefined ? null : <p style={styles.error}>{error}</p>;
+			return error === undefined ? null : <p className={FORM_CLASS.error}>{error}</p>;
 		}
 
 		const group = catalog.groups.find((candidate) => candidate.id === draft.provider);
@@ -95,86 +88,62 @@ export function createModelModule(deps: ModelModuleDeps): () => unknown {
 		};
 
 		return (
-			<section style={styles.block}>
-				<p style={styles.hint}>{deps.t("modelHint")}</p>
-				<label style={styles.row}>
-					<input
-						type="checkbox"
-						name="followDefault"
-						checked={follow}
-						onChange={(event: { target: { checked: boolean } }) => setFollow(event.target.checked)}
-					/>
-					<span style={styles.label}>{deps.t("modelFollow")}</span>
-				</label>
+			<section className={FORM_CLASS.field}>
+				<p className={FORM_CLASS.hint}>{deps.t("modelHint")}</p>
+				<div className={FORM_CLASS.toggleRow}>
+					<span>{deps.t("modelFollow")}</span>
+					<Switch checked={follow} label={deps.t("modelFollow")} onChange={(checked: boolean) => setFollow(checked)} />
+				</div>
 				{!follow && (
 					<>
-						<div style={styles.field}>
-							<span style={styles.label}>{deps.t("modelProvider")}</span>
-							<select
-								style={styles.input}
+						<div className={FORM_CLASS.field}>
+							<span className={FORM_CLASS.label}>{deps.t("modelProvider")}</span>
+							<Select
 								name="provider"
 								value={draft.provider}
-								onChange={(event: { target: { value: string } }) =>
-									setDraft({ provider: event.target.value, model: "", reasoningEffort: "" })
-								}
-							>
-								<option value="">{deps.t("modelChoose")}</option>
-								{catalog.groups.map((candidate) => (
-									<option key={candidate.id} value={candidate.id}>
-										{candidate.name}
-									</option>
-								))}
-							</select>
+								placeholder={deps.t("modelChoose")}
+								options={catalog.groups.map((candidate) => ({ id: candidate.id, label: candidate.name }))}
+								onChange={(value) => setDraft({ provider: value, model: "", reasoningEffort: "" })}
+							/>
 						</div>
-						<div style={styles.field}>
-							<span style={styles.label}>{deps.t("modelModel")}</span>
-							<select
-								style={styles.input}
+						<div className={FORM_CLASS.field}>
+							<span className={FORM_CLASS.label}>{deps.t("modelModel")}</span>
+							<Select
 								name="model"
 								value={draft.model}
-								onChange={(event: { target: { value: string } }) =>
-									setDraft({ provider: draft.provider, model: event.target.value, reasoningEffort: "" })
-								}
-							>
-								<option value="">{deps.t("modelChoose")}</option>
-								{(group?.models ?? []).map((candidate) => (
-									<option key={candidate.id} value={candidate.id}>
-										{candidate.name}
-									</option>
-								))}
-							</select>
+								placeholder={deps.t("modelChoose")}
+								disabled={group === undefined}
+								options={(group?.models ?? []).map((candidate) => ({ id: candidate.id, label: candidate.name }))}
+								onChange={(value) => setDraft({ provider: draft.provider, model: value, reasoningEffort: "" })}
+							/>
 						</div>
 						{efforts.length > 0 && (
-							<div style={styles.field}>
-								<span style={styles.label}>{deps.t("modelEffort")}</span>
-								<select
-									style={styles.input}
+							<div className={FORM_CLASS.field}>
+								<span className={FORM_CLASS.label}>{deps.t("modelEffort")}</span>
+								<Select
 									name="effort"
 									value={draft.reasoningEffort}
-									onChange={(event: { target: { value: string } }) => setDraft({ ...draft, reasoningEffort: event.target.value })}
-								>
-									<option value="">{deps.t("modelEffortDefault")}</option>
-									{efforts.map((candidate) => (
-										<option key={candidate.id} value={candidate.id}>
-											{candidate.name}
-										</option>
-									))}
-								</select>
+									options={[
+										{ id: "", label: deps.t("modelEffortDefault") },
+										...efforts.map((candidate) => ({ id: candidate.id, label: candidate.name })),
+									]}
+									onChange={(value) => setDraft({ ...draft, reasoningEffort: value })}
+								/>
 							</div>
 						)}
 					</>
 				)}
-				<div style={styles.row}>
-					<button
-						style={styles.button}
-						type="button"
+				<div className={FORM_CLASS.actions}>
+					<Button
+						variant="primary"
+						size="sm"
 						disabled={busy || (!follow && (draft.provider === "" || draft.model === ""))}
 						onClick={() => void save()}
 					>
 						{deps.t("save")}
-					</button>
+					</Button>
 				</div>
-				{error !== undefined && <p style={styles.error}>{error}</p>}
+				{error !== undefined && <p className={FORM_CLASS.error}>{error}</p>}
 			</section>
 		);
 	};

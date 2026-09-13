@@ -20,7 +20,7 @@
  * repo has no renderer for.
  *
  * The main panel's and the slim settings tab's own behaviour — modules,
- * document editing, New Buddy conversation — moved to `test/client-panel.test.ts`
+ * document editing — moved to `test/client-panel.test.ts`
  * and `test/client-settings.test.ts`; this file keeps only the registration
  * contract (inject, slot wiring, dictionaries, the shared panel key).
  */
@@ -40,7 +40,7 @@ test("the browser half is wrapped in the module-loader factory", async () => {
 	assert.equal(typeof client.apply, "function");
 });
 
-test("the built bundle stays free of schemastery and cosmokit, requiring only react", async () => {
+test("the built bundle stays free of schemastery and cosmokit, requiring only platform seeds", async () => {
 	// `src/client/settings.tsx` (and, transitively, anything else under
 	// `src/client/**`) must never pull a *value* import from `../config.ts`:
 	// that module builds a schemastery `z.object(...)` at load time, and
@@ -56,20 +56,18 @@ test("the built bundle stays free of schemastery and cosmokit, requiring only re
 	assert.ok(required.length > 0, "the bundle must still require its externals");
 	for (const name of required) {
 		assert.ok(
-			name === "react" || name === "react/jsx-runtime",
-			`unexpected require("${name}") in the browser bundle — only react and react/jsx-runtime may stay external`,
+			name === "react" || name === "react/jsx-runtime" || name === "@deepseek-ai/dsh-client-ui-primitives",
+			`unexpected require("${name}") in the browser bundle — only react, react/jsx-runtime and the harness's UI primitives may stay external`,
 		);
 	}
+	// The buttons must be the harness's own, not a bundled look-alike.
+	assert.ok(required.includes("@deepseek-ai/dsh-client-ui-primitives"), "the bundle must use the shared UI primitives");
 });
 
-test("the browser half injects slots, locale, connection, layout, sessions, the remote session namespace, the remote credentials namespace and the remote workspace namespace", () => {
+test("the browser half injects slots, locale, connection, layout, sessions, the remote session namespace and the remote credentials namespace", () => {
 	const client = loadClient();
-	// `remote` and `remote.session` are what "New Buddy conversation" needs to
-	// create and configure a session directly against the Remote layer, bypassing
-	// the client Session list. `remote.credentials` is what the Telegram module
-	// writes the bot token through. `remote.workspace` is what a new conversation
-	// attaches to before the session is created, so the chat input is never
-	// stuck behind "Choose a workspace to start". `inject` is per-fiber rather
+	// `remote.session` supplies the Model module's catalog. `remote.credentials`
+	// is what the Telegram module writes the bot token through. `inject` is per-fiber rather
 	// than per-registration: one list, declared once, so no registration can
 	// mount half-wired. Every one of these is present in the web shell, so the
 	// wait never becomes a stall.
@@ -82,7 +80,6 @@ test("the browser half injects slots, locale, connection, layout, sessions, the 
 		"remote",
 		"remote.session",
 		"remote.credentials",
-		"remote.workspace",
 	]);
 });
 
@@ -139,13 +136,6 @@ test("every cordis-injected service has its real declaring package in dsh.client
 	// in their own `dsh.client.inject`, exactly as `dsh-telegram` does for the
 	// same pair (`remote`, `remote.credentials`) — already present in this
 	// plugin's manifest, so no new entry was needed there.
-	//
-	// `remote.workspace` follows the same dynamic pattern as `remote.session`:
-	// `@deepseek-ai/dsh-api-workspace-controller`'s own browser client half
-	// (`lib/client.js`) declares `exports.inject = ["remote", "remote.workspace"]`
-	// and mounts `ClientWorkspaceModel` on `ctx.remote.workspace`, so that
-	// package is the real declaring package for this service, exactly as
-	// `dsh-api-session-controller` is for `remote.session`.
 	const client = loadClient();
 	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 		dsh: { client: { inject: string[] } };
@@ -161,7 +151,6 @@ test("every cordis-injected service has its real declaring package in dsh.client
 		remote: "@deepseek-ai/dsh-api-remotes",
 		"remote.session": "@deepseek-ai/dsh-api-session-controller",
 		"remote.credentials": "@deepseek-ai/dsh-api-remotes",
-		"remote.workspace": "@deepseek-ai/dsh-api-workspace-controller",
 	};
 
 	for (const service of client.inject) {
@@ -245,7 +234,6 @@ test("both dictionaries are registered, as a reversible effect", () => {
 	for (const key of [
 		"nav",
 		"panelTitle",
-		"newConversation",
 		"soulTitle",
 		"soulHint",
 		"agentsTitle",

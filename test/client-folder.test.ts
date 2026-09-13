@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createRequire } from "node:module";
 import { MAIN_PANEL_KEY } from "../src/index.ts";
+import { installCss } from "../src/client/css.ts";
+import { FOLDER_CLASS, FOLDER_CSS, FOLDER_CSS_ID } from "../src/client/folder-css.ts";
+import { FORM_CLASS, FORM_CSS, FORM_CSS_ID } from "../src/client/form-css.ts";
 import { contextStub, createRenderer, elements, loadClient, settle, type RecordedCall, type StubElement } from "./support/client-harness.ts";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -124,4 +127,45 @@ test("in the narrow rail only the icon renders, and it opens the panel", async (
 	assert.equal(buttons.length, 1);
 	(buttons[0]?.props["onClick"] as () => void)();
 	assert.deepEqual(folder.actions, [{ service: "layout.selectPanel", arg: MAIN_PANEL_KEY }]);
+});
+
+test("the folder uses the sidebar's row classes and the harness's chevron icon, never inline styles", async () => {
+	const folder = mountFolder();
+	await settle();
+	const all = elements(folder.tree());
+	assert.deepEqual(all.filter((e) => e.props["style"] !== undefined), [], "inline styles cannot follow the host's hover and theme");
+	const entry = byLabel(folder.tree(), "settings.buddy:folderTitle");
+	assert.equal(entry.props["className"], FOLDER_CLASS.entry);
+	const toggle = byLabel(folder.tree(), "settings.buddy:expand");
+	assert.equal(toggle.props["className"], FOLDER_CLASS.toggle);
+	assert.ok(elements(toggle.props["children"]).some((e) => e.props["data-icon"] === "IconChevronRightOutline14"));
+});
+
+test("both stylesheets are installed by effects, on --dsw tokens, and each disposer removes exactly its tag", () => {
+	for (const [id, css, classes] of [
+		[FOLDER_CSS_ID, FOLDER_CSS, FOLDER_CLASS],
+		[FORM_CSS_ID, FORM_CSS, FORM_CLASS],
+	] as const) {
+		const head: unknown[] = [];
+		const tag = {
+			dataset: {} as Record<string, string>,
+			textContent: "",
+			remove: () => head.splice(head.indexOf(tag), 1),
+		};
+		const doc = { createElement: (name: string) => (assert.equal(name, "style"), tag), head: { appendChild: (node: unknown) => head.push(node) } };
+		const dispose = installCss(doc as unknown as Document, id, css);
+		assert.deepEqual(head, [tag]);
+		assert.equal(tag.dataset["pluginCss"], id);
+		for (const name of Object.values(classes)) assert.ok(tag.textContent.includes(`.${name}{`) || tag.textContent.includes(`.${name}:`) || tag.textContent.includes(`.${name},`) || tag.textContent.includes(`.${name} `) || tag.textContent.includes(`.${name}.`) || tag.textContent.includes(`.${name}+`), `no rule for .${name}`);
+		assert.doesNotMatch(tag.textContent, /#[0-9a-f]{3,6}\b/i, "colours come from --dsw tokens so both themes follow the host");
+		dispose();
+		assert.deepEqual(head, []);
+	}
+	assert.doesNotThrow(() => installCss(undefined, "x", "")());
+
+	const client = loadClient();
+	const { ctx, effects } = contextStub();
+	client.apply(ctx);
+	assert.ok(effects.includes("dsh-buddy: sidebar folder stylesheet"));
+	assert.ok(effects.includes("dsh-buddy: form stylesheet"));
 });

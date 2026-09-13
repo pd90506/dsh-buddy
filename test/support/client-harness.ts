@@ -91,6 +91,60 @@ interface LoaderModule {
 /** Node's `require`, used both to evaluate the bundle and as the default module resolver. */
 const nodeRequire = createRequire(import.meta.url);
 
+/** The harness's shared UI kit id — a platform seed, never installed in this repo. */
+export const PRIMITIVES = "@deepseek-ai/dsh-client-ui-primitives";
+
+/**
+ * A stand-in for the primitives the bundle uses, shaped like the real ones:
+ * `Button` renders one `<button type="button">` carrying its `variant`/`size`
+ * as data; `Switch` a `role="switch"` button whose click flips `checked`;
+ * `Input` a bare `<input>`; `Menu` a `menu` element holding its `anchor`, with
+ * `items`/`selectedId`/`onSelect` left on its props for a test to drive; and
+ * every `Icon*` an inert `svg` naming itself. Plain `{ type, props }` objects,
+ * so both the stub renderer and a bare `loadClient()` can resolve it.
+ */
+export const primitivesStub: Record<string, unknown> = new Proxy(
+	{
+		Button: function Button({ variant = "ghost", size = "md", icon, children, ...rest }: Record<string, unknown>) {
+			return {
+				type: "button",
+				props: { type: "button", "data-variant": variant, "data-size": size, ...rest, children: icon === undefined ? children : [icon, children] },
+			};
+		},
+		Switch: function Switch({ checked, onChange, label, disabled }: Record<string, unknown>) {
+			return {
+				type: "button",
+				props: {
+					type: "button",
+					role: "switch",
+					"aria-checked": checked,
+					"aria-label": label,
+					disabled,
+					onClick: () => (onChange as (next: boolean) => void)(!(checked as boolean)),
+				},
+			};
+		},
+		Input: function Input({ icon: _icon, className, ...rest }: Record<string, unknown>) {
+			return { type: "input", props: { ...rest, "data-wrapper-class": className } };
+		},
+		Menu: function Menu({ anchor, ...rest }: Record<string, unknown>) {
+			return { type: "menu", props: { ...rest, children: anchor } };
+		},
+	} as Record<string, unknown>,
+	{
+		get: (target, name) => {
+			if (typeof name === "string" && name in target) return target[name];
+			if (typeof name === "string" && name.startsWith("Icon")) {
+				return (props: Record<string, unknown>) => ({ type: "svg", props: { "data-icon": name, className: props["className"] } });
+			}
+			return undefined;
+		},
+	},
+);
+
+/** Node's resolver, with the platform-seeded UI kit filled in. */
+const defaultResolve = (name: string): unknown => (name === PRIMITIVES ? primitivesStub : nodeRequire(name));
+
 /** The bundle is evaluated once — `require` caches it — so the captured module is memoized. */
 let captured: LoaderModule | undefined;
 
@@ -124,7 +178,7 @@ function clientModule(): LoaderModule {
  * @param resolve - module resolver handed to the bundle's `require`.
  * @returns the plugin object the bundle's factory returns.
  */
-export function loadClient(resolve: (name: string) => unknown = (name) => nodeRequire(name)): ClientPlugin {
+export function loadClient(resolve: (name: string) => unknown = defaultResolve): ClientPlugin {
 	return clientModule().factory(resolve) as ClientPlugin;
 }
 
@@ -426,7 +480,7 @@ export function createRenderer(): Mounted {
 		key === undefined ? { type, props } : { type, props, key };
 
 	return {
-		modules: { react, "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: Symbol.for("react.fragment") } },
+		modules: { react, "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: Symbol.for("react.fragment") }, [PRIMITIVES]: primitivesStub },
 		mount(target: () => unknown): void {
 			root = target as (props: unknown) => unknown;
 			render();
@@ -451,6 +505,40 @@ export function elements(node: unknown, found: StubElement[] = []): StubElement[
 	if (typeof element.props !== "object" || element.props === null) return found;
 	found.push(element as StubElement);
 	return elements(element.props["children"], found);
+}
+
+/**
+ * The `role="switch"` control with this accessible name.
+ * @param tree - a rendered tree.
+ * @param label - the switch's `aria-label`.
+ * @returns the switch element.
+ */
+export function switchControl(tree: unknown, label: string): StubElement {
+	const found = elements(tree).find((e) => e.props["role"] === "switch" && e.props["aria-label"] === label);
+	assert.ok(found !== undefined, `no switch labelled "${label}"`);
+	return found;
+}
+
+/** Flip the switch with this accessible name, as a click would. */
+export function flipSwitch(tree: unknown, label: string): void {
+	(switchControl(tree, label).props["onClick"] as () => void)();
+}
+
+/**
+ * Pick `value` in the `Select` whose anchor button is named `name`, as choosing
+ * that menu item would.
+ * @param tree - a rendered tree.
+ * @param name - the selector's `name`.
+ * @param value - the option id to pick; must be one of the menu's items.
+ */
+export function choose(tree: unknown, name: string, value: string): void {
+	const menu = elements(tree).find(
+		(e) => e.type === "menu" && (e.props["children"] as Partial<StubElement> | undefined)?.props?.["name"] === name,
+	);
+	assert.ok(menu !== undefined, `no selector named "${name}"`);
+	const items = menu.props["items"] as { id: string }[];
+	assert.ok(items.some((item) => item.id === value), `selector "${name}" has no option "${value}"`);
+	(menu.props["onSelect"] as (id: string) => void)(value);
 }
 
 /** Let every pending promise chain settle. */

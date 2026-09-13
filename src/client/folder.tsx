@@ -1,14 +1,18 @@
 /**
  * The Buddy folder at the sidebar foot, directly above Settings.
  *
- * The title opens the Buddy main panel; the chevron lists buddy conversations.
+ * The entry opens the Buddy main panel; the chevron lists buddy conversations.
+ * It is styled as the sidebar's own rows (see `./folder-css.ts`), and
+ * `apply` installs that stylesheet alongside the registration.
  * The client session list carries no preset, so the rows come from the host's
  * `buddyPersona/sessions`, re-read whenever the client list changes.
  * @module dsh-buddy/client/folder
  */
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { IconChevronRightOutline14 } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { Call } from "./call.ts";
+import { FOLDER_CLASS } from "./folder-css.ts";
 import { createBuddyIcon } from "./panel.tsx";
 
 /** One buddy conversation; mirrors the host's `BuddySessionSummary`. */
@@ -31,43 +35,6 @@ export interface FolderDeps {
 	/** Debounce for reloads triggered by session-list changes; production uses 500ms, tests wait past it. */
 	reloadDelayMs: number;
 }
-
-const styles = {
-	root: { width: "100%", display: "flex", flexDirection: "column" },
-	header: { display: "flex", alignItems: "center", gap: 4, width: "100%" },
-	title: {
-		flex: 1,
-		display: "flex",
-		alignItems: "center",
-		gap: 8,
-		padding: "6px 8px",
-		border: "none",
-		background: "transparent",
-		color: "inherit",
-		cursor: "pointer",
-		fontSize: 13,
-		textAlign: "left",
-	},
-	chevron: { border: "none", background: "transparent", color: "inherit", cursor: "pointer", padding: "4px 6px" },
-	list: { maxHeight: "40vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 2, paddingLeft: 20 },
-	row: {
-		display: "flex",
-		alignItems: "center",
-		gap: 6,
-		padding: "4px 8px",
-		borderRadius: 6,
-		border: "none",
-		background: "transparent",
-		color: "inherit",
-		cursor: "pointer",
-		fontSize: 13,
-		textAlign: "left",
-	},
-	rowCurrent: { background: "var(--dsw-alias-fill-secondary, rgba(127,127,127,.12))" },
-	badge: { fontSize: 11, color: "var(--dsw-alias-label-tertiary)" },
-	muted: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)", padding: "4px 8px" },
-	rail: { border: "none", background: "transparent", color: "inherit", cursor: "pointer", padding: 8 },
-} as const;
 
 /**
  * @param deps - RPC, locale, navigation, the client session list and persisted expansion.
@@ -114,9 +81,11 @@ export function createBuddyFolder(deps: FolderDeps): (props: { wide: boolean }) 
 
 		if (!props.wide) {
 			return (
-				<button style={styles.rail} type="button" aria-label={deps.t("folderTitle")} onClick={() => deps.openPanel()}>
-					<Icon size={18} />
-				</button>
+				<div className={`${FOLDER_CLASS.entryRow} ${FOLDER_CLASS.rail}`}>
+					<button className={FOLDER_CLASS.entry} type="button" aria-label={deps.t("folderTitle")} onClick={() => deps.openPanel()}>
+						<Icon size={18} />
+					</button>
+				</div>
 			);
 		}
 
@@ -126,27 +95,30 @@ export function createBuddyFolder(deps: FolderDeps): (props: { wide: boolean }) 
 		};
 
 		return (
-			<div style={styles.root}>
-				<div style={styles.header}>
-					<button style={styles.title} type="button" aria-label={deps.t("folderTitle")} onClick={() => deps.openPanel()}>
+			<div className={FOLDER_CLASS.root}>
+				<div className={FOLDER_CLASS.entryRow}>
+					<button className={FOLDER_CLASS.entry} type="button" aria-label={deps.t("folderTitle")} onClick={() => deps.openPanel()}>
 						<Icon size={16} />
-						<span>{deps.t("folderTitle")}</span>
+						<span className={FOLDER_CLASS.label}>{deps.t("folderTitle")}</span>
 					</button>
 					<button
-						style={styles.chevron}
+						className={FOLDER_CLASS.toggle}
 						type="button"
 						aria-label={deps.t(open ? "collapse" : "expand")}
 						aria-expanded={open ? "true" : "false"}
 						onClick={toggle}
 					>
-						{open ? "▾" : "▸"}
+						<IconChevronRightOutline14
+							size={14}
+							className={open ? `${FOLDER_CLASS.arrow} ${FOLDER_CLASS.arrowOpen}` : FOLDER_CLASS.arrow}
+						/>
 					</button>
 				</div>
 				{open && (
-					<div style={styles.list}>
-						{error !== undefined && <div style={styles.muted}>{error}</div>}
+					<div className={FOLDER_CLASS.list}>
+						{error !== undefined && <div className={FOLDER_CLASS.muted}>{error}</div>}
 						{error === undefined && items !== undefined && items.length === 0 && (
-							<div style={styles.muted}>{deps.t("folderEmpty")}</div>
+							<div className={FOLDER_CLASS.muted}>{deps.t("folderEmpty")}</div>
 						)}
 						{items?.map((item) => {
 							const label = item.title.trim() === "" ? deps.t("untitled") : item.title;
@@ -154,14 +126,14 @@ export function createBuddyFolder(deps: FolderDeps): (props: { wide: boolean }) 
 							return (
 								<button
 									key={item.sessionId}
-									style={isCurrent ? { ...styles.row, ...styles.rowCurrent } : styles.row}
+									className={isCurrent ? `${FOLDER_CLASS.session} ${FOLDER_CLASS.selected}` : FOLDER_CLASS.session}
 									type="button"
 									aria-label={label}
 									aria-current={isCurrent ? "true" : "false"}
 									onClick={() => deps.openSession(item.sessionId)}
 								>
-									<span>{label}</span>
-									{item.source === "telegram" && <span style={styles.badge}>{deps.t("fromTelegram")}</span>}
+									<span className={FOLDER_CLASS.title}>{label}</span>
+									{item.source === "telegram" && <span className={FOLDER_CLASS.meta}>{deps.t("fromTelegram")}</span>}
 								</button>
 							);
 						})}

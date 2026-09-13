@@ -44,7 +44,7 @@ export interface PersonaView {
 	readonly lastWriteAt?: string | undefined;
 }
 
-/** What the Model module, the slim Settings tab and New Buddy conversation read. */
+/** What the Model module and the slim Settings tab read. */
 export interface PreferencesView {
 	readonly model: BuddyModelDefault;
 	readonly panel: { readonly sections: Record<PanelSectionId, boolean> };

@@ -6,32 +6,15 @@
  * @module dsh-buddy/client/document-module
  */
 import { useCallback, useEffect, useState } from "react";
+import { Button } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { Call } from "./call.ts";
+import { FORM_CLASS } from "./form-css.ts";
 
 /** Collaborators supplied by the plugin's `apply`. */
 export interface DocumentModuleDeps {
 	call: Call;
 	t(key: string): string;
 }
-
-const styles = {
-	block: { display: "flex", flexDirection: "column", gap: 8 },
-	hint: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", margin: 0 },
-	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)", margin: 0 },
-	area: {
-		minHeight: 160,
-		fontFamily: "var(--dsw-font-mono, monospace)",
-		fontSize: 13,
-		padding: 8,
-		borderRadius: 6,
-		border: "1px solid var(--dsw-alias-border, #ccc)",
-		background: "var(--dsw-alias-fill-input, transparent)",
-		color: "inherit",
-		resize: "vertical",
-	},
-	row: { display: "flex", alignItems: "center", gap: 8 },
-	button: { padding: "6px 14px", borderRadius: 6, cursor: "pointer" },
-} as const;
 
 /**
  * @param deps - RPC and locale.
@@ -76,19 +59,21 @@ export function createDocumentModule(deps: DocumentModuleDeps, field: "soul" | "
 		};
 
 		return (
-			<section style={styles.block}>
-				<p style={styles.hint}>{deps.t(field === "soul" ? "soulHint" : "agentsHint")}</p>
+			<section className={FORM_CLASS.field}>
+				<p className={FORM_CLASS.hint}>{deps.t(field === "soul" ? "soulHint" : "agentsHint")}</p>
 				<textarea
-					style={styles.area}
+					className={FORM_CLASS.textarea}
+					name={field}
+					aria-label={deps.t(field === "soul" ? "soulTitle" : "agentsTitle")}
 					value={text}
 					onChange={(event: { target: { value: string } }) => setText(event.target.value)}
 				/>
-				<div style={styles.row}>
-					<button style={styles.button} type="button" disabled={busy || loaded === undefined} onClick={() => void save()}>
+				<div className={FORM_CLASS.actions}>
+					<Button variant="primary" size="sm" disabled={busy || loaded === undefined} onClick={() => void save()}>
 						{deps.t("save")}
-					</button>
+					</Button>
 				</div>
-				{error !== undefined && <p style={styles.error}>{error}</p>}
+				{error !== undefined && <p className={FORM_CLASS.error}>{error}</p>}
 			</section>
 		);
 	};

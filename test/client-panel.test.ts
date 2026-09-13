@@ -6,8 +6,11 @@ import {
 	contextStub,
 	createRenderer,
 	elements,
+	choose,
+	flipSwitch,
 	loadClient,
 	settle,
+	switchControl,
 	type RecordedCall,
 	type StubElement,
 } from "./support/client-harness.ts";
@@ -107,161 +110,6 @@ test("the soul module saves only its own field", async () => {
 	assert.deepEqual(write?.payload, { args: { patch: { soul: "a voice" } } });
 });
 
-/** A `remote.workspace` stub whose `create` records its arg and returns a fixed workspace. */
-function workspaceStub(remoteCalls: { method: string; arg: unknown }[]): unknown {
-	return {
-		create: async (arg: unknown) => {
-			remoteCalls.push({ method: "workspace.create", arg });
-			return {
-				ok: true,
-				value: {
-					workspace: {
-						workspaceId: "w-1",
-						path: "/home/u/buddy-workspace",
-						title: "buddy-workspace",
-						sessionIds: [],
-						createdAt: 0,
-						updatedAt: 0,
-					},
-					created: true,
-				},
-			};
-		},
-	};
-}
-
-test("New Buddy conversation creates a workspace, attaches a buddy-preset session to it, applies the buddy model, and opens it", async () => {
-	const remoteCalls: { method: string; arg: unknown }[] = [];
-	const remote = {
-		workspace: workspaceStub(remoteCalls),
-		session: {
-			create: async (arg: unknown) => {
-				remoteCalls.push({ method: "create", arg });
-				return { ok: true, value: { sessionId: "s-new", agentPreset: "buddy" } };
-			},
-			selectModel: async (arg: unknown) => {
-				remoteCalls.push({ method: "selectModel", arg });
-				return { ok: true, value: {} };
-			},
-		},
-	};
-	const panel = mountPanel(
-		async (endpoint) =>
-			endpoint === "buddyPersona/preferences"
-				? {
-						ok: true,
-						value: {
-							...PREFS,
-							model: { provider: "p", model: "m", reasoningEffort: "" },
-							// Not under test here, and hiding them keeps this test from
-							// having to also stub the Telegram module's own endpoints.
-							panel: { sections: { ...PREFS.panel.sections, model: false, telegram: false } },
-						},
-					}
-				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
-		remote,
-	);
-	await settle();
-	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
-	await settle();
-	assert.deepEqual(remoteCalls, [
-		{ method: "workspace.create", arg: { path: "/home/u/buddy-workspace" } },
-		{ method: "create", arg: { workspaceId: "w-1", agentPreset: "buddy" } },
-		{ method: "selectModel", arg: { sessionId: "s-new", provider: "p", model: "m" } },
-	]);
-	assert.deepEqual(panel.actions.slice(-3), [
-		{ service: "sessions.refresh", arg: undefined },
-		{ service: "sessions.open", arg: "s-new" },
-		{ service: "layout.selectPanel", arg: null },
-	]);
-});
-
-test("without a buddy model New Buddy conversation does not pick a model", async () => {
-	const remoteCalls: string[] = [];
-	const remote = {
-		workspace: {
-			create: async () => ({
-				ok: true,
-				value: { workspace: { workspaceId: "w-1", path: "/home/u/buddy-workspace", title: "t", sessionIds: [], createdAt: 0, updatedAt: 0 }, created: true },
-			}),
-		},
-		session: {
-			create: async () => {
-				remoteCalls.push("create");
-				return { ok: true, value: { sessionId: "s-new" } };
-			},
-			selectModel: async () => {
-				remoteCalls.push("selectModel");
-				return { ok: true, value: {} };
-			},
-		},
-	};
-	const panel = mountPanel(
-		async (endpoint) =>
-			endpoint === "buddyPersona/preferences"
-				? {
-						ok: true,
-						// Not under test here; hidden so the Telegram module never mounts
-						// and needs no endpoint stub of its own.
-						value: { ...PREFS, panel: { sections: { ...PREFS.panel.sections, model: false, telegram: false } } },
-					}
-				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
-		remote,
-	);
-	await settle();
-	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
-	await settle();
-	assert.deepEqual(remoteCalls, ["create"]);
-	// No model to apply is not a failure: the session still opens.
-	assert.deepEqual(panel.actions.slice(-3), [
-		{ service: "sessions.refresh", arg: undefined },
-		{ service: "sessions.open", arg: "s-new" },
-		{ service: "layout.selectPanel", arg: null },
-	]);
-});
-
-test("a failed model selection still opens the created session, and reports the error", async () => {
-	const remote = {
-		workspace: {
-			create: async () => ({
-				ok: true,
-				value: { workspace: { workspaceId: "w-1", path: "/home/u/buddy-workspace", title: "t", sessionIds: [], createdAt: 0, updatedAt: 0 }, created: true },
-			}),
-		},
-		session: {
-			create: async () => ({ ok: true, value: { sessionId: "s-new" } }),
-			selectModel: async () => ({ ok: false, error: { message: "bad model" } }),
-		},
-	};
-	const panel = mountPanel(
-		async (endpoint) =>
-			endpoint === "buddyPersona/preferences"
-				? {
-						ok: true,
-						value: {
-							...PREFS,
-							model: { provider: "p", model: "m", reasoningEffort: "" },
-							// Not under test here, and hiding them keeps this test from
-							// having to also stub the Telegram module's own endpoints.
-							panel: { sections: { ...PREFS.panel.sections, model: false, telegram: false } },
-						},
-					}
-				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
-		remote,
-	);
-	await settle();
-	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
-	await settle();
-	// The conversation exists — a bad model default is not a reason to strand
-	// the user without the session they just asked for.
-	assert.deepEqual(panel.actions.slice(-3), [
-		{ service: "sessions.refresh", arg: undefined },
-		{ service: "sessions.open", arg: "s-new" },
-		{ service: "layout.selectPanel", arg: null },
-	]);
-	assert.ok(texts(panel.tree()).includes("bad model"), "the model-selection failure must still surface");
-});
-
 const ONLY = (id: string) => ({ ...PREFS, panel: { sections: { soul: false, agents: false, model: false, telegram: false, [id]: true } } });
 
 const CATALOG = {
@@ -287,15 +135,11 @@ test("the model module saves a concrete buddy default", async () => {
 		remote,
 	);
 	await settle();
-	const follow = elements(panel.tree()).find((e) => e.type === "input" && e.props["name"] === "followDefault");
-	assert.equal(follow?.props["checked"], true, "an empty buddy model reads as following the global default");
-	(follow?.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } });
-	const provider = elements(panel.tree()).find((e) => e.type === "select" && e.props["name"] === "provider");
-	(provider?.props["onChange"] as (event: { target: { value: string } }) => void)({ target: { value: "p" } });
-	const model = elements(panel.tree()).find((e) => e.type === "select" && e.props["name"] === "model");
-	(model?.props["onChange"] as (event: { target: { value: string } }) => void)({ target: { value: "m1" } });
-	const effort = elements(panel.tree()).find((e) => e.type === "select" && e.props["name"] === "effort");
-	(effort?.props["onChange"] as (event: { target: { value: string } }) => void)({ target: { value: "high" } });
+	assert.equal(switchControl(panel.tree(), "settings.buddy:modelFollow").props["aria-checked"], true, "an empty buddy model reads as following the global default");
+	flipSwitch(panel.tree(), "settings.buddy:modelFollow");
+	choose(panel.tree(), "provider", "p");
+	choose(panel.tree(), "model", "m1");
+	choose(panel.tree(), "effort", "high");
 	(button(panel.tree(), "settings.buddy:save").props["onClick"] as () => void)();
 	await settle();
 	const write = panel.calls.find((call) => call.endpoint === "buddyPersona/updatePreferences");
@@ -309,9 +153,8 @@ test("following the global default saves an empty model", async () => {
 		remote,
 	);
 	await settle();
-	const follow = elements(panel.tree()).find((e) => e.type === "input" && e.props["name"] === "followDefault");
-	assert.equal(follow?.props["checked"], false);
-	(follow?.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+	assert.equal(switchControl(panel.tree(), "settings.buddy:modelFollow").props["aria-checked"], false);
+	flipSwitch(panel.tree(), "settings.buddy:modelFollow");
 	(button(panel.tree(), "settings.buddy:save").props["onClick"] as () => void)();
 	await settle();
 	const write = panel.calls.find((call) => call.endpoint === "buddyPersona/updatePreferences");
@@ -328,8 +171,7 @@ test("the telegram module shows status and saves config through buddyTelegram", 
 	});
 	await settle();
 	assert.ok(texts(panel.tree()).includes(status.detail), "the occupancy detail must be visible");
-	const enabled = elements(panel.tree()).find((e) => e.type === "input" && e.props["name"] === "enabled");
-	(enabled?.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: true } });
+	flipSwitch(panel.tree(), "settings.buddy:telegramEnabledLabel");
 	(button(panel.tree(), "settings.buddy:telegramSave").props["onClick"] as () => void)();
 	await settle();
 	const write = panel.calls.find((call) => call.endpoint === "buddyTelegram/updateConfig");
@@ -363,65 +205,47 @@ test("the telegram token is written through remote.credentials and never read ba
 	assert.deepEqual(writes, [{ ref: "TELEGRAM_BOT_TOKEN", value: "123:abc" }]);
 });
 
-test("a failed create is shown and nothing is opened", async () => {
-	const remote = {
-		workspace: {
-			create: async () => ({
-				ok: true,
-				value: { workspace: { workspaceId: "w-1", path: "/home/u/buddy-workspace", title: "t", sessionIds: [], createdAt: 0, updatedAt: 0 }, created: true },
-			}),
-		},
-		session: { create: async () => ({ ok: false, error: { message: "no workspace" } }), selectModel: async () => ({ ok: true }) },
-	};
-	const panel = mountPanel(
-		async (endpoint) =>
-			endpoint === "buddyPersona/preferences"
-				? {
-						ok: true,
-						// Not under test here; hidden so the Telegram module never mounts
-						// and needs no endpoint stub of its own.
-						value: { ...PREFS, panel: { sections: { ...PREFS.panel.sections, model: false, telegram: false } } },
-					}
-				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
-		remote,
+test("the panel header carries only its title — conversations start elsewhere", async () => {
+	const panel = mountPanel(async (endpoint) =>
+		endpoint === "buddyPersona/preferences"
+			? { ok: true, value: { ...PREFS, panel: { sections: { soul: false, agents: false, model: false, telegram: false } } } }
+			: { ok: true, value: {} },
 	);
 	await settle();
-	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
-	await settle();
-	assert.ok(texts(panel.tree()).includes("no workspace"));
-	assert.ok(!panel.actions.some((action) => action.service === "sessions.open"));
+	assert.deepEqual(elements(panel.tree()).filter((e) => e.type === "button"), []);
+	assert.ok(texts(panel.tree()).includes("settings.buddy:panelTitle"));
 });
 
-test("a failed workspace create is shown, and no session is created or opened", async () => {
-	const sessionCalls: string[] = [];
-	const remote = {
-		workspace: { create: async () => ({ ok: false, error: { message: "bad path" } }) },
-		session: {
-			create: async () => {
-				sessionCalls.push("create");
-				throw new Error("session create must not run when the workspace create failed");
-			},
-			selectModel: async () => ({ ok: true, value: {} }),
-		},
-	};
-	const panel = mountPanel(
-		async (endpoint) =>
-			endpoint === "buddyPersona/preferences"
-				? {
-						ok: true,
-						// Not under test here; hidden so the Telegram module never mounts
-						// and needs no endpoint stub of its own.
-						value: { ...PREFS, panel: { sections: { ...PREFS.panel.sections, model: false, telegram: false } } },
-					}
-				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
-		remote,
+test("module buttons are the harness's own Button, not hand-styled ones", async () => {
+	const panel = mountPanel(async (endpoint) =>
+		endpoint === "buddyPersona/preferences"
+			? { ok: true, value: ONLY("soul") }
+			: { ok: true, value: { soul: "", agents: "", home: "/h" } },
 	);
 	await settle();
-	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
+	const save = button(panel.tree(), "settings.buddy:save");
+	assert.equal(save.props["data-variant"], "primary");
+	assert.equal(save.props["data-size"], "sm");
+	assert.equal(save.props["style"], undefined, "no inline styling on top of the native button");
+});
+
+test("no module renders a raw checkbox, text input, select or inline style — every control is a harness primitive", async () => {
+	const remote = { session: { modelCatalog: async () => ({ ok: true, value: CATALOG }) } };
+	const panel = mountPanel(async (endpoint) => {
+		if (endpoint === "buddyPersona/preferences") {
+			return { ok: true, value: { ...PREFS, model: { provider: "p", model: "m1", reasoningEffort: "" } } };
+		}
+		if (endpoint === "buddyPersona/persona") return { ok: true, value: { soul: "", agents: "", home: "/h" } };
+		if (endpoint === "buddyTelegram/status") return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
+		return { ok: true, value: { enabled: false, ownerUserId: "", defaultCwd: "", permissionPreset: "workspace-write", renderMarkdown: true, mediaDelivery: "all" } };
+	}, remote);
 	await settle();
-	assert.ok(texts(panel.tree()).includes("bad path"));
-	assert.deepEqual(sessionCalls, []);
-	assert.ok(!panel.actions.some((action) => action.service === "sessions.open"));
+	const all = elements(panel.tree());
+	assert.deepEqual(all.filter((e) => e.type === "select"), [], "selects are Menu-backed selectors");
+	assert.deepEqual(all.filter((e) => e.type === "input" && e.props["data-wrapper-class"] === undefined), [], "text fields are the Input primitive");
+	assert.deepEqual(all.filter((e) => e.props["style"] !== undefined), [], "styling comes from classes on --dsw tokens");
+	assert.equal(all.filter((e) => e.props["role"] === "switch").length, 3, "Model follow-default plus Telegram markdown and enabled");
+	assert.equal(all.filter((e) => e.type === "menu").length, 5, "provider, model, effort, permission level and media delivery");
 });
 
 test("the panel clears a stale preferences error once a notified reload succeeds (R9)", async () => {
@@ -488,9 +312,7 @@ test("the panel clears a stale preferences error once a notified reload succeeds
 
 	// Toggling a settings switch is the only path that fires
 	// `preferencesChanged.notify()`, which is what makes the panel reload.
-	const soulCheckbox = elements(renderer.tree()).find((e) => e.type === "input" && e.props["name"] === "soul");
-	assert.ok(soulCheckbox !== undefined, "the settings tab's soul checkbox");
-	(soulCheckbox.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } });
+	flipSwitch(renderer.tree(), "settings.buddy:soulTitle");
 	await settle();
 
 	const [panelTreeAfter] = renderer.tree() as [unknown, unknown];
@@ -552,9 +374,7 @@ test("the main panel drops a module the settings tab just hid, without remountin
 	assert.ok(texts(panelTree).includes("settings.buddy:telegramTitle"), "the telegram module card renders before the toggle");
 	assert.ok(texts(panelTree).includes("settings.buddy:soulTitle"));
 
-	const telegramCheckbox = elements(renderer.tree()).find((e) => e.type === "input" && e.props["name"] === "telegram");
-	assert.ok(telegramCheckbox !== undefined, "the settings tab's telegram checkbox");
-	(telegramCheckbox.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } });
+	flipSwitch(renderer.tree(), "settings.buddy:telegramTitle");
 	await settle();
 
 	const [, panelTreeAfter] = renderer.tree() as [unknown, unknown];

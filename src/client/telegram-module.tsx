@@ -10,7 +10,10 @@
  * @module dsh-buddy/client/telegram-module
  */
 import { useCallback, useEffect, useState } from "react";
+import { Button, Input, Switch } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { Call } from "./call.ts";
+import { FORM_CLASS } from "./form-css.ts";
+import { Select } from "./select.tsx";
 
 /** The settings section as the host reports it. */
 interface Config {
@@ -51,41 +54,6 @@ export interface TelegramModuleDeps {
 	/** Write (or, when `undefined`, clear) the bot token through `remote.credentials`. */
 	writeToken(value: string | undefined): Promise<void>;
 }
-
-const styles = {
-	block: {
-		background: "var(--dsw-alias-bg-layer-3)",
-		border: "0.5px solid var(--dsw-alias-border-l2)",
-		borderRadius: 10,
-		padding: "14px 16px",
-		display: "flex",
-		flexDirection: "column",
-		gap: 12,
-	},
-	field: { display: "flex", flexDirection: "column", gap: 4 },
-	hint: { fontSize: 12, color: "var(--dsw-alias-label-tertiary)", margin: "4px 0 0", lineHeight: 1.5 },
-	label: { fontSize: 13, fontWeight: 500, color: "var(--dsw-alias-label-primary)" },
-	input: {
-		fontSize: 13,
-		padding: "6px 8px",
-		borderRadius: 6,
-		border: "0.5px solid var(--dsw-alias-border-l2)",
-		background: "var(--dsw-alias-bg-base)",
-		color: "var(--dsw-alias-label-primary)",
-	},
-	row: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" as const },
-	button: {
-		fontSize: 13,
-		padding: "6px 12px",
-		borderRadius: 6,
-		border: "0.5px solid var(--dsw-alias-border-l2)",
-		background: "var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-base))",
-		color: "var(--dsw-alias-label-primary)",
-		cursor: "pointer",
-	},
-	status: { fontSize: 13, color: "var(--dsw-alias-label-secondary)", margin: 0 },
-	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)", margin: 0 },
-} as const;
 
 /**
  * @param deps - RPC, locale and the credential writer.
@@ -139,7 +107,7 @@ export function createTelegramModule(deps: TelegramModuleDeps): () => unknown {
 		};
 
 		if (effective === undefined || status === undefined) {
-			return error === undefined ? <p style={styles.status}>{deps.t("telegramLoading")}</p> : <p style={styles.error}>{error}</p>;
+			return error === undefined ? <p className={FORM_CLASS.status}>{deps.t("telegramLoading")}</p> : <p className={FORM_CLASS.error}>{error}</p>;
 		}
 
 		const stateLabel =
@@ -151,201 +119,199 @@ export function createTelegramModule(deps: TelegramModuleDeps): () => unknown {
 						? deps.t("telegramStatusError")
 						: deps.t("telegramStatusOff");
 
-		return (
-			<div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-				{notice !== undefined && <p style={styles.status}>{notice}</p>}
-				{error !== undefined && <p style={styles.error}>{error}</p>}
+		const setField = <K extends keyof Config>(key: K, value: Config[K]): void => {
+			setDraft((current) => ({ ...current, [key]: value }));
+		};
 
-				<section style={styles.block}>
-					<div>
-						<div style={styles.label}>{deps.t("telegramTokenTitle")}</div>
-						<p style={styles.hint}>{deps.t("telegramTokenHint")}</p>
+		const runTokenWrite = (value: string | undefined, onDone: () => void): void => {
+			setBusy(true);
+			void deps
+				.writeToken(value)
+				.then(async () => {
+					onDone();
+					await load();
+				})
+				.catch((failure: unknown) => {
+					setError((failure as Error).message);
+				})
+				.finally(() => {
+					setBusy(false);
+				});
+		};
+
+		return (
+			<div>
+				{(notice !== undefined || error !== undefined) && (
+					<div className={FORM_CLASS.group}>
+						{notice !== undefined && <p className={FORM_CLASS.status}>{notice}</p>}
+						{error !== undefined && <p className={FORM_CLASS.error}>{error}</p>}
 					</div>
-					<p style={styles.status}>
+				)}
+
+				<section className={FORM_CLASS.group}>
+					<div className={FORM_CLASS.field}>
+						<div className={FORM_CLASS.title}>{deps.t("telegramTokenTitle")}</div>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramTokenHint")}</p>
+					</div>
+					<p className={FORM_CLASS.status}>
 						{status.token.configured ? deps.t("telegramTokenConfigured") : deps.t("telegramTokenMissing")}
 						{sourceLabel(status.token.source)}
 						{` · ${status.token.writable ? deps.t("telegramTokenWritable") : deps.t("telegramTokenReadOnly")}`}
 					</p>
-					<div style={styles.row}>
-						<input
-							style={{ ...styles.input, flex: 1, minWidth: 240 }}
-							type="password"
-							autoComplete="off"
-							placeholder={deps.t("telegramTokenPlaceholder")}
-							value={tokenDraft}
-							disabled={!status.token.writable || busy}
-							onChange={(event: { target: { value: string } }) => {
-								setTokenDraft(event.target.value);
-							}}
-						/>
-						<button
-							style={styles.button}
-							type="button"
+					<Input
+						className={FORM_CLASS.input}
+						name="token"
+						type="password"
+						autoComplete="off"
+						aria-label={deps.t("telegramTokenTitle")}
+						placeholder={deps.t("telegramTokenPlaceholder")}
+						value={tokenDraft}
+						disabled={!status.token.writable || busy}
+						onChange={(event: { target: { value: string } }) => {
+							setTokenDraft(event.target.value);
+						}}
+					/>
+					<div className={FORM_CLASS.actions}>
+						<Button
+							variant="primary"
+							size="sm"
 							disabled={busy || tokenDraft.trim() === "" || !status.token.writable}
 							onClick={() => {
-								setBusy(true);
-								void deps
-									.writeToken(tokenDraft.trim())
-									.then(async () => {
-										setTokenDraft("");
-										setNotice(deps.t("telegramSaved"));
-										await load();
-									})
-									.catch((failure: unknown) => {
-										setError((failure as Error).message);
-									})
-									.finally(() => {
-										setBusy(false);
-									});
+								runTokenWrite(tokenDraft.trim(), () => {
+									setTokenDraft("");
+									setNotice(deps.t("telegramSaved"));
+								});
 							}}
 						>
 							{deps.t("tokenSave")}
-						</button>
-						<button
-							style={styles.button}
-							type="button"
+						</Button>
+						<Button
+							variant="outline"
+							size="sm"
 							disabled={busy || !status.token.configured || !status.token.writable}
 							onClick={() => {
-								setBusy(true);
-								void deps
-									.writeToken(undefined)
-									.then(async () => {
-										setNotice(deps.t("telegramCleared"));
-										await load();
-									})
-									.catch((failure: unknown) => {
-										setError((failure as Error).message);
-									})
-									.finally(() => {
-										setBusy(false);
-									});
+								runTokenWrite(undefined, () => {
+									setNotice(deps.t("telegramCleared"));
+								});
 							}}
 						>
 							{deps.t("tokenClear")}
-						</button>
+						</Button>
 					</div>
 				</section>
 
-				<section style={styles.block}>
-					<div style={styles.label}>{deps.t("telegramConfigTitle")}</div>
-					<div style={styles.field}>
-						<span style={styles.label}>{deps.t("telegramOwnerLabel")}</span>
-						<input
-							style={styles.input}
+				<section className={FORM_CLASS.group}>
+					<div className={FORM_CLASS.title}>{deps.t("telegramConfigTitle")}</div>
+					<div className={FORM_CLASS.field}>
+						<span className={FORM_CLASS.label}>{deps.t("telegramOwnerLabel")}</span>
+						<Input
+							className={FORM_CLASS.input}
 							name="ownerUserId"
+							aria-label={deps.t("telegramOwnerLabel")}
 							value={effective.ownerUserId}
 							placeholder="123456789"
-							onChange={(event: { target: { value: string } }) => {
-								setDraft((current) => ({ ...current, ownerUserId: event.target.value }));
-							}}
+							onChange={(event: { target: { value: string } }) => setField("ownerUserId", event.target.value)}
 						/>
-						<p style={styles.hint}>{deps.t("telegramOwnerHint")}</p>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramOwnerHint")}</p>
 					</div>
-					<div style={styles.field}>
-						<span style={styles.label}>{deps.t("telegramCwdLabel")}</span>
-						<input
-							style={styles.input}
+					<div className={FORM_CLASS.field}>
+						<span className={FORM_CLASS.label}>{deps.t("telegramCwdLabel")}</span>
+						<Input
+							className={FORM_CLASS.input}
 							name="defaultCwd"
+							aria-label={deps.t("telegramCwdLabel")}
 							value={effective.defaultCwd}
-							onChange={(event: { target: { value: string } }) => {
-								setDraft((current) => ({ ...current, defaultCwd: event.target.value }));
-							}}
+							onChange={(event: { target: { value: string } }) => setField("defaultCwd", event.target.value)}
 						/>
-						<p style={styles.hint}>{deps.t("telegramCwdHint")}</p>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramCwdHint")}</p>
 					</div>
-					<div style={styles.field}>
-						<span style={styles.label}>{deps.t("telegramPresetLabel")}</span>
-						<select
-							style={styles.input}
-							name="permissionPreset"
-							value={effective.permissionPreset}
-							onChange={(event: { target: { value: string } }) => {
-								setDraft((current) => ({ ...current, permissionPreset: event.target.value }));
-							}}
-						>
-							<option value="read-only">{deps.t("telegramPresetReadOnly")}</option>
-							<option value="workspace-write">{deps.t("telegramPresetWorkspace")}</option>
-							<option value="danger-full-access">{deps.t("telegramPresetFull")}</option>
-						</select>
-						<p style={styles.hint}>{deps.t("telegramPresetHint")}</p>
+					<div className={FORM_CLASS.field}>
+						<span className={FORM_CLASS.label}>{deps.t("telegramPresetLabel")}</span>
+						<div>
+							<Select
+								name="permissionPreset"
+								value={effective.permissionPreset}
+								options={[
+									{ id: "read-only", label: deps.t("telegramPresetReadOnly") },
+									{ id: "workspace-write", label: deps.t("telegramPresetWorkspace") },
+									{ id: "danger-full-access", label: deps.t("telegramPresetFull") },
+								]}
+								onChange={(value) => setField("permissionPreset", value)}
+							/>
+						</div>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramPresetHint")}</p>
 					</div>
-					<div style={styles.field}>
-						<label style={styles.row}>
-							<input
-								type="checkbox"
-								name="renderMarkdown"
+					<div className={FORM_CLASS.field}>
+						<div className={FORM_CLASS.toggleRow}>
+							<span className={FORM_CLASS.label}>{deps.t("telegramMarkdownLabel")}</span>
+							<Switch
 								checked={effective.renderMarkdown}
-								onChange={(event: { target: { checked: boolean } }) => {
-									setDraft((current) => ({ ...current, renderMarkdown: event.target.checked }));
-								}}
+								label={deps.t("telegramMarkdownLabel")}
+								onChange={(checked: boolean) => setField("renderMarkdown", checked)}
 							/>
-							<span style={styles.label}>{deps.t("telegramMarkdownLabel")}</span>
-						</label>
-						<p style={styles.hint}>{deps.t("telegramMarkdownHint")}</p>
+						</div>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramMarkdownHint")}</p>
 					</div>
-					<div style={styles.field}>
-						<span style={styles.label}>{deps.t("telegramMediaLabel")}</span>
-						<select
-							style={styles.input}
-							name="mediaDelivery"
-							value={effective.mediaDelivery}
-							onChange={(event: { target: { value: string } }) => {
-								setDraft((current) => ({ ...current, mediaDelivery: event.target.value }));
-							}}
-						>
-							<option value="off">{deps.t("telegramMediaOff")}</option>
-							<option value="presented">{deps.t("telegramMediaPresented")}</option>
-							<option value="all">{deps.t("telegramMediaAll")}</option>
-						</select>
-						<p style={styles.hint}>{deps.t("telegramMediaHint")}</p>
+					<div className={FORM_CLASS.field}>
+						<span className={FORM_CLASS.label}>{deps.t("telegramMediaLabel")}</span>
+						<div>
+							<Select
+								name="mediaDelivery"
+								value={effective.mediaDelivery}
+								options={[
+									{ id: "off", label: deps.t("telegramMediaOff") },
+									{ id: "presented", label: deps.t("telegramMediaPresented") },
+									{ id: "all", label: deps.t("telegramMediaAll") },
+								]}
+								onChange={(value) => setField("mediaDelivery", value)}
+							/>
+						</div>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramMediaHint")}</p>
 					</div>
-					<div style={styles.field}>
-						<label style={styles.row}>
-							<input
-								type="checkbox"
-								name="enabled"
+					<div className={FORM_CLASS.field}>
+						<div className={FORM_CLASS.toggleRow}>
+							<span className={FORM_CLASS.label}>{deps.t("telegramEnabledLabel")}</span>
+							<Switch
 								checked={effective.enabled}
-								onChange={(event: { target: { checked: boolean } }) => {
-									setDraft((current) => ({ ...current, enabled: event.target.checked }));
-								}}
+								label={deps.t("telegramEnabledLabel")}
+								onChange={(checked: boolean) => setField("enabled", checked)}
 							/>
-							<span style={styles.label}>{deps.t("telegramEnabledLabel")}</span>
-						</label>
-						<p style={styles.hint}>{deps.t("telegramEnabledHint")}</p>
+						</div>
+						<p className={FORM_CLASS.hint}>{deps.t("telegramEnabledHint")}</p>
 					</div>
-					<div style={styles.row}>
-						<button
-							style={styles.button}
-							type="button"
+					<div className={FORM_CLASS.actions}>
+						<Button
+							variant="primary"
+							size="sm"
 							disabled={busy || Object.keys(draft).length === 0}
 							onClick={() => {
 								void save(draft);
 							}}
 						>
 							{deps.t("telegramSave")}
-						</button>
-						{Object.keys(draft).length > 0 && <span style={styles.hint}>{deps.t("telegramUnsaved")}</span>}
+						</Button>
+						{Object.keys(draft).length > 0 && <span className={FORM_CLASS.hint}>{deps.t("telegramUnsaved")}</span>}
 					</div>
 				</section>
 
-				<section style={styles.block}>
-					<div style={styles.label}>{deps.t("telegramStatusTitle")}</div>
-					<p style={styles.status}>
+				<section className={FORM_CLASS.group}>
+					<div className={FORM_CLASS.title}>{deps.t("telegramStatusTitle")}</div>
+					<p className={FORM_CLASS.status}>
 						{stateLabel}
 						{status.botUsername === undefined ? "" : ` · @${status.botUsername}`}
 						{` · ${(deps.t("telegramStatusSessions") as unknown as (n: number) => string)(status.sessions)}`}
 					</p>
-					{status.detail !== undefined && status.state !== "running" && <p style={styles.error}>{status.detail}</p>}
-					<div style={styles.row}>
-						<button
-							style={styles.button}
-							type="button"
+					{status.detail !== undefined && status.state !== "running" && <p className={FORM_CLASS.error}>{status.detail}</p>}
+					<div className={FORM_CLASS.actions}>
+						<Button
+							variant="outline"
+							size="sm"
 							onClick={() => {
 								void load();
 							}}
 						>
 							{deps.t("telegramRetry")}
-						</button>
+						</Button>
 					</div>
 				</section>
 			</div>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createRequire } from "node:module";
-import { contextStub, createRenderer, elements, loadClient, settle, type RecordedCall } from "./support/client-harness.ts";
+import { contextStub, createRenderer, elements, flipSwitch, loadClient, settle, type RecordedCall } from "./support/client-harness.ts";
 
 const nodeRequire = createRequire(import.meta.url);
 const PREFS = {
@@ -36,7 +36,8 @@ test("the settings tab holds module switches and the home path — no persona ed
 	await settle();
 	const all = elements(tab.tree());
 	assert.equal(all.filter((e) => e.type === "textarea").length, 0, "persona editing lives in the main panel now");
-	assert.equal(all.filter((e) => e.type === "input" && e.props["type"] === "checkbox").length, 4);
+	assert.equal(all.filter((e) => e.type === "input").length, 0, "no raw checkboxes");
+	assert.equal(all.filter((e) => e.props["role"] === "switch").length, 4, "one harness Switch per module");
 	assert.ok(all.some((e) => e.props["children"] === "settings.buddy:homeLabel /home/buddy"));
 });
 
@@ -47,9 +48,7 @@ test("toggling a module writes the whole sections object", async () => {
 			: { ok: true, value: { soul: "", agents: "", home: "/h" } },
 	);
 	await settle();
-	const telegram = elements(tab.tree()).find((e) => e.type === "input" && e.props["name"] === "telegram");
-	assert.ok(telegram !== undefined);
-	(telegram.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } });
+	flipSwitch(tab.tree(), "settings.buddy:telegramTitle");
 	await settle();
 	const write = tab.calls.find((call) => call.endpoint === "buddyPersona/updatePreferences");
 	assert.deepEqual(write?.payload, {

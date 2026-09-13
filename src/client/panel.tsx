@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { Call } from "./call.ts";
+import { FORM_CLASS } from "./form-css.ts";
 import { visibleModules, type PanelModule } from "./modules.ts";
 import type { Notifier } from "./notifier.ts";
 import type { PanelSectionId } from "../index.ts";
@@ -15,47 +16,18 @@ export interface PanelDeps {
 	call: Call;
 	t(key: string): string;
 	modules: readonly PanelModule<() => unknown>[];
-	/** Create, configure and open a new buddy conversation; rejects with a displayable message. */
-	newConversation(): Promise<void>;
 	/** Fires when the Settings tab changes which modules are visible, so this mounted panel can reload without remounting. */
 	preferencesChanged: Notifier;
 }
 
-const styles = {
-	panel: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0 },
-	header: {
-		display: "flex",
-		alignItems: "center",
-		justifyContent: "space-between",
-		gap: 12,
-		padding: "14px 20px",
-		borderBottom: "1px solid var(--dsw-alias-border, #e5e5e5)",
-	},
-	title: { fontSize: 15, fontWeight: 600 },
-	body: { flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px", display: "flex", flexDirection: "column", gap: 16 },
-	card: {
-		background: "var(--dsw-alias-bg-layer-3)",
-		border: "0.5px solid var(--dsw-alias-border-l2)",
-		borderRadius: 10,
-		padding: "14px 16px",
-		display: "flex",
-		flexDirection: "column",
-		gap: 10,
-	},
-	cardTitle: { fontSize: 14, fontWeight: 600, margin: 0 },
-	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)", margin: 0 },
-	button: { padding: "6px 14px", borderRadius: 6, cursor: "pointer" },
-} as const;
-
 /**
- * @param deps - RPC, locale, the module table and the create action.
+ * @param deps - RPC, locale, the module table and the preferences notifier.
  * @returns the component the `main` slot renders under `MAIN_PANEL_KEY`.
  */
 export function createBuddyPanel(deps: PanelDeps): () => unknown {
 	return function BuddyPanel(): unknown {
 		const [sections, setSections] = useState<Partial<Record<PanelSectionId, boolean>> | undefined>(undefined);
 		const [error, setError] = useState<string | undefined>(undefined);
-		const [busy, setBusy] = useState(false);
 
 		const load = useCallback(async (): Promise<void> => {
 			try {
@@ -80,28 +52,13 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 		// panel through props or context — only through the shared notifier.
 		useEffect(() => deps.preferencesChanged.subscribe(() => void load()), [load]);
 
-		const create = async (): Promise<void> => {
-			setBusy(true);
-			try {
-				await deps.newConversation();
-				setError(undefined);
-			} catch (cause) {
-				setError((cause as Error).message);
-			} finally {
-				setBusy(false);
-			}
-		};
-
 		return (
-			<div style={styles.panel}>
-				<div style={styles.header}>
-					<span style={styles.title}>{deps.t("panelTitle")}</span>
-					<button style={styles.button} type="button" disabled={busy} onClick={() => void create()}>
-						{deps.t("newConversation")}
-					</button>
+			<div className={FORM_CLASS.panel}>
+				<div className={FORM_CLASS.panelHeader}>
+					<span className={FORM_CLASS.panelTitle}>{deps.t("panelTitle")}</span>
 				</div>
-				<div style={styles.body}>
-					{error !== undefined && <p style={styles.error}>{error}</p>}
+				<div className={FORM_CLASS.panelBody}>
+					{error !== undefined && <p className={FORM_CLASS.error}>{error}</p>}
 					{sections !== undefined &&
 						visibleModules(deps.modules, sections).map((module) => {
 							// A capitalised local, not `<module.Component />` directly: every
@@ -113,8 +70,8 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 							// value reference), so this cast changes nothing at runtime.
 							const ModuleComponent = module.Component as unknown as () => ReactNode;
 							return (
-								<section key={module.id} style={styles.card}>
-									<h3 style={styles.cardTitle}>{deps.t(module.titleKey)}</h3>
+								<section key={module.id} className={FORM_CLASS.card}>
+									<h3 className={FORM_CLASS.cardTitle}>{deps.t(module.titleKey)}</h3>
 									<ModuleComponent />
 								</section>
 							);

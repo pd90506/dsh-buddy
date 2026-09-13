@@ -1,9 +1,8 @@
 /**
  * Which model a new buddy conversation starts on.
  *
- * Pure and dependency-free on purpose: the Telegram row and the browser's
- * New Buddy conversation button both apply the same precedence, and the browser
- * bundle must not pull in a host module to do it.
+ * Pure and dependency-free on purpose, so any caller — today the Telegram
+ * row — can apply the precedence without pulling in a host service.
  * @module dsh-buddy/model-selection
  */
 import type { BuddyModelDefault } from "./config.ts";

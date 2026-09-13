@@ -5,7 +5,9 @@
  * @module dsh-buddy/client/settings
  */
 import { useCallback, useEffect, useState } from "react";
+import { Switch } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { Call } from "./call.ts";
+import { FORM_CLASS } from "./form-css.ts";
 import type { Notifier } from "./notifier.ts";
 import { PANEL_SECTION_IDS, type PanelSectionId } from "../index.ts";
 
@@ -23,14 +25,6 @@ const TITLE_KEYS: Record<PanelSectionId, string> = {
 	model: "modelTitle",
 	telegram: "telegramTitle",
 };
-
-const styles = {
-	page: { display: "flex", flexDirection: "column", gap: 16, padding: "4px 2px" },
-	label: { fontSize: 13, fontWeight: 600 },
-	hint: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", margin: 0 },
-	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)", margin: 0 },
-	row: { display: "flex", alignItems: "center", gap: 8 },
-} as const;
 
 /**
  * @param deps - RPC and locale.
@@ -77,23 +71,20 @@ export function createBuddySettingsSection(deps: SettingsDeps): () => unknown {
 		};
 
 		return (
-			<div style={styles.page}>
-				<p style={styles.hint}>{deps.t("settingsHint")}</p>
-				<div style={styles.label}>{deps.t("sectionsTitle")}</div>
-				{sections !== undefined &&
-					PANEL_SECTION_IDS.map((id) => (
-						<label key={id} style={styles.row}>
-							<input
-								type="checkbox"
-								name={id}
-								checked={sections[id]}
-								onChange={(event: { target: { checked: boolean } }) => void toggle(id, event.target.checked)}
-							/>
-							<span>{deps.t(TITLE_KEYS[id])}</span>
-						</label>
-					))}
-				{home !== undefined && <p style={styles.hint}>{`${deps.t("homeLabel")} ${home}`}</p>}
-				{error !== undefined && <p style={styles.error}>{error}</p>}
+			<div className={FORM_CLASS.field}>
+				<p className={FORM_CLASS.hint}>{deps.t("settingsHint")}</p>
+				<div className={FORM_CLASS.group}>
+					<div className={FORM_CLASS.title}>{deps.t("sectionsTitle")}</div>
+					{sections !== undefined &&
+						PANEL_SECTION_IDS.map((id) => (
+							<div key={id} className={FORM_CLASS.toggleRow}>
+								<span>{deps.t(TITLE_KEYS[id])}</span>
+								<Switch checked={sections[id]} label={deps.t(TITLE_KEYS[id])} onChange={(checked: boolean) => void toggle(id, checked)} />
+							</div>
+						))}
+				</div>
+				{home !== undefined && <p className={FORM_CLASS.hint}>{`${deps.t("homeLabel")} ${home}`}</p>}
+				{error !== undefined && <p className={FORM_CLASS.error}>{error}</p>}
 			</div>
 		);
 	};
