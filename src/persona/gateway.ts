@@ -111,6 +111,12 @@ function typertContribution(): unknown {
 			{ ...shared, id: `${TYPERT_PACKAGE}#sessions`, method: "sessions", parameters: [] },
 			{
 				...shared,
+				id: `${TYPERT_PACKAGE}#archiveSession`,
+				method: "archiveSession",
+				parameters: [{ name: "sessionId", wire: "sessionId", ...json }],
+			},
+			{
+				...shared,
 				id: `${TYPERT_PACKAGE}#updatePersona`,
 				method: "updatePersona",
 				parameters: [{ name: "patch", wire: "patch", ...json }],
@@ -139,6 +145,8 @@ export interface GatewayDeps {
 	readonly writePersona: (patch: Partial<PersonaDocument>) => Promise<PersonaView>;
 	/** Buddy conversations, newest first. */
 	readonly listSessions: () => Promise<BuddySessionSummary[]>;
+	/** Archive one conversation from the listings, then return the fresh list. */
+	readonly archiveSession: (sessionId: string) => Promise<BuddySessionSummary[]>;
 	/** Buddy-wide preferences. */
 	readonly readPreferences: () => Promise<PreferencesView>;
 	/** Apply an already-validated preferences write. */
@@ -198,6 +206,20 @@ export class BuddyPersonaGateway extends TypertRemoteService {
 	 */
 	async sessions(): Promise<BuddySessionSummary[]> {
 		return await this.deps.listSessions();
+	}
+
+	/**
+	 * Archive one buddy conversation, the way an ordinary session row archives:
+	 * the record is kept and can be unarchived, but it drops out of the listings.
+	 *
+	 * The wire is untrusted, so a blank or ill-typed id is dropped here rather
+	 * than handed to the workspace registry.
+	 * @param sessionId - the conversation to archive.
+	 * @returns the conversation list after the archive (unchanged when the id was dropped).
+	 */
+	async archiveSession(sessionId: string): Promise<BuddySessionSummary[]> {
+		if (typeof sessionId !== "string" || sessionId.trim() === "") return await this.deps.listSessions();
+		return await this.deps.archiveSession(sessionId);
 	}
 
 	/**

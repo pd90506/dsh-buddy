@@ -60,6 +60,10 @@ interface MountOptions {
 	 * the plane being absent altogether.
 	 */
 	readonly telegramSessionIds?: readonly string[];
+	/** Mount the `workspaceRegistry` plane beside the rows; default `true`. */
+	readonly withWorkspaceRegistry?: boolean;
+	/** Session ids the workspace registry reports as already archived. */
+	readonly archivedSessionIds?: readonly string[];
 	/**
 	 * Make `AGENTS.md` a named pipe instead of an ordinary file, *before* the
 	 * rows mount. `readOr` (`src/persona/soul.ts`) blocks on `readFile` until a
@@ -243,6 +247,20 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 			sibling("fake-buddy-telegram", (ctx) =>
 				give(ctx, "buddyTelegram", {
 					telegramSessionIds: async () => options.telegramSessionIds ?? [],
+				}),
+			);
+		}
+
+		if (options.withWorkspaceRegistry !== false) {
+			const archived = new Set<string>(options.archivedSessionIds ?? []);
+			sibling("fake-workspace-registry", (ctx) =>
+				give(ctx, "workspaceRegistry", {
+					get archivedSessionIds(): readonly string[] {
+						return [...archived];
+					},
+					archiveSession: async (sessionId: unknown) => {
+						archived.add(String(sessionId));
+					},
 				}),
 			);
 		}
@@ -485,6 +503,54 @@ test("sessions are tagged by whether a Telegram chat created them", async () => 
 			["s-web", "web"],
 		],
 	);
+});
+
+test("sessions excludes conversations the workspace registry has archived", async () => {
+	const mounted = await mount({
+		sessions: [
+			{ header: { id: "s-a", cwd: "/a", agentPreset: BUDDY_PRESET_ID }, live: true },
+			{ header: { id: "s-b", cwd: "/b", agentPreset: BUDDY_PRESET_ID }, live: true },
+		],
+		titles: { "s-a": { title: "A", updatedAt: 2 }, "s-b": { title: "B", updatedAt: 1 } },
+		archivedSessionIds: ["s-a"],
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+	const sessions = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+	assert.deepEqual(
+		sessions.map((session) => session.sessionId),
+		["s-b"],
+		"an archived conversation must not appear in the list",
+	);
+});
+
+test("archiveSession archives through the workspace registry, dropping it from the next list", async () => {
+	const mounted = await mount({
+		sessions: [
+			{ header: { id: "s-a", cwd: "/a", agentPreset: BUDDY_PRESET_ID }, live: true },
+			{ header: { id: "s-b", cwd: "/b", agentPreset: BUDDY_PRESET_ID }, live: true },
+		],
+		titles: { "s-a": { title: "A", updatedAt: 2 }, "s-b": { title: "B", updatedAt: 1 } },
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+	const before = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+	assert.deepEqual(before.map((session) => session.sessionId).sort(), ["s-a", "s-b"]);
+
+	const after = (await dispatch(persona, "archiveSession", ["s-a"])) as BuddySessionSummary[];
+	assert.deepEqual(after.map((session) => session.sessionId), ["s-b"], "the archived session drops from the returned list");
+	const again = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+	assert.deepEqual(again.map((session) => session.sessionId), ["s-b"], "and stays gone on the next read");
+});
+
+test("archiveSession without a workspace registry fails loudly", async () => {
+	const mounted = await mount({
+		withWorkspaceRegistry: false,
+		sessions: [{ header: { id: "s-a", cwd: "/a", agentPreset: BUDDY_PRESET_ID }, live: true }],
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+	await assert.rejects(async () => await dispatch(persona, "archiveSession", ["s-a"]), /workspace registry/);
 });
 
 test("sessions all report source web when the Telegram plane is absent", async () => {

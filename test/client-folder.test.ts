@@ -25,6 +25,10 @@ function mountFolder(options: { wide?: boolean; current?: string } = {}) {
 		rpc: {
 			call: async (route, endpoint, payload) => {
 				calls.push({ route, endpoint, payload });
+				if (endpoint === "buddyPersona/archiveSession") {
+					const id = (payload as { args?: { sessionId?: string } }).args?.sessionId;
+					return { ok: true, value: SESSIONS.filter((session) => session.sessionId !== id) };
+				}
 				return { ok: true, value: SESSIONS };
 			},
 		},
@@ -97,6 +101,27 @@ test("clicking a conversation opens it and leaves the panel", async () => {
 		{ service: "sessions.open", arg: "s-tg" },
 		{ service: "layout.selectPanel", arg: null },
 	]);
+});
+
+test("each conversation row has an archive action that drops it from the folder", async () => {
+	const folder = mountFolder();
+	await settle();
+	(byLabel(folder.tree(), "settings.buddy:expand").props["onClick"] as () => void)();
+	await settle();
+	// One action menu per row, in list order; the first belongs to the s-tg row.
+	const menus = elements(folder.tree()).filter((e) => e.type === "menu");
+	assert.ok(menus.length >= 1, "each conversation row carries an action menu");
+	const items = menus[0]?.props["items"] as { id: string }[];
+	assert.ok(items.some((item) => item.id === "archive"), "the row menu offers Archive");
+	(menus[0]?.props["onSelect"] as (id: string) => void)("archive");
+	await settle();
+	const archiveCall = folder.calls.find((call) => call.endpoint === "buddyPersona/archiveSession");
+	assert.ok(archiveCall !== undefined, "Archive must hit the archiveSession endpoint");
+	assert.deepEqual(archiveCall?.payload, { args: { sessionId: "s-tg" } });
+	const labels = elements(folder.tree())
+		.filter((e) => e.type === "button")
+		.map((e) => e.props["aria-label"]);
+	assert.ok(!labels.includes("Telegram: Panda"), "the archived conversation leaves the list");
 });
 
 test("the open conversation is highlighted and a session-list change reloads the expanded folder", async () => {

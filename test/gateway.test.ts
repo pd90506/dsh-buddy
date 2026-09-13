@@ -51,6 +51,8 @@ interface Recorder extends GatewayDeps {
 	reads: number;
 	/** Every patch that reached {@link GatewayDeps.writePreferences}, in order. */
 	readonly preferencePatches: Partial<Pick<BuddyConfig, "model" | "panel">>[];
+	/** Every session id that reached {@link GatewayDeps.archiveSession}, in order. */
+	readonly archived: string[];
 }
 
 /** @returns recording deps. */
@@ -59,6 +61,7 @@ function deps(): Recorder {
 		patches: [],
 		reads: 0,
 		preferencePatches: [],
+		archived: [],
 		readPersona: async () => {
 			recorder.reads += 1;
 			return VIEW;
@@ -72,6 +75,10 @@ function deps(): Recorder {
 		writePreferences: async (patch) => {
 			recorder.preferencePatches.push(patch);
 			return PREFERENCES;
+		},
+		archiveSession: async (sessionId) => {
+			recorder.archived.push(sessionId);
+			return SESSIONS;
 		},
 		currentConfig: () => FALLBACK_CONFIG,
 	};
@@ -155,7 +162,7 @@ test("constructing the gateway registers the typert contribution", () => {
 	assert.equal(contribution.face, "host");
 	assert.deepEqual(
 		contribution.invocations.map((invocation) => invocation.method).sort(),
-		["persona", "preferences", "sessions", "updatePersona", "updatePreferences"],
+		["archiveSession", "persona", "preferences", "sessions", "updatePersona", "updatePreferences"],
 	);
 	for (const invocation of contribution.invocations) {
 		assert.equal(invocation.namespace, BUDDY_SERVICE, `${invocation.method} must be on the buddy namespace`);
@@ -240,6 +247,22 @@ test("updatePreferences dispatches through the proxy and writes only validated f
 	assert.deepEqual(recorder.preferencePatches, [
 		{ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } },
 	]);
+});
+
+test("archiveSession forwards a string id and answers with the fresh list", async () => {
+	const { service, recorder } = harness();
+	assert.equal(await dispatch(service, "archiveSession", ["s-tg"]), SESSIONS);
+	assert.deepEqual(recorder.archived, ["s-tg"]);
+});
+
+test("archiveSession ignores a missing or ill-typed id without touching the registry", async () => {
+	const { service, recorder } = harness();
+	// The wire is untrusted: a blank string, a number, or a null must not reach
+	// the workspace registry as a session id.
+	for (const bad of ["", "   ", 5, null, undefined, { sessionId: "x" }]) {
+		assert.equal(await dispatch(service, "archiveSession", [bad]), SESSIONS);
+	}
+	assert.deepEqual(recorder.archived, [], "no ill-typed id may reach archiveSession");
 });
 
 test("the service name is the typert namespace", () => {

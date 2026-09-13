@@ -116,13 +116,37 @@ export function apply(ctx: PluginContext): void {
 		lastWriteAt: ctx.buddyStore.lastPersonaWriteAt(),
 	});
 
+	// The workspace registry is soft and read per request: `archivedSessionIds` is
+	// a getter on the service, so it is read off the value `ctx.get` returns, never
+	// as a bare property on `ctx`.
+	const archivedSessionIds = (): Set<string> => {
+		const registry = ctx.get("workspaceRegistry") as { archivedSessionIds?: readonly string[] } | undefined;
+		const ids = registry?.archivedSessionIds;
+		return new Set(Array.isArray(ids) ? ids.map(String) : []);
+	};
+
+	const archiveSession = async (sessionId: string): Promise<BuddySessionSummary[]> => {
+		const registry = ctx.get("workspaceRegistry") as { archiveSession(id: string): Promise<void> } | undefined;
+		if (registry === undefined) {
+			throw new Error("dsh-buddy: the workspace registry is unavailable, cannot archive this conversation");
+		}
+		await registry.archiveSession(sessionId);
+		return await listSessions();
+	};
+
 	const listSessions = async (): Promise<BuddySessionSummary[]> => {
 		// Soft, and read at request time rather than at boot: a profile without
 		// the session plane still gets a mounted row and an empty list.
 		const query = ctx.get("sessionQuery") as SessionQuery | undefined;
 		if (query === undefined) return [];
 		const records = await query.listSessions();
-		const mine = records.filter((record) => record.header.agentPreset === BUDDY_PRESET_ID);
+		// Archived conversations drop out of the listing the same way an ordinary
+		// session row does — the record is kept, only hidden. The workspace registry
+		// is soft: without it, nothing is archived and nothing is filtered.
+		const archived = archivedSessionIds();
+		const mine = records.filter(
+			(record) => record.header.agentPreset === BUDDY_PRESET_ID && !archived.has(record.header.id),
+		);
 		// Soft and per request: without the Telegram row every conversation is a web one.
 		const telegram = ctx.get("buddyTelegram") as { telegramSessionIds(): Promise<string[]> } | undefined;
 		const fromTelegram = new Set((await telegram?.telegramSessionIds().catch(() => [])) ?? []);
@@ -172,6 +196,7 @@ export function apply(ctx: PluginContext): void {
 			return view();
 		},
 		listSessions,
+		archiveSession,
 		readPreferences: preferences,
 		writePreferences: async (patch) => {
 			await ctx.buddyStore.updateConfig(patch);
