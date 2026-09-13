@@ -8,6 +8,10 @@
  * button without a panel throws on click, so both are registered here or neither
  * is — which is why {@link MAIN_PANEL_KEY} is imported from the shared constants
  * module instead of being restated on either side.
+ *
+ * Task 11 turns the main panel into a module table (Soul, Agents, New Buddy
+ * conversation) and slims the Settings tab down to surfaces about Buddy rather
+ * than Buddy's own persona.
  * @module dsh-buddy/client
  */
 // Imported, never restated: the button (sidebar.panellist) and the panel it
@@ -16,8 +20,11 @@
 // either way, so no assertion against the built artifact can tell a hand-
 // restated constant from the shared one — which is why the "one constant" rule
 // is pinned by a source-text assertion in `test/client-ui.test.ts` instead.
-import { MAIN_PANEL_KEY } from "../index.ts";
+import { MAIN_PANEL_KEY, BUDDY_PRESET_ID } from "../index.ts";
+import { selectionFromDefault } from "../model-selection.ts";
 import { createCall } from "./call.ts";
+import { createDocumentModule } from "./document-module.tsx";
+import type { PanelModule } from "./modules.ts";
 import { createBuddyIcon, createBuddyPanel } from "./panel.tsx";
 import { createBuddySettingsSection } from "./settings.tsx";
 
@@ -39,38 +46,53 @@ const SECTION_ORDER = 27;
  * Required services (cordis fiber inject).
  *
  * `connection` carries the RPC caller for this plugin's own `buddyPersona/*`
- * endpoints; `layout` selects the main panel; `sessions` opens a conversation.
+ * endpoints; `layout` selects the main panel; `sessions` opens a conversation;
+ * `remote.session` creates a buddy conversation with its preset and model.
  */
-export const inject = ["slots", "locale", "connection", "layout", "sessions"];
+export const inject = ["slots", "locale", "connection", "layout", "sessions", "remote", "remote.session"];
 
 const en = {
 	nav: "Buddy",
-	soulTitle: "Persona",
-	soulHint: "Voice, attitude and opinions. Saved to SOUL.md and used by buddy sessions only.",
-	rulesTitle: "Operating rules",
-	rulesHint: "Rules the assistant follows. Saved to AGENTS.md, kept separate from voice on purpose.",
+	panelTitle: "Buddy",
+	newConversation: "New Buddy conversation",
+	soulTitle: "Soul",
+	soulHint: "Voice, attitude and opinions. Saved to SOUL.md and used by buddy conversations only.",
+	agentsTitle: "Agents",
+	agentsHint: "Rules Buddy follows. Saved to AGENTS.md, kept separate from voice on purpose.",
+	modelTitle: "Model",
+	telegramTitle: "Telegram",
 	save: "Save",
 	homeLabel: "Files:",
-	panelTitle: "Buddy",
-	conversations: "Conversations",
-	empty: "No buddy conversations yet. Start one with the buddy agent preset.",
+	settingsHint: "Choose what the Buddy main panel shows. Buddy itself is configured from the main panel.",
+	sectionsTitle: "Main panel modules",
+	folderTitle: "Buddy",
+	folderEmpty: "No conversations yet",
 	untitled: "Untitled",
-	refresh: "Refresh",
+	fromTelegram: "Telegram",
+	expand: "Show conversations",
+	collapse: "Hide conversations",
 };
 
 const zh: typeof en = {
 	nav: "Buddy",
-	soulTitle: "人格",
-	soulHint: "声音、态度与观点。保存到 SOUL.md，仅对 buddy 会话生效。",
-	rulesTitle: "行为规则",
-	rulesHint: "助理遵循的规则。保存到 AGENTS.md，与人格刻意分开。",
+	panelTitle: "Buddy",
+	newConversation: "新建 Buddy 对话",
+	soulTitle: "Soul",
+	soulHint: "声音、态度与观点。保存到 SOUL.md，仅对 buddy 对话生效。",
+	agentsTitle: "Agents",
+	agentsHint: "Buddy 遵循的规则。保存到 AGENTS.md，与人格刻意分开。",
+	modelTitle: "模型",
+	telegramTitle: "Telegram",
 	save: "保存",
 	homeLabel: "文件位置：",
-	panelTitle: "Buddy",
-	conversations: "对话",
-	empty: "还没有 buddy 对话。用 buddy agent preset 新建一个。",
+	settingsHint: "选择 Buddy 主界面显示哪些模块。Buddy 本身在主界面里配置。",
+	sectionsTitle: "主界面模块",
+	folderTitle: "Buddy",
+	folderEmpty: "还没有对话",
 	untitled: "未命名",
-	refresh: "刷新",
+	fromTelegram: "Telegram",
+	expand: "展开对话",
+	collapse: "收起对话",
 };
 
 /**
@@ -95,18 +117,44 @@ export function apply(ctx: any): void {
 		),
 	);
 
-	// The button and the panel are one unit. `ctx.layout.selectPanel` throws on a
-	// key the main slot never registered — and preserves the current selection —
-	// so a button registered without its panel is a button that throws on click.
-	const BuddyPanel = createBuddyPanel({
-		call,
-		t,
-		openSession: (sessionId: string) => {
-			ctx.sessions.open(sessionId);
-			// null returns the centre column to the Conversation.
-			ctx.layout.selectPanel(null);
-		},
-	});
+	const modules: PanelModule<() => unknown>[] = [
+		{ id: "soul", order: 10, titleKey: "soulTitle", Component: createDocumentModule({ call, t }, "soul") },
+		{ id: "agents", order: 20, titleKey: "agentsTitle", Component: createDocumentModule({ call, t }, "agents") },
+	];
+
+	const openSession = (sessionId: string): void => {
+		ctx.sessions.open(sessionId);
+		// null returns the centre column to the Conversation.
+		ctx.layout.selectPanel(null);
+	};
+
+	/** Unwrap a `remote.*` RemoteResult. */
+	const remoteValue = (result: any, what: string): any => {
+		if (result?.ok !== true) throw new Error(result?.error?.message ?? `${what} failed`);
+		return result.value;
+	};
+
+	const newConversation = async (): Promise<void> => {
+		const session = ctx.remote?.session;
+		if (session === undefined) throw new Error("remote.session is not mounted");
+		const prefs = (await call("buddyPersona/preferences", {})) as {
+			model: { provider: string; model: string; reasoningEffort: string };
+			conversationCwd: string;
+		};
+		const created = remoteValue(
+			await session.create({ cwd: prefs.conversationCwd, agentPreset: BUDDY_PRESET_ID }),
+			"session create",
+		) as { sessionId: string };
+		const selection = selectionFromDefault(prefs.model);
+		if (selection !== undefined) {
+			remoteValue(await session.selectModel({ sessionId: created.sessionId, ...selection }), "model selection");
+		}
+		// A raw remote create bypasses the client list; refresh before opening.
+		await ctx.sessions.refresh();
+		openSession(created.sessionId);
+	};
+
+	const BuddyPanel = createBuddyPanel({ call, t, modules, newConversation });
 	const BuddyIcon = createBuddyIcon();
 
 	// One shared constant for both registrations, so the id and the key cannot

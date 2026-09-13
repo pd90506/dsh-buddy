@@ -18,6 +18,11 @@
  * The RPC envelope unwrap lives in `src/client/call.ts` — plain `.ts` precisely
  * so it can be driven directly here rather than only through a React tree this
  * repo has no renderer for.
+ *
+ * The main panel's and the slim settings tab's own behaviour — modules,
+ * document editing, New Buddy conversation — moved to `test/client-panel.test.ts`
+ * and `test/client-settings.test.ts`; this file keeps only the registration
+ * contract (inject, slot wiring, dictionaries, the shared panel key).
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -31,61 +36,13 @@ import {
 	loadClient,
 	contextStub,
 	createRenderer,
-	elements,
-	settle,
 	type StubElement,
-	type RecordedCall,
 	type SectionOptions,
 	type MainPanelOptions,
 } from "./support/client-harness.ts";
 
 /** Node's `require`, used as the default module resolver for a stubbed renderer. */
 const nodeRequire = createRequire(import.meta.url);
-
-/** A mounted settings tab and what its RPC client saw. */
-interface MountedTab {
-	/** Every call the tab made, in order. */
-	readonly calls: RecordedCall[];
-	/** The element tree of the most recent render. */
-	tree(): unknown;
-	/** The save button of the most recent render. */
-	saveButton(): StubElement;
-}
-
-/**
- * Mount the real settings tab: `apply` builds it, so the component under test is
- * the registered one, wired to the plugin's own envelope unwrap.
- * @param answer - the gateway envelope (or rejection) for each endpoint.
- * @returns the mounted tab handle.
- */
-function mountSettingsTab(answer: (endpoint: string) => Promise<unknown>): MountedTab {
-	const renderer = createRenderer();
-	const calls: RecordedCall[] = [];
-	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
-	const { ctx, registrations } = contextStub({
-		rpc: {
-			call: async (route: string, endpoint: string, payload: unknown) => {
-				calls.push({ route, endpoint, payload });
-				return await answer(endpoint);
-			},
-		},
-	});
-	client.apply(ctx);
-
-	const registration = registrations.find((r) => r.options.name === "settings.section");
-	assert.ok(registration !== undefined, "the settings section must be registered");
-	renderer.mount(registration.component as () => unknown);
-
-	return {
-		calls,
-		tree: () => renderer.tree(),
-		saveButton(): StubElement {
-			const button = elements(renderer.tree()).find((element) => element.type === "button");
-			assert.ok(button !== undefined, "the tab must render a save button");
-			return button;
-		},
-	};
-}
 
 test("the browser half is wrapped in the module-loader factory", async () => {
 	const text = await bundleText();
@@ -96,14 +53,14 @@ test("the browser half is wrapped in the module-loader factory", async () => {
 	assert.equal(typeof client.apply, "function");
 });
 
-test("the browser half injects slots, locale, connection, layout and sessions", () => {
+test("the browser half injects slots, locale, connection, layout, sessions and the remote session namespace", () => {
 	const client = loadClient();
-	// The settings tab itself only needs the first three. `layout` and `sessions`
-	// are declared now because the sidebar/main pair task 8 appends to this same
-	// `apply` needs them, and `inject` is per-fiber rather than per-registration:
-	// one list, declared once, so the pair cannot mount half-wired. Every one of
-	// these is present in the web shell, so the wait never becomes a stall.
-	assert.deepEqual(client.inject, ["slots", "locale", "connection", "layout", "sessions"]);
+	// `remote` and `remote.session` are what "New Buddy conversation" needs to
+	// create and configure a session directly against the Remote layer, bypassing
+	// the client Session list. `inject` is per-fiber rather than per-registration:
+	// one list, declared once, so no registration can mount half-wired. Every one
+	// of these is present in the web shell, so the wait never becomes a stall.
+	assert.deepEqual(client.inject, ["slots", "locale", "connection", "layout", "sessions", "remote", "remote.session"]);
 });
 
 test("every cordis-injected service has its real declaring package in dsh.client.inject, with no exemption", async () => {
@@ -128,11 +85,24 @@ test("every cordis-injected service has its real declaring package in dsh.client
 	// silently vacuous in a different checkout. What it DOES check: every cordis
 	// service this plugin hard-declares in `inject` (`export const inject` in
 	// src/client/index.tsx) has its real declaring package — each confirmed by
-	// reading that package's own Context augmentation, recorded in the task-8 fix
-	// reports — present in the manifest. The map has NO exemptions on purpose:
-	// omitting one (as `slots` was, the first time) is exactly the gap that let a
-	// wrong entry through uncaught, so an unmapped service now fails loudly
-	// instead of being silently skipped.
+	// reading that package's own Context augmentation, recorded in the task-8 and
+	// task-11 fix reports — present in the manifest. The map has NO exemptions on
+	// purpose: omitting one (as `slots` was, the first time) is exactly the gap
+	// that let a wrong entry through uncaught, so an unmapped service now fails
+	// loudly instead of being silently skipped.
+	//
+	// `remote` is declared by `@deepseek-ai/dsh-api-gateway`, but the convention
+	// this harness's own plugins follow (dsh-telegram's `src/client/index.tsx`)
+	// is to depend on the assembly facade, `@deepseek-ai/dsh-api-remotes`, which
+	// re-exports the gateway's types and mounts every generated Remote namespace
+	// onto it. `remote.session` is not a static Context augmentation at all — it
+	// is a namespace dynamically provided at runtime under the literal cordis
+	// service key `remote.session` (`remoteServiceKey` in
+	// `@deepseek-ai/dsh-api-gateway/lib/client.js`), backed by
+	// `@deepseek-ai/dsh-api-session-controller`'s `SessionController` (see that
+	// package's own doc comment: "Host service backing the generated
+	// `ctx.remote.session` namespace"), and that package's own client half injects
+	// `remote.session` the same way (its `lib/types/client/index.js`).
 	const client = loadClient();
 	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 		dsh: { client: { inject: string[] } };
@@ -145,6 +115,8 @@ test("every cordis-injected service has its real declaring package in dsh.client
 		connection: "@deepseek-ai/dsh-client-connection",
 		layout: "@deepseek-ai/dsh-client-ui-layout",
 		sessions: "@deepseek-ai/dsh-api-session-controller",
+		remote: "@deepseek-ai/dsh-api-remotes",
+		"remote.session": "@deepseek-ai/dsh-api-session-controller",
 	};
 
 	for (const service of client.inject) {
@@ -239,9 +211,21 @@ test("both dictionaries are registered, as a reversible effect", () => {
 	assert.ok(english !== undefined && chinese !== undefined, "en and zh are both required");
 	assert.deepEqual(Object.keys(english).sort(), Object.keys(chinese).sort(), "the dictionaries must stay in step");
 	assert.equal(english["nav"], "Buddy");
-	for (const key of ["soulTitle", "soulHint", "rulesTitle", "rulesHint", "save", "homeLabel"]) {
-		assert.equal(typeof english[key], "string", `en.${key} is used by the tab`);
-		assert.equal(typeof chinese[key], "string", `zh.${key} is used by the tab`);
+	for (const key of [
+		"nav",
+		"panelTitle",
+		"newConversation",
+		"soulTitle",
+		"soulHint",
+		"agentsTitle",
+		"agentsHint",
+		"save",
+		"homeLabel",
+		"settingsHint",
+		"sectionsTitle",
+	]) {
+		assert.equal(typeof english[key], "string", `en.${key} is used by the panel or the settings tab`);
+		assert.equal(typeof chinese[key], "string", `zh.${key} is used by the panel or the settings tab`);
 	}
 });
 
@@ -305,235 +289,6 @@ test("an envelope that is not a success throws even when it carries no error", a
 			`a ${JSON.stringify(answer) ?? "undefined"} answer must not resolve`,
 		);
 	}
-});
-
-test("a persona that failed to load cannot be saved back over the files", async () => {
-	// The drafts start empty and are filled by the mount load. If that load fails
-	// — a dead endpoint, a host error, exactly what the envelope unwrap exists to
-	// surface — saving would send `{ patch: { soul: "", agents: "" } }` and
-	// truncate SOUL.md and AGENTS.md. The host cannot refuse that: it drops
-	// non-string fields and `""` is a string, indistinguishable from a user who
-	// cleared both boxes on purpose. So the refusal has to happen here.
-	const tab = mountSettingsTab(async () => ({ ok: false, error: { code: "EIO", message: "host is down" } }));
-	await settle();
-
-	assert.deepEqual(
-		tab.calls.map((call) => call.endpoint),
-		["buddyPersona/persona"],
-	);
-	const failure = elements(tab.tree()).find(
-		(element) => element.props["children"] === "buddyPersona/persona failed: EIO: host is down",
-	);
-	assert.ok(failure !== undefined, "the load failure must be shown, not swallowed");
-
-	const button = tab.saveButton();
-	assert.equal(button.props["disabled"], true, "save must be disabled until a load succeeds");
-
-	// `disabled` is a browser courtesy, not an invariant — the path itself must
-	// refuse too, or a stray click still truncates both files.
-	(button.props["onClick"] as () => void)();
-	await settle();
-	assert.deepEqual(
-		tab.calls.map((call) => call.endpoint),
-		["buddyPersona/persona"],
-		"no update may be produced by a tab that never loaded",
-	);
-});
-
-test("a loaded persona saves exactly the drafts the load produced", async () => {
-	const view = { soul: "a voice", agents: "some rules", home: "/home/buddy" };
-	const tab = mountSettingsTab(async (endpoint) =>
-		endpoint === "buddyPersona/persona"
-			? { ok: true, value: view }
-			: { ok: true, value: { ...view, lastWriteAt: "2026-09-12T00:00:00.000Z" } },
-	);
-
-	// Still in flight: the drafts are empty, so the gate must already hold.
-	assert.equal(tab.saveButton().props["disabled"], true, "save must be gated while the load is in flight");
-
-	await settle();
-	const button = tab.saveButton();
-	assert.equal(button.props["disabled"], false, "a loaded tab must be saveable, or the gate is just a dead button");
-
-	(button.props["onClick"] as () => void)();
-	// Synchronously after the click the write is in flight: no double submit.
-	assert.equal(tab.saveButton().props["disabled"], true, "save must be disabled while a write is in flight");
-
-	await settle();
-	assert.deepEqual(
-		tab.calls.map((call) => call.endpoint),
-		["buddyPersona/persona", "buddyPersona/updatePersona"],
-	);
-	// Proves the wiring too: `apply` hands the component the unwrapped caller,
-	// addressed at the gateway route with the endpoint's own `{ args }` body.
-	assert.deepEqual(tab.calls[1], {
-		route: "/api",
-		endpoint: "buddyPersona/updatePersona",
-		payload: { args: { patch: { soul: "a voice", agents: "some rules" } } },
-	});
-	assert.equal(tab.saveButton().props["disabled"], false, "the tab must be saveable again once the write settles");
-});
-
-/** One call recorded against the sessions or layout service stubs. */
-interface RecordedAction {
-	readonly service: "sessions.open" | "layout.selectPanel";
-	readonly arg: unknown;
-}
-
-/** A mounted main panel and what it did to its collaborators. */
-interface MountedPanel {
-	/** Every call the panel made through the connection service. */
-	readonly calls: RecordedCall[];
-	/** Every call the panel's `openSession` made against sessions/layout, in order. */
-	readonly actions: RecordedAction[];
-	/** The element tree of the most recent render. */
-	tree(): unknown;
-}
-
-/**
- * Mount the real main panel: `apply` builds it, so the component under test is
- * the one actually registered into the `main` slot, wired to the plugin's own
- * `openSession` (which drives `ctx.sessions.open` then `ctx.layout.selectPanel(null)`).
- * @param answer - the gateway envelope (or rejection) for `buddyPersona/sessions`.
- * @returns the mounted panel handle.
- */
-function mountBuddyPanel(answer: (endpoint: string) => Promise<unknown>): MountedPanel {
-	const renderer = createRenderer();
-	const calls: RecordedCall[] = [];
-	const actions: RecordedAction[] = [];
-	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
-	const { ctx, registrations } = contextStub({
-		rpc: {
-			call: async (route: string, endpoint: string, payload: unknown) => {
-				calls.push({ route, endpoint, payload });
-				return await answer(endpoint);
-			},
-		},
-		sessions: { open: (sessionId: string) => actions.push({ service: "sessions.open", arg: sessionId }) },
-		layout: { selectPanel: (panelId: unknown) => actions.push({ service: "layout.selectPanel", arg: panelId }) },
-	});
-	client.apply(ctx);
-
-	const registration = registrations.find((r) => r.options.name === "main");
-	assert.ok(registration !== undefined, "the main panel must be registered");
-	renderer.mount(registration.component as () => unknown);
-
-	return { calls, actions, tree: () => renderer.tree() };
-}
-
-/**
- * Find a conversation row button by its rendered title.
- *
- * Deliberately shallow (only the button's own immediate children), so it
- * cannot be confused with the header's Refresh button, whose only child is a
- * plain locale-key string rather than a title span.
- * @param tree - the rendered element tree.
- * @param title - the row's rendered title text.
- * @returns the row's button element.
- */
-function rowButton(tree: unknown, title: string): StubElement {
-	const button = elements(tree).find((element) => {
-		if (element.type !== "button") return false;
-		const children = element.props["children"];
-		const kids = Array.isArray(children) ? children : [children];
-		return kids.some(
-			(kid) => typeof kid === "object" && kid !== null && (kid as Partial<StubElement>).props?.["children"] === title,
-		);
-	});
-	assert.ok(button !== undefined, `no row button found for "${title}"`);
-	return button;
-}
-
-test("the panel loads on mount, lists conversations, and falls back to Untitled for a blank title", async () => {
-	const items = [
-		{ sessionId: "s1", title: "Trip planning", updatedAt: 2, cwd: "/home/x" },
-		{ sessionId: "s2", title: "", updatedAt: 0, cwd: "" },
-	];
-	const panel = mountBuddyPanel(async () => ({ ok: true, value: items }));
-	await settle();
-
-	assert.deepEqual(panel.calls.map((call) => call.endpoint), ["buddyPersona/sessions"]);
-	const texts = elements(panel.tree())
-		.map((element) => element.props["children"])
-		.filter((child): child is string => typeof child === "string");
-	assert.ok(texts.includes("Trip planning"), "a titled session must show its own title");
-	assert.ok(texts.includes("/home/x"), "a non-empty cwd must render as a meta line");
-	assert.ok(texts.includes("settings.buddy:untitled"), "a blank title must render as Untitled, not an empty row");
-});
-
-test("an empty cwd renders no meta line", async () => {
-	// s2 above has title "" (covered by the untitled fallback) and cwd "" — this
-	// pins the cwd side of that same row separately, so a defect in either
-	// condition is caught by a specific assertion rather than a shared one.
-	const panel = mountBuddyPanel(async () => ({
-		ok: true,
-		value: [{ sessionId: "s2", title: "", updatedAt: 0, cwd: "" }],
-	}));
-	await settle();
-
-	const row = rowButton(panel.tree(), "settings.buddy:untitled");
-	const children = row.props["children"];
-	const kids = Array.isArray(children) ? children : [children];
-	// React renders `false` as nothing, but the JSX call site still evaluates
-	// `item.cwd !== "" && <span>…</span>` to that `false` rather than omitting
-	// the slot entirely — so the falsifiable check is "no rendered element
-	// besides the title span", not "a shorter children array".
-	const rendered = kids.filter((kid) => typeof kid === "object" && kid !== null);
-	assert.equal(rendered.length, 1, "an empty cwd must not add a rendered meta span");
-});
-
-test("the empty-state hint shows only after a load resolves to zero conversations", async () => {
-	const panel = mountBuddyPanel(async () => ({ ok: true, value: [] }));
-
-	// Still in flight: items is undefined, so the empty hint must not show yet
-	// (it would otherwise flash "no conversations" while a slow load is pending).
-	let texts = elements(panel.tree()).map((element) => element.props["children"]);
-	assert.ok(!texts.includes("settings.buddy:empty"), "the empty hint must not show before the load settles");
-
-	await settle();
-	texts = elements(panel.tree()).map((element) => element.props["children"]);
-	assert.ok(texts.includes("settings.buddy:empty"));
-});
-
-test("a failed sessions load surfaces the error instead of an empty-state lie", async () => {
-	const panel = mountBuddyPanel(async () => ({ ok: false, error: { code: "EIO", message: "host is down" } }));
-	await settle();
-
-	const texts = elements(panel.tree()).map((element) => element.props["children"]);
-	assert.ok(texts.includes("buddyPersona/sessions failed: EIO: host is down"), "the load failure must be shown, not swallowed");
-	assert.ok(!texts.includes("settings.buddy:empty"), "an error is not the same claim as zero conversations");
-});
-
-test("the refresh button re-issues the sessions call", async () => {
-	const panel = mountBuddyPanel(async () => ({ ok: true, value: [] }));
-	await settle();
-	assert.equal(panel.calls.length, 1);
-
-	const refresh = elements(panel.tree()).find(
-		(element) => element.type === "button" && element.props["children"] === "settings.buddy:refresh",
-	);
-	assert.ok(refresh !== undefined, "the header must render a refresh button");
-	(refresh.props["onClick"] as () => void)();
-	await settle();
-	assert.equal(panel.calls.length, 2, "clicking refresh must call the endpoint again, not replay the first result");
-});
-
-test("opening a conversation calls sessions.open, then returns the centre column via layout.selectPanel(null)", async () => {
-	const panel = mountBuddyPanel(async () => ({
-		ok: true,
-		value: [{ sessionId: "s1", title: "Trip planning", updatedAt: 2, cwd: "" }],
-	}));
-	await settle();
-
-	const row = rowButton(panel.tree(), "Trip planning");
-	(row.props["onClick"] as () => void)();
-
-	// Order matters: selectPanel(null) first would flip the centre column away
-	// before sessions.open had a chance to stage the target conversation.
-	assert.deepEqual(panel.actions, [
-		{ service: "sessions.open", arg: "s1" },
-		{ service: "layout.selectPanel", arg: null },
-	]);
 });
 
 test("the sidebar icon defaults to size 16 and honours a supplied size", () => {

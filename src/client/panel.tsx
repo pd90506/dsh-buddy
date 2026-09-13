@@ -1,31 +1,21 @@
 /**
- * The dsh-buddy main panel: the command centre, not a chat client.
- *
- * Clicking a conversation hands off to the shipped conversation view rather
- * than rendering messages here. That is a deliberate scope decision: the
- * official view already owns message rendering, tool cards, approvals,
- * streaming and attachments, and re-implementing them would both cost thousands
- * of lines and drift behind the product.
+ * The Buddy main panel: Buddy's own configuration, one module per card.
+ * Conversations are listed in the sidebar folder, not here.
  * @module dsh-buddy/client/panel
  */
 import { useCallback, useEffect, useState } from "react";
-
-/** One buddy conversation; mirrors the host's `BuddySessionSummary`. */
-interface BuddySessionSummary {
-	sessionId: string;
-	title: string;
-	updatedAt: number;
-	cwd: string;
-}
+import type React from "react";
+import type { Call } from "./call.ts";
+import { visibleModules, type PanelModule } from "./modules.ts";
+import type { PanelSectionId } from "../config.ts";
 
 /** Collaborators supplied by the plugin's `apply`. */
 export interface PanelDeps {
-	/** Unwrapped RPC: resolves the endpoint's payload or throws. */
-	call(endpoint: string, args: unknown): Promise<unknown>;
-	/** Locale lookup bound to this plugin's namespace. */
+	call: Call;
 	t(key: string): string;
-	/** Open a session in the shipped conversation view and leave this panel. */
-	openSession(sessionId: string): void;
+	modules: readonly PanelModule<() => unknown>[];
+	/** Create, configure and open a new buddy conversation; rejects with a displayable message. */
+	newConversation(): Promise<void>;
 }
 
 const styles = {
@@ -39,44 +29,40 @@ const styles = {
 		borderBottom: "1px solid var(--dsw-alias-border, #e5e5e5)",
 	},
 	title: { fontSize: 15, fontWeight: 600 },
-	body: { flex: 1, minHeight: 0, overflowY: "auto", padding: "12px 20px" },
-	sectionLabel: { fontSize: 12, fontWeight: 600, color: "var(--dsw-alias-label-secondary)", margin: "4px 0 8px" },
-	row: {
+	body: { flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 20px", display: "flex", flexDirection: "column", gap: 16 },
+	card: {
+		background: "var(--dsw-alias-bg-layer-3)",
+		border: "0.5px solid var(--dsw-alias-border-l2)",
+		borderRadius: 10,
+		padding: "14px 16px",
 		display: "flex",
 		flexDirection: "column",
-		gap: 2,
-		width: "100%",
-		textAlign: "left",
-		padding: "10px 12px",
-		marginBottom: 6,
-		borderRadius: 8,
-		border: "1px solid transparent",
-		background: "var(--dsw-alias-fill-secondary, rgba(127,127,127,.08))",
-		cursor: "pointer",
-		color: "inherit",
+		gap: 10,
 	},
-	rowTitle: { fontSize: 14 },
-	rowMeta: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" },
-	empty: { fontSize: 13, color: "var(--dsw-alias-label-secondary)" },
-	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)" },
-	button: { padding: "4px 12px", borderRadius: 6, cursor: "pointer" },
+	cardTitle: { fontSize: 14, fontWeight: 600, margin: 0 },
+	error: { fontSize: 13, color: "var(--dsw-alias-status-error, #d64545)", margin: 0 },
+	button: { padding: "6px 14px", borderRadius: 6, cursor: "pointer" },
 } as const;
 
 /**
- * Build the main-panel component.
- * @param deps - RPC, locale and navigation collaborators.
- * @returns the component the `main` slot renders under the `dsh-buddy` key.
+ * @param deps - RPC, locale, the module table and the create action.
+ * @returns the component the `main` slot renders under `MAIN_PANEL_KEY`.
  */
 export function createBuddyPanel(deps: PanelDeps): () => unknown {
 	return function BuddyPanel(): unknown {
-		const [items, setItems] = useState<BuddySessionSummary[] | undefined>(undefined);
+		const [sections, setSections] = useState<Partial<Record<PanelSectionId, boolean>> | undefined>(undefined);
 		const [error, setError] = useState<string | undefined>(undefined);
+		const [busy, setBusy] = useState(false);
 
 		const load = useCallback(async (): Promise<void> => {
 			try {
-				setItems((await deps.call("buddyPersona/sessions", {})) as BuddySessionSummary[]);
-				setError(undefined);
+				const prefs = (await deps.call("buddyPersona/preferences", {})) as {
+					panel: { sections: Record<PanelSectionId, boolean> };
+				};
+				setSections(prefs.panel.sections);
 			} catch (cause) {
+				// Visibility is a convenience: on failure every module shows.
+				setSections({});
 				setError((cause as Error).message);
 			}
 		}, []);
@@ -85,31 +71,45 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 			void load();
 		}, [load]);
 
+		const create = async (): Promise<void> => {
+			setBusy(true);
+			try {
+				await deps.newConversation();
+				setError(undefined);
+			} catch (cause) {
+				setError((cause as Error).message);
+			} finally {
+				setBusy(false);
+			}
+		};
+
 		return (
 			<div style={styles.panel}>
 				<div style={styles.header}>
 					<span style={styles.title}>{deps.t("panelTitle")}</span>
-					<button style={styles.button} type="button" onClick={() => void load()}>
-						{deps.t("refresh")}
+					<button style={styles.button} type="button" disabled={busy} onClick={() => void create()}>
+						{deps.t("newConversation")}
 					</button>
 				</div>
 				<div style={styles.body}>
-					<div style={styles.sectionLabel}>{deps.t("conversations")}</div>
-					{error !== undefined && <div style={styles.error}>{error}</div>}
-					{error === undefined && items !== undefined && items.length === 0 && (
-						<div style={styles.empty}>{deps.t("empty")}</div>
-					)}
-					{items?.map((item) => (
-						<button
-							key={item.sessionId}
-							style={styles.row}
-							type="button"
-							onClick={() => deps.openSession(item.sessionId)}
-						>
-							<span style={styles.rowTitle}>{item.title.trim() === "" ? deps.t("untitled") : item.title}</span>
-							{item.cwd !== "" && <span style={styles.rowMeta}>{item.cwd}</span>}
-						</button>
-					))}
+					{error !== undefined && <p style={styles.error}>{error}</p>}
+					{sections !== undefined &&
+						visibleModules(deps.modules, sections).map((module) => {
+							// A direct call, not `<module.Component />`: this repo's stub
+							// renderer (no real reconciler) never invokes a nested element's
+							// function type, so a lazily wrapped element would leave the
+							// module's own hooks — and its save button — unrendered. The
+							// result is `unknown`, like every component return in this
+							// plugin, so it is cast here, the one point it needs to satisfy
+							// JSX's `ReactNode` children type.
+							const Body = module.Component() as React.ReactNode;
+							return (
+								<section key={module.id} style={styles.card}>
+									<h3 style={styles.cardTitle}>{deps.t(module.titleKey)}</h3>
+									{Body}
+								</section>
+							);
+						})}
 				</div>
 			</div>
 		);
