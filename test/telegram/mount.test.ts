@@ -105,6 +105,7 @@ async function mount(): Promise<Mounted> {
 				sections.push(ns);
 				hooks.setSource(() => CONFIG);
 			},
+			describe: () => [],
 			update: async (ns: string, patch: Record<string, unknown>) => {
 				patches.push({ ns, patch });
 			},
@@ -179,6 +180,7 @@ test("the bot starts once credentials become active (live autostart regression)"
 				installSection: (_o: unknown, ns: string, _s: unknown, _e: unknown, hooks: any) => {
 					hooks.setSource(() => ({ ...CONFIG, enabled: true }));
 				},
+				describe: () => [],
 				update: async () => undefined,
 			}),
 	});

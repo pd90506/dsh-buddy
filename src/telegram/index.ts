@@ -21,6 +21,7 @@ import { Config, DEFAULT_MEDIA_DELIVERY, resolveDefaultCwd, SETTINGS_NAMESPACE, 
 import { describeToken, readToken, TELEGRAM_TOKEN_REF } from "./credentials.ts";
 import { TelegramGateway } from "./gateway.ts";
 import { ApprovalBridge } from "./approvals.ts";
+import { migrateLegacySettings, type MigrationSettings } from "./migrate.ts";
 import { ModelMenu } from "./model.ts";
 import { TelegramRuntime } from "./runtime.ts";
 import { SessionManager } from "./session.ts";
@@ -47,6 +48,7 @@ interface PluginContext {
 			entry: unknown,
 			hooks: { setSource(current: () => TelegramConfig): void; onChange(): void },
 		): void;
+		describe(): readonly { ns: string; user?: unknown }[];
 		update(ns: string, patch: Record<string, unknown>): Promise<void>;
 		register(ns: string, schema: unknown, options?: Record<string, unknown>): unknown;
 	};
@@ -184,6 +186,18 @@ export function apply(ctx: PluginContext): void {
 				resync();
 			},
 		});
+
+		const settings = scoped.settings;
+		if (settings !== undefined) {
+			// After installSection: `update` rejects an unregistered namespace.
+			void migrateLegacySettings(settings as MigrationSettings, SETTINGS_NAMESPACE)
+				.then((result) => {
+					log(`legacy telegram settings: ${result}`);
+				})
+				.catch((error: unknown) => {
+					log(`legacy telegram settings migration failed: ${(error as Error).message}`);
+				});
+		}
 	});
 
 	// Re-judge the pair once the credentials service is actually usable.

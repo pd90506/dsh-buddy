@@ -70,6 +70,7 @@ function contextStub(services: Record<string, unknown> = {}): {
 					mediaDelivery: "all",
 				}));
 			},
+			describe: () => [],
 			update: async () => undefined,
 		},
 		...services,
@@ -228,6 +229,7 @@ test("a failing reconcile is logged instead of rejecting into the process", asyn
 					mediaDelivery: "all",
 				}));
 			},
+			describe: () => [],
 			update: async () => undefined,
 		},
 	});
@@ -271,6 +273,7 @@ test("booting does not write settings or start polling while disabled", async ()
 					mediaDelivery: "all",
 				}));
 			},
+			describe: () => [],
 			update: async (_ns: string, patch: unknown) => {
 				updates.push(patch);
 			},
@@ -295,6 +298,7 @@ test("updateConfig forwards only known fields into the settings document (AC-2)"
 					mediaDelivery: "all",
 				}));
 			},
+			describe: () => [],
 			update: async (_ns: string, patch: Record<string, unknown>) => {
 				updates.push(patch);
 			},
@@ -336,6 +340,34 @@ test("updateConfig forwards only known fields into the settings document (AC-2)"
 	// client must not be able to store a value the runtime then has to guess at.
 	await gateway.updateConfig({ mediaDelivery: "everything", renderMarkdown: "yes" });
 	assert.equal(updates.length, 1, "nothing valid in the second patch means no write at all");
+});
+
+test("mounting beside a user-set legacy section migrates it into buddy-telegram, switched off", async () => {
+	const updates: { ns: string; patch: unknown }[] = [];
+	const { ctx } = contextStub({
+		settings: {
+			installSection: (_owner: unknown, _ns: string, _schema: unknown, _entry: unknown, hooks: unknown) => {
+				(hooks as { setSource: (source: () => unknown) => void }).setSource(() => ({
+					enabled: false,
+					ownerUserId: "",
+					defaultCwd: "/tmp/x",
+					permissionPreset: "workspace-write",
+					renderMarkdown: true,
+					mediaDelivery: "all",
+				}));
+			},
+			describe: () => [
+				{ ns: "telegram", user: { ownerUserId: "42", enabled: true } },
+				{ ns: "buddy-telegram" },
+			],
+			update: async (ns: string, patch: unknown) => {
+				updates.push({ ns, patch });
+			},
+		},
+	});
+	apply(ctx as never);
+	await settle();
+	assert.deepEqual(updates, [{ ns: "buddy-telegram", patch: { enabled: false, ownerUserId: "42" } }]);
 });
 
 test("shutdown unwinds every effect without touching the network", async () => {
