@@ -165,6 +165,39 @@ test("without a buddy model New Buddy conversation does not pick a model", async
 	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
 	await settle();
 	assert.deepEqual(remoteCalls, ["create"]);
+	// No model to apply is not a failure: the session still opens.
+	assert.deepEqual(panel.actions.slice(-3), [
+		{ service: "sessions.refresh", arg: undefined },
+		{ service: "sessions.open", arg: "s-new" },
+		{ service: "layout.selectPanel", arg: null },
+	]);
+});
+
+test("a failed model selection still opens the created session, and reports the error", async () => {
+	const remote = {
+		session: {
+			create: async () => ({ ok: true, value: { sessionId: "s-new" } }),
+			selectModel: async () => ({ ok: false, error: { message: "bad model" } }),
+		},
+	};
+	const panel = mountPanel(
+		async (endpoint) =>
+			endpoint === "buddyPersona/preferences"
+				? { ok: true, value: { ...PREFS, model: { provider: "p", model: "m", reasoningEffort: "" } } }
+				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
+		remote,
+	);
+	await settle();
+	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
+	await settle();
+	// The conversation exists — a bad model default is not a reason to strand
+	// the user without the session they just asked for.
+	assert.deepEqual(panel.actions.slice(-3), [
+		{ service: "sessions.refresh", arg: undefined },
+		{ service: "sessions.open", arg: "s-new" },
+		{ service: "layout.selectPanel", arg: null },
+	]);
+	assert.ok(texts(panel.tree()).includes("bad model"), "the model-selection failure must still surface");
 });
 
 test("a failed create is shown and nothing is opened", async () => {

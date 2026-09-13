@@ -202,7 +202,7 @@ export function contextStub(
 	return { ctx, registrations, injected, effects, dictionaries };
 }
 
-/** One hook's storage across renders. */
+/** One hook's storage across renders, scoped to one component instance. */
 interface HookCell {
 	value: unknown;
 	deps: readonly unknown[] | undefined;
@@ -213,6 +213,23 @@ interface HookCell {
 export interface StubElement {
 	readonly type: unknown;
 	readonly props: Record<string, unknown>;
+	/** The JSX `key`, when the automatic runtime received one (its 3rd `jsx()` argument). */
+	readonly key?: unknown;
+}
+
+/**
+ * One rendered component instance: its own hook cells and cursor, addressed by
+ * its position in the tree (see {@link resolvePath}) rather than by a single
+ * shared array. This is what lets two sibling modules — or the same module
+ * across renders — keep independent `useState` without stepping on each
+ * other's cells the way one flat array would.
+ */
+interface Instance {
+	type: (props: unknown) => unknown;
+	cells: HookCell[];
+	cursor: number;
+	/** Hook count from the previous completed render, `undefined` before the first. */
+	hookCount: number | undefined;
 }
 
 /** A mounted component: its current tree, re-rendered on every state change. */
@@ -221,38 +238,120 @@ interface Mounted {
 	readonly modules: Record<string, unknown>;
 	/** Render the component for the first time. */
 	mount(component: () => unknown): void;
-	/** The element tree produced by the most recent render. */
+	/** The element tree produced by the most recent render, with every nested component already expanded. */
 	tree(): unknown;
 }
 
 /**
- * A renderer just large enough for this one component.
+ * A renderer with a real (if minimal) reconciler.
  *
  * The tab's save gate is a `disabled` prop computed from state the mount load
  * sets, so proving it needs *some* renderer — and this repo deliberately has no
  * `react-dom`. Rather than grow one as a dependency, the bundle's own `require`
  * is pointed at these stubs: `useState` re-renders synchronously, `useCallback`
  * and `useEffect` honour their dependency lists (without that the mount effect
- * would re-fire forever), and the JSX runtime returns plain `{ type, props }`.
+ * would re-fire forever), and the JSX runtime returns plain `{ type, props, key }`.
+ *
+ * Task 11 introduced a genuinely nested tree (`BuddyPanel` rendering
+ * `<module.Component />` per module), which the original version of this
+ * renderer could not support: it called only the mounted function once and
+ * left every nested function-type element as an inert `{ type, props }` object
+ * — real React invokes every component it encounters during render, this did
+ * not. Worse, a single flat hook-cell array shared by every component would
+ * have *looked* like it worked (state slots just kept growing) while silently
+ * breaking the Rules of Hooks the moment a module's own hook count changed
+ * between renders, or a module was conditionally shown or hidden.
+ *
+ * So rendering here is a small recursive walk (`resolve`, below): every
+ * element whose `type` is a function is invoked, using an {@link Instance}
+ * addressed by its structural path in the tree (parent path + array index or
+ * `key`) so the SAME module keeps the SAME hook cells across renders, and a
+ * module that stops being visible has its instance (and its state) dropped.
+ * `invoke` enforces the Rules of Hooks per instance: a hook count that changes
+ * between one render and the next throws, naming the component, exactly as
+ * React's own `ERR_HOOK_COUNT_MISMATCH` would.
  * @returns the stub modules and the mount handle.
  */
 export function createRenderer(): Mounted {
-	const cells: HookCell[] = [];
 	const pendingEffects: (() => unknown)[] = [];
-	let cursor = 0;
+	const instances = new Map<string, Instance>();
+	const instanceStack: Instance[] = [];
 	let renders = 0;
-	let component: (() => unknown) | undefined;
+	let root: ((props: unknown) => unknown) | undefined;
 	let tree: unknown;
 
 	const sameDeps = (previous: readonly unknown[] | undefined, next: readonly unknown[]): boolean =>
 		previous !== undefined && previous.length === next.length && previous.every((v, i) => Object.is(v, next[i]));
 
+	const componentName = (type: (props: unknown) => unknown): string => (type as { name?: string }).name || "anonymous component";
+
 	const cell = (): HookCell => {
-		const existing = cells[cursor];
+		const instance = instanceStack[instanceStack.length - 1];
+		assert.ok(instance !== undefined, "a hook was called outside of a component render");
+		const existing = instance.cells[instance.cursor];
 		const slot = existing ?? { value: undefined, deps: undefined, initialised: false };
-		if (existing === undefined) cells[cursor] = slot;
-		cursor += 1;
+		if (existing === undefined) instance.cells[instance.cursor] = slot;
+		instance.cursor += 1;
 		return slot;
+	};
+
+	/** Get this path's instance, or start a fresh one — a new path is an ordinary mount, never a Rules-of-Hooks violation. */
+	const instanceAt = (path: string, type: (props: unknown) => unknown): Instance => {
+		const existing = instances.get(path);
+		if (existing !== undefined && existing.type === type) return existing;
+		const created: Instance = { type, cells: [], cursor: 0, hookCount: undefined };
+		instances.set(path, created);
+		return created;
+	};
+
+	/** Invoke one component instance and enforce its own Rules of Hooks across renders. */
+	const invoke = (instance: Instance, props: unknown): unknown => {
+		instance.cursor = 0;
+		instanceStack.push(instance);
+		let result: unknown;
+		try {
+			result = instance.type(props);
+		} finally {
+			instanceStack.pop();
+		}
+		if (instance.hookCount !== undefined) {
+			assert.strictEqual(
+				instance.cursor,
+				instance.hookCount,
+				`${componentName(instance.type)} called ${String(instance.cursor)} hook(s) this render but ${String(instance.hookCount)} on the previous render — hooks must run unconditionally, in the same order, on every render (Rules of Hooks)`,
+			);
+		}
+		instance.hookCount = instance.cursor;
+		return result;
+	};
+
+	/** A stable suffix for one child's path: its `key` when the element carries one, else its position. */
+	const step = (index: number, key: unknown): string => (key !== undefined ? `#${String(key)}` : `.${String(index)}`);
+
+	/**
+	 * Recursively expand every function-type element in a rendered value.
+	 * @param node - a tree, an element, an array of children, or a leaf.
+	 * @param path - this node's structural address, unique among its siblings across renders.
+	 * @param seen - every instance path touched this render, so a dropped instance's state is freed.
+	 * @returns the same shape with every nested component replaced by what it rendered.
+	 */
+	const resolve = (node: unknown, path: string, seen: Set<string>): unknown => {
+		if (Array.isArray(node)) {
+			return node.map((child, index) => resolve(child, path + step(index, (child as Partial<StubElement>)?.key), seen));
+		}
+		if (node === null || typeof node !== "object") return node;
+		const element = node as StubElement;
+		if (typeof element.type === "function") {
+			seen.add(path);
+			const rendered = invoke(instanceAt(path, element.type as (props: unknown) => unknown), element.props);
+			// A distinct suffix for what the instance rendered, so its own output
+			// never collides with the instance's own address in `instances`.
+			return resolve(rendered, `${path}/body`, seen);
+		}
+		if (typeof element.props !== "object" || element.props === null) return node;
+		const children = element.props["children"];
+		if (children === undefined) return element;
+		return { ...element, props: { ...element.props, children: resolve(children, `${path}.c`, seen) } };
 	};
 
 	const render = (): void => {
@@ -260,9 +359,14 @@ export function createRenderer(): Mounted {
 		// An internal liveness bound, not a tunable: a component that re-renders
 		// this many times without settling is looping, and a hung test is a worse
 		// failure than a loud one.
-		assert.ok(renders < 50, "the settings tab re-rendered without settling");
-		cursor = 0;
-		tree = (component as () => unknown)();
+		assert.ok(renders < 50, "the component re-rendered without settling");
+		assert.ok(root !== undefined, "render() called before mount()");
+		const seen = new Set<string>(["root"]);
+		const rootOutput = invoke(instanceAt("root", root), undefined);
+		tree = resolve(rootOutput, "root/body", seen);
+		// Drop state for any instance this render never reached — a module that
+		// stopped being visible unmounts, it does not keep its old draft around.
+		for (const key of instances.keys()) if (!seen.has(key)) instances.delete(key);
 		while (pendingEffects.length > 0) (pendingEffects.shift() as () => unknown)();
 	};
 
@@ -298,12 +402,17 @@ export function createRenderer(): Mounted {
 		},
 	};
 
-	const jsx = (type: unknown, props: Record<string, unknown>): StubElement => ({ type, props });
+	// `key` is the automatic JSX runtime's 3rd positional argument (extracted
+	// from `props` by the transform, never left inside it) — carried onto the
+	// stub element so `resolve` can address a keyed list item stably across
+	// renders instead of falling back to array position.
+	const jsx = (type: unknown, props: Record<string, unknown>, key?: unknown): StubElement =>
+		key === undefined ? { type, props } : { type, props, key };
 
 	return {
 		modules: { react, "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: Symbol.for("react.fragment") } },
 		mount(target: () => unknown): void {
-			component = target;
+			root = target as (props: unknown) => unknown;
 			render();
 		},
 		tree: () => tree,

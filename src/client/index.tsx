@@ -146,12 +146,22 @@ export function apply(ctx: any): void {
 			"session create",
 		) as { sessionId: string };
 		const selection = selectionFromDefault(prefs.model);
+		let modelError: Error | undefined;
 		if (selection !== undefined) {
-			remoteValue(await session.selectModel({ sessionId: created.sessionId, ...selection }), "model selection");
+			try {
+				remoteValue(await session.selectModel({ sessionId: created.sessionId, ...selection }), "model selection");
+			} catch (cause) {
+				// The session itself was created successfully — a failed model
+				// selection is not a failed conversation, so it still gets opened.
+				// The error is only reported, not swallowed: rethrown below, once
+				// the session everyone can see it exists is in place.
+				modelError = cause as Error;
+			}
 		}
 		// A raw remote create bypasses the client list; refresh before opening.
 		await ctx.sessions.refresh();
 		openSession(created.sessionId);
+		if (modelError !== undefined) throw modelError;
 	};
 
 	const BuddyPanel = createBuddyPanel({ call, t, modules, newConversation });

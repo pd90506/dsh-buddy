@@ -4,7 +4,7 @@
  * @module dsh-buddy/client/panel
  */
 import { useCallback, useEffect, useState } from "react";
-import type React from "react";
+import type { ReactNode } from "react";
 import type { Call } from "./call.ts";
 import { visibleModules, type PanelModule } from "./modules.ts";
 import type { PanelSectionId } from "../config.ts";
@@ -95,18 +95,18 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 					{error !== undefined && <p style={styles.error}>{error}</p>}
 					{sections !== undefined &&
 						visibleModules(deps.modules, sections).map((module) => {
-							// A direct call, not `<module.Component />`: this repo's stub
-							// renderer (no real reconciler) never invokes a nested element's
-							// function type, so a lazily wrapped element would leave the
-							// module's own hooks — and its save button — unrendered. The
-							// result is `unknown`, like every component return in this
-							// plugin, so it is cast here, the one point it needs to satisfy
-							// JSX's `ReactNode` children type.
-							const Body = module.Component() as React.ReactNode;
+							// A capitalised local, not `<module.Component />` directly: every
+							// module's return type is `unknown` (like `BuddyPanel`'s own,
+							// below), and TS's JSX component check wants `ReactNode` — the
+							// member expression itself is a perfectly ordinary component
+							// reference either way (JSX only treats a lower-case *bare
+							// identifier* as a host tag; a member expression is always a
+							// value reference), so this cast changes nothing at runtime.
+							const ModuleComponent = module.Component as unknown as () => ReactNode;
 							return (
 								<section key={module.id} style={styles.card}>
 									<h3 style={styles.cardTitle}>{deps.t(module.titleKey)}</h3>
-									{Body}
+									<ModuleComponent />
 								</section>
 							);
 						})}
