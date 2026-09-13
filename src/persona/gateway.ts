@@ -9,6 +9,7 @@
  * @module dsh-buddy/persona/gateway
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { PANEL_SECTION_IDS, type BuddyConfig, type BuddyModelDefault, type PanelSectionId } from "../config.ts";
 import type { PersonaDocument } from "./soul.ts";
 
 /** Cordis service key; also the typert wire namespace. */
@@ -41,6 +42,55 @@ export interface PersonaView {
 	readonly lastWriteAt?: string | undefined;
 }
 
+/** What the Model module, the slim Settings tab and New Buddy conversation read. */
+export interface PreferencesView {
+	readonly model: BuddyModelDefault;
+	readonly panel: { readonly sections: Record<PanelSectionId, boolean> };
+	/** Absolute working directory for a new web buddy conversation; created on read. */
+	readonly conversationCwd: string;
+}
+
+/** A plain-object field of an unknown record. */
+function objectField(value: unknown, key: string): Record<string, unknown> | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const field = (value as Record<string, unknown>)[key];
+	if (typeof field !== "object" || field === null || Array.isArray(field)) return undefined;
+	return field as Record<string, unknown>;
+}
+
+/**
+ * Validate a wire patch against the current configuration.
+ *
+ * Whole objects go out because the settings plane's merge depth is not part of
+ * this plugin's contract: a `model` or `panel` write is always complete.
+ * @param current - the configuration as it reads now.
+ * @param patch - untrusted wire data.
+ * @returns only the fields that validated, each completed from `current`.
+ */
+export function cleanPreferencesPatch(
+	current: BuddyConfig,
+	patch: Record<string, unknown>,
+): Partial<Pick<BuddyConfig, "model" | "panel">> {
+	const clean: { model?: BuddyModelDefault; panel?: BuddyConfig["panel"] } = {};
+	const model = objectField(patch, "model");
+	if (model !== undefined) {
+		const next = { ...current.model };
+		for (const key of ["provider", "model", "reasoningEffort"] as const) {
+			if (typeof model[key] === "string") next[key] = model[key];
+		}
+		clean.model = next;
+	}
+	const sections = objectField(objectField(patch, "panel"), "sections");
+	if (sections !== undefined) {
+		const next = { ...current.panel.sections };
+		for (const id of PANEL_SECTION_IDS) {
+			if (typeof sections[id] === "boolean") next[id] = sections[id];
+		}
+		clean.panel = { sections: next };
+	}
+	return clean;
+}
+
 /** The contribution that puts `buddyPersona/*` on the wire. */
 function typertContribution(): unknown {
 	const shared = {
@@ -63,6 +113,13 @@ function typertContribution(): unknown {
 				method: "updatePersona",
 				parameters: [{ name: "patch", wire: "patch", ...json }],
 			},
+			{ ...shared, id: `${TYPERT_PACKAGE}#preferences`, method: "preferences", parameters: [] },
+			{
+				...shared,
+				id: `${TYPERT_PACKAGE}#updatePreferences`,
+				method: "updatePreferences",
+				parameters: [{ name: "patch", wire: "patch", ...json }],
+			},
 		],
 	};
 }
@@ -80,6 +137,12 @@ export interface GatewayDeps {
 	readonly writePersona: (patch: Partial<PersonaDocument>) => Promise<PersonaView>;
 	/** Buddy conversations, newest first. */
 	readonly listSessions: () => Promise<BuddySessionSummary[]>;
+	/** Buddy-wide preferences. */
+	readonly readPreferences: () => Promise<PreferencesView>;
+	/** Apply an already-validated preferences write. */
+	readonly writePreferences: (patch: Partial<Pick<BuddyConfig, "model" | "panel">>) => Promise<PreferencesView>;
+	/** The configuration the validator completes patches from. */
+	readonly currentConfig: () => BuddyConfig;
 }
 
 /**
@@ -91,7 +154,10 @@ export interface GatewayDeps {
  */
 type PersonaPatch = { -readonly [K in keyof PersonaDocument]?: PersonaDocument[K] };
 
-/** Backs `buddyPersona/persona`, `buddyPersona/updatePersona`, `buddyPersona/sessions`. */
+/**
+ * Backs `buddyPersona/persona`, `buddyPersona/updatePersona`,
+ * `buddyPersona/sessions`, `buddyPersona/preferences`, `buddyPersona/updatePreferences`.
+ */
 export class BuddyPersonaGateway extends TypertRemoteService {
 	/**
 	 * TypeScript-`private`, deliberately not `#`-private — see the Global
@@ -148,5 +214,24 @@ export class BuddyPersonaGateway extends TypertRemoteService {
 		if (typeof patch["agents"] === "string") clean.agents = patch["agents"];
 		if (Object.keys(clean).length === 0) return await this.deps.readPersona();
 		return await this.deps.writePersona(clean);
+	}
+
+	/**
+	 * Buddy-wide preferences.
+	 * @returns model default, module visibility, and the conversation cwd.
+	 */
+	async preferences(): Promise<PreferencesView> {
+		return await this.deps.readPreferences();
+	}
+
+	/**
+	 * Write Buddy-wide preferences. Unknown or malformed fields are dropped.
+	 * @param patch - `{ model?: Partial<BuddyModelDefault>, panel?: { sections?: Partial<Record<PanelSectionId, boolean>> } }`.
+	 * @returns the preferences after the write.
+	 */
+	async updatePreferences(patch: Record<string, unknown>): Promise<PreferencesView> {
+		const clean = cleanPreferencesPatch(this.deps.currentConfig(), patch);
+		if (Object.keys(clean).length === 0) return await this.deps.readPreferences();
+		return await this.deps.writePreferences(clean);
 	}
 }

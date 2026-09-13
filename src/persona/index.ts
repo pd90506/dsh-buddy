@@ -13,10 +13,13 @@
  * — stronger than picking the right scope at registration time.
  * @module dsh-buddy/persona
  */
-import { BUDDY_PRESET_ID, SOUL_VARIABLE } from "../index.ts";
+import { mkdir } from "node:fs/promises";
+import { expandHomePath } from "@deepseek-ai/dsh-home-paths";
+import { BUDDY_PRESET_ID, BUDDY_WORKSPACE_DEFAULT, SOUL_VARIABLE } from "../index.ts";
 import { readPersona, soulForPrompt, writePersona, type PersonaDocument } from "./soul.ts";
-import { BuddyPersonaGateway, type BuddySessionSummary, type PersonaView } from "./gateway.ts";
+import { BuddyPersonaGateway, type BuddySessionSummary, type PersonaView, type PreferencesView } from "./gateway.ts";
 import type { BuddyPaths } from "../paths.ts";
+import type { BuddyConfig } from "../config.ts";
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = "dsh-buddy-persona";
@@ -63,6 +66,8 @@ interface PluginContext {
 		paths: BuddyPaths;
 		lastPersonaWriteAt(): string | undefined;
 		markPersonaWritten(at: string): Promise<void>;
+		config(): BuddyConfig;
+		updateConfig(patch: Partial<Pick<BuddyConfig, "model" | "panel">>): Promise<void>;
 	};
 	systemPrompt: PromptPlane;
 }
@@ -135,6 +140,15 @@ export function apply(ctx: PluginContext): void {
 		return summaries.sort((first, second) => second.updatedAt - first.updatedAt);
 	};
 
+	const preferences = async (): Promise<PreferencesView> => {
+		const config = ctx.buddyStore.config();
+		const conversationCwd = expandHomePath(BUDDY_WORKSPACE_DEFAULT);
+		// Created here, not by the caller: the browser cannot mkdir, and the session
+		// store rejects a cwd that does not exist.
+		await mkdir(conversationCwd, { recursive: true });
+		return { model: { ...config.model }, panel: { sections: { ...config.panel.sections } }, conversationCwd };
+	};
+
 	// Exactly once: the gateway registers the `dsh-buddy` typert package, and a
 	// duplicate registration throws. A missing `typert` throws out of here too,
 	// deliberately uncaught — a row whose endpoints are invisible on the wire is
@@ -152,6 +166,12 @@ export function apply(ctx: PluginContext): void {
 			return view();
 		},
 		listSessions,
+		readPreferences: preferences,
+		writePreferences: async (patch) => {
+			await ctx.buddyStore.updateConfig(patch);
+			return await preferences();
+		},
+		currentConfig: () => ctx.buddyStore.config(),
 	});
 
 	// A variable rather than a section: inert until the buddy preset's persona

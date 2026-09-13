@@ -20,7 +20,8 @@ import * as storeRow from "../src/store/index.ts";
 import * as personaRow from "../src/persona/index.ts";
 import { BUDDY_PRESET_ID, SOUL_VARIABLE } from "../src/index.ts";
 import { DEFAULT_SOUL } from "../src/persona/soul.ts";
-import type { BuddySessionSummary, PersonaView } from "../src/persona/gateway.ts";
+import { FALLBACK_CONFIG } from "../src/config.ts";
+import type { BuddySessionSummary, PersonaView, PreferencesView } from "../src/persona/gateway.ts";
 
 /** A prompt-variable provider, as `systemPrompt.variable` receives it. */
 type VariableProvider = (context: unknown) => string | undefined;
@@ -193,12 +194,14 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 					ns: string,
 					_schema: unknown,
 					_entry: unknown,
-					hooks: { setSource(source: () => { home: string }): void; onChange(): void },
+					hooks: { setSource(source: () => typeof FALLBACK_CONFIG): void; onChange(): void },
 				) => {
 					sections.push(ns);
-					// `BuddyConfig` has exactly one field; emitting anything else here
-					// would let a row read a setting the schema does not have.
-					hooks.setSource(() => ({ home }));
+					// Only `home` differs from the documented defaults: this stub
+					// stands in for the real settings plane's schema resolution, and
+					// `model`/`panel` must still come back complete for a row that
+					// reads `ctx.buddyStore.config()` whole.
+					hooks.setSource(() => ({ ...FALLBACK_CONFIG, home }));
 				},
 			}),
 		);
@@ -438,4 +441,24 @@ test("sessions answers empty without a session-query plane", async () => {
 	const persona = mounted.persona();
 	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
 	assert.deepEqual(await dispatch(persona, "sessions", []), []);
+});
+
+test("preferences are served through the proxy with the conversation cwd", async () => {
+	// `preferences()` resolves `BUDDY_WORKSPACE_DEFAULT` (`~/buddy-workspace`)
+	// against the OS home, so `$HOME` must be isolated the same way `$DSH_HOME`
+	// is above — otherwise this test would `mkdir` inside the real account home.
+	const previousHome = process.env["HOME"];
+	const workspaceHome = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-workspace-"));
+	process.env["HOME"] = workspaceHome;
+	try {
+		const mounted = await mount();
+		const persona = mounted.persona();
+		if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+		const view = (await dispatch(persona, "preferences", [])) as PreferencesView;
+		assert.ok(view.conversationCwd.endsWith("buddy-workspace"));
+		assert.deepEqual(view.panel, { sections: { soul: true, agents: true, model: true, telegram: true } });
+	} finally {
+		if (previousHome === undefined) delete process.env["HOME"];
+		else process.env["HOME"] = previousHome;
+	}
 });

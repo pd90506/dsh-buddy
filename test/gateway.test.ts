@@ -26,7 +26,9 @@ import {
 	type BuddySessionSummary,
 	type GatewayDeps,
 	type PersonaView,
+	type PreferencesView,
 } from "../src/persona/gateway.ts";
+import { FALLBACK_CONFIG, type BuddyConfig } from "../src/config.ts";
 
 /** The view the stub hands back, so identity can be asserted on the way out. */
 const VIEW: PersonaView = { soul: "Voice.", agents: "", home: "/tmp/buddy" };
@@ -34,12 +36,21 @@ const VIEW: PersonaView = { soul: "Voice.", agents: "", home: "/tmp/buddy" };
 /** The session list the stub hands back. */
 const SESSIONS: BuddySessionSummary[] = [{ sessionId: "s1", title: "First", updatedAt: 1, cwd: "/tmp" }];
 
+/** The preferences view the stub hands back. */
+const PREFERENCES: PreferencesView = {
+	model: { ...FALLBACK_CONFIG.model },
+	panel: { sections: { ...FALLBACK_CONFIG.panel.sections } },
+	conversationCwd: "/tmp/buddy-workspace",
+};
+
 /** Deps that record what reached them. */
 interface Recorder extends GatewayDeps {
 	/** Every patch that reached {@link GatewayDeps.writePersona}, in order. */
 	readonly patches: Partial<{ soul: string; agents: string }>[];
 	/** How many times {@link GatewayDeps.readPersona} was called. */
 	reads: number;
+	/** Every patch that reached {@link GatewayDeps.writePreferences}, in order. */
+	readonly preferencePatches: Partial<Pick<BuddyConfig, "model" | "panel">>[];
 }
 
 /** @returns recording deps. */
@@ -47,6 +58,7 @@ function deps(): Recorder {
 	const recorder: Recorder = {
 		patches: [],
 		reads: 0,
+		preferencePatches: [],
 		readPersona: async () => {
 			recorder.reads += 1;
 			return VIEW;
@@ -56,6 +68,12 @@ function deps(): Recorder {
 			return VIEW;
 		},
 		listSessions: async () => SESSIONS,
+		readPreferences: async () => PREFERENCES,
+		writePreferences: async (patch) => {
+			recorder.preferencePatches.push(patch);
+			return PREFERENCES;
+		},
+		currentConfig: () => FALLBACK_CONFIG,
 	};
 	return recorder;
 }
@@ -137,7 +155,7 @@ test("constructing the gateway registers the typert contribution", () => {
 	assert.equal(contribution.face, "host");
 	assert.deepEqual(
 		contribution.invocations.map((invocation) => invocation.method).sort(),
-		["persona", "sessions", "updatePersona"],
+		["persona", "preferences", "sessions", "updatePersona", "updatePreferences"],
 	);
 	for (const invocation of contribution.invocations) {
 		assert.equal(invocation.namespace, BUDDY_SERVICE, `${invocation.method} must be on the buddy namespace`);
@@ -214,6 +232,14 @@ test("an empty patch performs no write", async () => {
 	}
 	assert.deepEqual(recorder.patches, [], "an empty patch must not reach the writer, not even as {}");
 	assert.equal(recorder.reads, 4, "each empty patch must answer from a fresh read");
+});
+
+test("updatePreferences dispatches through the proxy and writes only validated fields", async () => {
+	const { service, recorder } = harness();
+	await dispatch(service, "updatePreferences", [{ panel: { sections: { telegram: false } }, home: "/nope" }]);
+	assert.deepEqual(recorder.preferencePatches, [
+		{ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } },
+	]);
 });
 
 test("the service name is the typert namespace", () => {
