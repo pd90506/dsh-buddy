@@ -1,19 +1,21 @@
 /**
- * Host half of dsh-telegram.
+ * Buddy's Telegram bridge, absorbed from dsh-telegram.
  *
  * Lifecycle is deliberately dull: open the storage domain, build the runtime,
  * and start polling only when the enable switch is on *and* a token resolves.
  * A freshly installed plugin with neither therefore loads, registers its settings
  * section and its status endpoint, and idles — installing it changes nothing
- * until someone configures it in Settings → Telegram.
+ * until someone configures it from the Buddy main panel.
  *
- * `typert` and `storageDomain` are hard dependencies: without the registry the
- * tab has no status endpoint, and without storage there is nowhere to remember
- * which chat owns which session. Everything else (settings, credentials, agents,
- * approval, permission presets) is read through `ctx.get` so a profile that
- * lacks one degrades instead of failing to mount.
- * @module dsh-telegram
+ * `typert`, `storageDomain` and `buddyStore` are hard dependencies: without the
+ * registry the tab has no status endpoint, without storage there is nowhere to
+ * remember which chat owns which session, and the buddy home and the `buddy`
+ * preset must exist before any session is created. Everything else (settings,
+ * credentials, agents, approval, permission presets) is read through `ctx.get`
+ * so a profile that lacks one degrades instead of failing to mount.
+ * @module dsh-buddy-telegram
  */
+import { BUDDY_WORKSPACE_DEFAULT } from "../index.ts";
 import { Config, DEFAULT_MEDIA_DELIVERY, resolveDefaultCwd, SETTINGS_NAMESPACE, type TelegramConfig } from "./config.ts";
 import { describeToken, readToken, TELEGRAM_TOKEN_REF } from "./credentials.ts";
 import { TelegramGateway } from "./gateway.ts";
@@ -24,10 +26,10 @@ import { SessionManager } from "./session.ts";
 import { openStore, type TelegramStore } from "./store.ts";
 
 /** Cordis plugin name used by loader diagnostics. */
-export const name = "dsh-telegram";
+export const name = "dsh-buddy-telegram";
 
-/** Hard dependencies: the status endpoint and the chat↔session map. */
-export const inject = ["typert", "storageDomain"];
+/** Hard dependencies: the status endpoint, the chat↔session map, and the buddy home. */
+export const inject = ["typert", "storageDomain", "buddyStore"];
 
 /** The context members this plugin uses. */
 interface PluginContext {
@@ -52,7 +54,7 @@ interface PluginContext {
 const FALLBACK: TelegramConfig = {
 	enabled: false,
 	ownerUserId: "",
-	defaultCwd: "~/dsh-telegram",
+	defaultCwd: BUDDY_WORKSPACE_DEFAULT,
 	permissionPreset: "workspace-write",
 	renderMarkdown: true,
 	mediaDelivery: DEFAULT_MEDIA_DELIVERY,
@@ -65,7 +67,7 @@ const FALLBACK: TelegramConfig = {
  */
 export function apply(ctx: PluginContext): void {
 	const log = (line: string): void => {
-		const text = `dsh-telegram: ${line}`;
+		const text = `dsh-buddy-telegram: ${line}`;
 		try {
 			// `ctx.logger` is a cordis core property rather than a `get`-able
 			// service in every composition, so both shapes are attempted before
@@ -227,7 +229,7 @@ export function apply(ctx: PluginContext): void {
 			const settings = ctx.get("settings") as
 				| { update(ns: string, patch: Record<string, unknown>): Promise<void> }
 				| undefined;
-			if (settings === undefined) throw new Error("telegram: the settings service is unavailable");
+			if (settings === undefined) throw new Error("dsh-buddy-telegram: the settings service is unavailable");
 			await settings.update(SETTINGS_NAMESPACE, patch);
 		},
 	});
@@ -245,6 +247,6 @@ export function apply(ctx: PluginContext): void {
 				void store?.close().catch(() => undefined);
 			};
 		},
-		"dsh-telegram: runtime",
+		"dsh-buddy-telegram: runtime",
 	);
 }

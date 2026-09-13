@@ -15,6 +15,9 @@
 # named exactly `dsh-buddy` (dsh-client-modules skips subpath names like
 # `dsh-buddy/store`), which is the sole purpose of the empty `buddy-client` row.
 #
+# `buddy-telegram` is the Telegram bridge; it idles until enabled from the
+# Buddy main panel and refuses to poll while dsh-telegram still holds the bot.
+#
 # Nothing here does anything on its own. With no SOUL.md written, the plugin
 # mounts, registers its settings section and its endpoints, and idles.
 - insert:
@@ -26,4 +29,7 @@
       config: {}
     - id: buddy-client
       name: 'dsh-buddy'
+      config: {}
+    - id: buddy-telegram
+      name: 'dsh-buddy/telegram'
       config: {}

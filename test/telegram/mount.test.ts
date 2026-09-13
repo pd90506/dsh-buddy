@@ -21,6 +21,7 @@ import { test } from "node:test";
 import { Context } from "@deepseek-ai/cordis";
 import { apply, inject, name } from "../../src/telegram/index.ts";
 import type { TelegramConfig } from "../../src/telegram/config.ts";
+import { FALLBACK_CONFIG } from "../../src/config.ts";
 
 /** The configuration the fake settings service hands the plugin. */
 const CONFIG: TelegramConfig = {
@@ -36,7 +37,7 @@ const CONFIG: TelegramConfig = {
 function domainStub(): unknown {
 	const table = { get: () => undefined, put: async () => undefined, delete: async () => true };
 	return {
-		name: "telegram",
+		name: "buddy_telegram",
 		table: () => table,
 		global: { get: () => ({ updateOffset: 0 }), set: async () => undefined },
 		close: async () => undefined,
@@ -86,6 +87,12 @@ async function mount(): Promise<Mounted> {
 			get: () => undefined,
 		});
 	});
+	sibling("fake-buddy-store", (ctx) => {
+		(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide("buddyStore", {
+			paths: { home: "/tmp/buddy" },
+			config: () => FALLBACK_CONFIG,
+		});
+	});
 	sibling("fake-settings", (ctx) => {
 		(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide("settings", {
 			installSection: (
@@ -107,7 +114,7 @@ async function mount(): Promise<Mounted> {
 	(root as unknown as { plugin(plugin: unknown): unknown }).plugin({ name, inject, apply });
 	await settle();
 	return {
-		service: root.get("telegram") as unknown as Record<string, (...args: unknown[]) => unknown>,
+		service: root.get("buddyTelegram") as unknown as Record<string, (...args: unknown[]) => unknown>,
 		sections,
 		patches,
 	};
@@ -130,7 +137,7 @@ test("apply mounts on a real cordis context and publishes the endpoints", async 
 
 test("the settings section is installed through the scoped injection", async () => {
 	const { sections } = await mount();
-	assert.deepEqual(sections, ["telegram"]);
+	assert.deepEqual(sections, ["buddy-telegram"]);
 });
 
 test("the bot starts once credentials become active (live autostart regression)", async () => {
@@ -160,6 +167,10 @@ test("the bot starts once credentials become active (live autostart regression)"
 		name: "fake-storage",
 		apply: (ctx: any) =>
 			ctx.reflect.provide("storageDomain", { open: async () => domainStub(), get: () => undefined }),
+	});
+	plugin({
+		name: "fake-buddy-store",
+		apply: (ctx: any) => ctx.reflect.provide("buddyStore", { paths: { home: "/tmp/buddy" }, config: () => FALLBACK_CONFIG }),
 	});
 	plugin({
 		name: "fake-settings",
@@ -212,7 +223,7 @@ test("updateConfig reaches the settings plane (live Guard failure regression)", 
 	// `ctx.settings` instead of `ctx.get("settings")` used to throw here instead:
 	// `cannot get property "settings" without inject`.
 	assert.deepEqual(patches, [
-		{ ns: "telegram", patch: { enabled: true, ownerUserId: "42", defaultCwd: "/tmp/dsh-telegram" } },
+		{ ns: "buddy-telegram", patch: { enabled: true, ownerUserId: "42", defaultCwd: "/tmp/dsh-telegram" } },
 	]);
 	assert.ok(!JSON.stringify(patches).includes("110201543"), "a token must never reach the settings plane");
 	assert.deepEqual(after, CONFIG, "the endpoint answers with the section the settings service reports");

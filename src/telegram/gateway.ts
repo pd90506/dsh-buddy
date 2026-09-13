@@ -18,17 +18,19 @@
  * an out-of-tree plugin's nested copy is not the API gateway's — while
  * `ctx.typert.register` is an ordinary service call, immune to module identity
  * and re-read on every claim.
- * @module dsh-telegram/gateway
+ *
+ * Backing the Telegram module of the Buddy main panel.
+ * @module dsh-buddy-telegram/gateway
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { isMediaDeliveryMode, type TelegramConfig } from "./config.ts";
 import type { TokenPosture } from "./credentials.ts";
 
 /** Cordis service key; also the typert wire namespace. */
-export const TELEGRAM_SERVICE = "telegram";
+export const TELEGRAM_SERVICE = "buddyTelegram";
 
 /** Package identity for the strict typert contribution. */
-const TYPERT_PACKAGE = "dsh-telegram";
+const TYPERT_PACKAGE = "dsh-buddy-telegram";
 
 /** What the tab renders about the bot's runtime. */
 export interface TelegramStatus {
@@ -86,7 +88,7 @@ export interface GatewayDeps {
 }
 
 /**
- * Backs `telegram/status`, `telegram/config`, and `telegram/updateConfig`.
+ * Backs `buddyTelegram/status`, `buddyTelegram/config`, and `buddyTelegram/updateConfig`.
  */
 export class TelegramGateway extends TypertRemoteService {
 	/**
@@ -111,7 +113,7 @@ export class TelegramGateway extends TypertRemoteService {
 		super(ctx as never, TELEGRAM_SERVICE);
 		this.deps = deps;
 		const typert = ctx.get("typert") as { register(contribution: unknown): void } | undefined;
-		if (typert === undefined) throw new Error("telegram: the typert registry service is unavailable");
+		if (typert === undefined) throw new Error("dsh-buddy-telegram: the typert registry service is unavailable");
 		typert.register(typertContribution());
 	}
 

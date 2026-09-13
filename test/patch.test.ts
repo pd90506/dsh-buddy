@@ -40,3 +40,7 @@ test("the package entry is a mountable cordis plugin that registers nothing", ()
 	assert.ok(!("inject" in entryRow), "the anchor row must not wait on any service");
 	assert.equal(entryRow.apply({} as never), undefined);
 });
+
+test("the patch mounts the telegram row under the buddy package", () => {
+	assert.ok(rowNames().includes("dsh-buddy/telegram"), `rows: ${rowNames().join(", ")}`);
+});

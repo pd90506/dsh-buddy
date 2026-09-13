@@ -15,14 +15,14 @@
  * One domain name exists per process, and opening an already-open name rejects,
  * so {@link openStore} falls back to the live handle instead of failing: after a
  * hot reload the previous fiber may not have closed yet.
- * @module dsh-telegram/store
+ * @module dsh-buddy-telegram/store
  */
 import { z } from "zod";
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
 import type { Domain, DomainGlobal, KvTable } from "@deepseek-ai/dsh-storage-domain";
 
 /** The single domain name this plugin owns. Lowercase per `UNIT_NAME_RE`. */
-export const TELEGRAM_DOMAIN_NAME = "telegram";
+export const TELEGRAM_DOMAIN_NAME = "buddy_telegram";
 
 /**
  * One Telegram chat's binding to a harness session.
@@ -107,7 +107,7 @@ export async function openStore(ctx: StoreContext): Promise<TelegramStore> {
 		  }
 		| undefined;
 	if (facility === undefined) {
-		throw new Error("telegram: the storageDomain service is unavailable (load @deepseek-ai/dsh-storage-domain)");
+		throw new Error("dsh-buddy-telegram: the storageDomain service is unavailable (load @deepseek-ai/dsh-storage-domain)");
 	}
 	let domain: Domain<typeof telegramDomainSpec>;
 	try {

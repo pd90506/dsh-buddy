@@ -25,7 +25,7 @@ function domainStub(): unknown {
 		delete: async () => true,
 	};
 	return {
-		name: "telegram",
+		name: "buddy_telegram",
 		table: () => table,
 		global: { get: () => ({ updateOffset: 7 }), set: async () => undefined },
 		close: async () => undefined,
@@ -105,14 +105,14 @@ async function settle(): Promise<void> {
 }
 
 test("the plugin declares its name and hard dependencies", () => {
-	assert.equal(name, "dsh-telegram");
-	assert.deepEqual(inject, ["typert", "storageDomain"]);
+	assert.equal(name, "dsh-buddy-telegram");
+	assert.deepEqual(inject, ["typert", "storageDomain", "buddyStore"]);
 });
 
 test("apply registers the settings section, the approval listener and the endpoints", () => {
 	const { ctx, sections, listeners, contributions } = contextStub();
 	assert.doesNotThrow(() => apply(ctx as never));
-	assert.deepEqual(sections, ["telegram"], "the settings section must be installed under the telegram namespace");
+	assert.deepEqual(sections, ["buddy-telegram"], "the settings section must be installed under the buddy-telegram namespace");
 	assert.ok(listeners.has("approval/request"), "approvals must be answerable from the chat");
 	assert.equal(contributions.length, 1, "exactly one typert contribution");
 	const contribution = contributions[0] as { invocations: { method: string; namespace: string }[] };
@@ -121,9 +121,9 @@ test("apply registers the settings section, the approval listener and the endpoi
 		["config", "status", "updateConfig"],
 	);
 	// The wire namespace rides on each invocation, and it is what the browser
-	// side addresses: `telegram/status`, `telegram/config`, `telegram/updateConfig`.
+	// side addresses: `buddyTelegram/status`, `buddyTelegram/config`, `buddyTelegram/updateConfig`.
 	for (const invocation of contribution.invocations) {
-		assert.equal(invocation.namespace, "telegram");
+		assert.equal(invocation.namespace, "buddyTelegram");
 	}
 });
 
@@ -132,7 +132,7 @@ test("the status endpoint answers with posture and no token, before anything run
 	apply(ctx as never);
 	await settle();
 
-	const gateway = provided.get("telegram") as {
+	const gateway = provided.get("buddyTelegram") as {
 		status(): Promise<{ state: string; sessions: number; token: { configured: boolean; writable: boolean } }>;
 	};
 	assert.ok(gateway !== undefined, "the gateway must publish itself as the telegram service");
@@ -151,7 +151,7 @@ test("every endpoint's declared parameters match the method it names", () => {
 	const contribution = contributions[0] as {
 		invocations: { method: string; parameters: unknown[] }[];
 	};
-	const gateway = provided.get("telegram") as unknown as Record<string, (...args: unknown[]) => unknown>;
+	const gateway = provided.get("buddyTelegram") as unknown as Record<string, (...args: unknown[]) => unknown>;
 	for (const invocation of contribution.invocations) {
 		const method = gateway[invocation.method];
 		if (method === undefined) assert.fail(`${invocation.method} must exist on the gateway`);
@@ -303,7 +303,7 @@ test("updateConfig forwards only known fields into the settings document (AC-2)"
 	apply(ctx as never);
 	await settle();
 
-	const gateway = provided.get("telegram") as {
+	const gateway = provided.get("buddyTelegram") as {
 		updateConfig(patch: Record<string, unknown>): Promise<unknown>;
 	};
 	await gateway.updateConfig({

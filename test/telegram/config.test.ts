@@ -16,14 +16,14 @@ test("expandHome handles ~, ~/x and plain paths", () => {
 test("resolveDefaultCwd returns an absolute path for every accepted input", () => {
 	assert.equal(resolveDefaultCwd({ defaultCwd: "/srv/work" }), "/srv/work");
 	assert.equal(resolveDefaultCwd({ defaultCwd: "~/dsh-telegram" }).startsWith("/"), true);
-	assert.equal(resolveDefaultCwd({ defaultCwd: "" }).endsWith("dsh-telegram"), true);
-	assert.equal(resolveDefaultCwd({ defaultCwd: "   " }).endsWith("dsh-telegram"), true);
+	assert.equal(resolveDefaultCwd({ defaultCwd: "" }).endsWith("buddy-workspace"), true);
+	assert.equal(resolveDefaultCwd({ defaultCwd: "   " }).endsWith("buddy-workspace"), true);
 	assert.equal(resolveDefaultCwd({ defaultCwd: "relative" }).startsWith("/"), true);
 });
 
 test("the documented default is the dedicated directory, not the home directory", () => {
-	assert.equal(DEFAULT_CWD, "~/dsh-telegram");
-	assert.ok(!resolveDefaultCwd({ defaultCwd: DEFAULT_CWD }).endsWith("/dsh-telegram/.."));
+	assert.equal(DEFAULT_CWD, "~/buddy-workspace");
+	assert.ok(!resolveDefaultCwd({ defaultCwd: DEFAULT_CWD }).endsWith("/buddy-workspace/.."));
 });
 
 test("only the three known permission presets are accepted", () => {

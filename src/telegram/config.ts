@@ -2,19 +2,20 @@
  * The settings schema for Settings → Telegram.
  *
  * Everything here is non-secret user configuration, so it lives in the ordinary
- * settings plane (`ctx.settings`, namespace `telegram`, landing in
+ * settings plane (`ctx.settings`, namespace `buddy-telegram`, landing in
  * `~/.dsh/settings.yaml`) and can be read and written by the browser tab through
  * the platform's own `settings.*` RPC — no bespoke endpoint needed. The bot
  * token is the one thing that must NOT be here; it goes through the credentials
  * plane (see `credentials.ts`).
- * @module dsh-telegram/config
+ * @module dsh-buddy-telegram/config
  */
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import z from "@deepseek-ai/schemastery";
+import { BUDDY_WORKSPACE_DEFAULT } from "../index.ts";
 
 /** This plugin's settings namespace. Lowercase, per the settings grammar. */
-export const SETTINGS_NAMESPACE = "telegram";
+export const SETTINGS_NAMESPACE = "buddy-telegram";
 
 /** Permission presets a Telegram session may run under. */
 export const PERMISSION_PRESETS = ["read-only", "workspace-write", "danger-full-access"] as const;
@@ -59,7 +60,7 @@ export interface TelegramConfig {
 }
 
 /** Default working directory, matching the plan's decision. */
-export const DEFAULT_CWD = "~/dsh-telegram";
+export const DEFAULT_CWD = BUDDY_WORKSPACE_DEFAULT;
 
 /** Approval default: every risky call is asked about, on the phone. */
 export const DEFAULT_PERMISSION_PRESET: PermissionPreset = "workspace-write";

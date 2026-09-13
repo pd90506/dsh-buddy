@@ -2,14 +2,14 @@
  * The service-proxy test: cordis never hands out the instance.
  *
  * Every other test in this suite calls the gateway on the object that was handed
- * to `reflect.provide`. Production does not. `ctx.get("telegram")` returns a
+ * to `reflect.provide`. Production does not. `ctx.get("buddyTelegram")` returns a
  * *traceable proxy* (`createTraceable` in cordis), and the api-gateway dispatches
  * through `Reflect.apply(method, receiver, args)` with that proxy as `this` — the
  * proxy's method wrapper then substitutes a shadow wrapper again. A
  * runtime-private (`#`) field is bound to the instance object itself and cannot be
  * reached through any proxy, so the first live call failed with
  *
- *     telegram/status failed: gateway/internal: Cannot read private member #deps
+ *     buddyTelegram/status failed: gateway/internal: Cannot read private member #deps
  *     from an object whose class did not declare it
  *
  * while the whole offline suite passed, because every one of those tests used the
@@ -84,7 +84,7 @@ function harness(): {
 	if (contribution === undefined) assert.fail("the gateway must register its typert contribution");
 	// A separate consumer context, as the api-gateway service has.
 	return {
-		service: ctx.extend().get("telegram") as Record<string, (...args: unknown[]) => unknown>,
+		service: ctx.extend().get("buddyTelegram") as Record<string, (...args: unknown[]) => unknown>,
 		instance,
 		invocations: contribution.invocations,
 		written,
