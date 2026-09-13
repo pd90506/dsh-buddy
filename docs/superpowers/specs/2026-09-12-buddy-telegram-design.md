@@ -221,12 +221,12 @@ owner 白名单默认拒绝、审批按钮、文件收发、Markdown 渲染、�
 
 ### 8.2 正式切换（执行前须用户当场确认）
 
-1. 合并到 `master`，重启 `dsh-web`。此时 dsh-telegram 仍挂载：`buddy-telegram` 因占用保护不轮询，但设置迁移在此时完成（settings 平面只能描述已注册的命名空间，dsh-telegram 卸载后就读不到旧节）。
+1. 正式实例通过 `~/.dsh/profiles/web/node_modules/dsh-buddy` 的符号链接加载 `/home/panda-nuc/repo/dsh-buddy`（`master` checkout），不是本 worktree；且 `lib/` 未纳入版本控制。因此在 `/home/panda-nuc/repo/dsh-buddy` 里执行 `git merge --ff-only feat/phase-6-telegram`，接着 `npm install && npm run check`（在该 checkout 里，而非本 worktree），check 一结束立即 `systemctl --user restart dsh-web.service`——两步紧跟着做，中间不插入别的步骤：`npm run check` 会构建 `lib/client.js`，浏览器端一构建完就热重载，宿主端却不会，中间的空档就是热重载后的前端去调旧宿主进程还没有的 `buddyTelegram/*` 端点。合并完成之后才可以删除本 worktree。此时 dsh-telegram 仍挂载：`buddy-telegram` 因占用保护不轮询，但设置迁移在此时完成（settings 平面只能描述已注册的命名空间，dsh-telegram 卸载后就读不到旧节）。
 2. 确认 `~/.dsh/settings.yaml` 出现 `buddy-telegram` 节，`ownerUserId` 已迁移、`enabled: false`；Telegram 模块显示占用提示。
 3. `dsh plugin --profile web remove dsh-telegram`，重启 `dsh-web`。
 4. 在主界面开启 Telegram，状态 `running @example_dev_bot`。
 5. 用户手机实测：`/help` 为英文；普通消息得到 Buddy 口吻回复，会话出现在文件夹；审批按钮与发文件各一次。
-6. `~/.dsh` 变化仅限 `settings.yaml` 的 `buddy` / `buddy-telegram` 节与 `buddy_telegram` domain 存储。
+6. 与 8.1 的 probe（隔离 `DSH_HOME`，用完即清）不同，本次切换作用于真实 `~/.dsh`，预期留下真实且永久的变化，确认恰好是这些、别无其它：`~/.dsh/settings.yaml` 新增 `buddy` 与 `buddy-telegram` 节（后者由旧 `telegram` 节迁移而来）；`~/.dsh/storages/buddy_telegram*` 为 Telegram row 自己的存储 domain；`~/.dsh/storages/workspace.json` 新增 `buddy-workspace` 及（一旦某个 Telegram 会话跑过一轮对话后）其 `cwd` 对应的 workspace 条目；`~/buddy-workspace` 在某个 buddy 会话（web 或 Telegram）首次需要默认工作目录时被创建。
 
 ## 9. 回退
 

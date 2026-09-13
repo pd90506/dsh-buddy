@@ -3444,16 +3444,23 @@ Expected: no output. `~/buddy-workspace` may now exist (the probe's `HOME` is th
 
 Do not start this task on the strength of the plan. Ask the user, show them the Task 15 report, and wait for a yes.
 
-- [ ] **Step 1: Merge**
+- [ ] **Step 1: Merge into the checkout the live instance loads, then restart**
+
+The live `dsh-web.service` loads `dsh-buddy` through `~/.dsh/profiles/web/node_modules/dsh-buddy`, a symlink to `/home/panda-nuc/repo/dsh-buddy` — the `master` checkout, not this worktree. Merging inside this worktree (`/home/panda-nuc/repo/dsh-buddy-phase6`) never reaches the live instance, and `lib/` is gitignored, so even a merge in the right checkout with no build leaves the old artifacts in place. Do the merge, install and build in the checkout the symlink actually points at:
 
 ```bash
-npm run check
-git checkout master && git merge --ff-only feat/phase-6-telegram
+cd /home/panda-nuc/repo/dsh-buddy && git merge --ff-only feat/phase-6-telegram
+npm install && npm run check
+systemctl --user restart dsh-web.service
 ```
 
-- [ ] **Step 2: Restart with dsh-telegram still installed**
+Run the restart immediately after `npm run check` finishes, back to back — not as a separate later step. `npm run check` builds `lib/client.js`, and the browser half hot-reloads on a build while the host half does not: a gap between build and restart is a window where the already-reloaded browser calls `buddyTelegram/*` endpoints the still-running old host process does not serve.
 
-`systemctl --user restart dsh-web.service`; wait for the `dsh web:` line in `journalctl --user -u dsh-web.service --since <restart time>`.
+Only remove the `/home/panda-nuc/repo/dsh-buddy-phase6` worktree after the merge above has completed — it is `feat/phase-6-telegram`'s only checkout until `master` has it.
+
+- [ ] **Step 2: Verify with dsh-telegram still installed**
+
+Wait for the `dsh web:` line in `journalctl --user -u dsh-web.service --since <restart time>`.
 
 Verify (cookie + client-request envelope as in Task 15):
 - `buddyTelegram/config` → `ownerUserId: "1000000000"`, `enabled: false`.
@@ -3488,5 +3495,11 @@ git -C ~/repo/dsh-plugins/dsh-telegram status --short
 ```
 
 Expected: identical to before this plan (only its pre-existing `lib/` and `package-lock.json` modifications).
+
+Unlike the Task 15 probe (an isolated `DSH_HOME`, cleaned up as it goes), this cutover runs against the real `~/.dsh` and is expected to leave real, permanent changes there. Confirm exactly these and nothing wider:
+- `~/.dsh/settings.yaml`: new `buddy` and `buddy-telegram` sections (the latter migrated from the legacy `telegram` section per Step 2).
+- `~/.dsh/storages/buddy_telegram*`: the Telegram row's own storage domain, created on first boot after the merge.
+- `~/.dsh/storages/workspace.json`: new entries for the `buddy-workspace` workspace and, once a Telegram chat has run at least one turn, its `cwd`-derived workspace.
+- `~/buddy-workspace`: created on disk the first time a buddy conversation (web or Telegram) needs a default working directory.
 
 Rollback, if anything above fails: switch Buddy's Telegram off, `dsh plugin --profile web add dsh-telegram@link:/home/panda-nuc/repo/dsh-plugins/dsh-telegram`, restart. dsh-telegram resumes with its untouched `telegram` settings, token and chat bindings.
