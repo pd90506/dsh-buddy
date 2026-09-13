@@ -47,7 +47,7 @@ export const FOLDER_CSS = [
 	`.${c.toggle}:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
 	`.${c.arrow}{transition:transform .15s var(--ds-ease-in-out)}`,
 	`.${c.arrowOpen}{transform:rotate(90deg)}`,
-	`.${c.list}{display:flex;flex-direction:column;max-height:40vh;overflow-y:auto;padding:0 0 4px 12px}`,
+	`.${c.list}{display:flex;flex-direction:column;max-height:40vh;overflow-y:auto;gap:2px;margin-top:4px;padding:0 0 4px 12px}`,
 	`.${c.session}{box-sizing:border-box;cursor:pointer;width:100%;height:32px;flex:none;padding:0 8px;display:flex;align-items:center;gap:6px;border:none;border-radius:8px;background:0 0;color:var(--dsw-alias-label-primary);font-family:inherit;text-align:left}`,
 	`.${c.session}:hover,.${c.session}.${c.selected}{background:var(--dsw-alias-interactive-bg-hover)}`,
 	`.${c.title}{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px;line-height:20px}`,
