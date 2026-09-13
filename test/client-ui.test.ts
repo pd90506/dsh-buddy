@@ -40,15 +40,17 @@ test("the browser half is wrapped in the module-loader factory", async () => {
 	assert.equal(typeof client.apply, "function");
 });
 
-test("the browser half injects slots, locale, connection, layout, sessions, the remote session namespace and the remote credentials namespace", () => {
+test("the browser half injects slots, locale, connection, layout, sessions, the remote session namespace, the remote credentials namespace and the remote workspace namespace", () => {
 	const client = loadClient();
 	// `remote` and `remote.session` are what "New Buddy conversation" needs to
 	// create and configure a session directly against the Remote layer, bypassing
 	// the client Session list. `remote.credentials` is what the Telegram module
-	// writes the bot token through. `inject` is per-fiber rather than
-	// per-registration: one list, declared once, so no registration can mount
-	// half-wired. Every one of these is present in the web shell, so the wait
-	// never becomes a stall.
+	// writes the bot token through. `remote.workspace` is what a new conversation
+	// attaches to before the session is created, so the chat input is never
+	// stuck behind "Choose a workspace to start". `inject` is per-fiber rather
+	// than per-registration: one list, declared once, so no registration can
+	// mount half-wired. Every one of these is present in the web shell, so the
+	// wait never becomes a stall.
 	assert.deepEqual(client.inject, [
 		"slots",
 		"locale",
@@ -58,6 +60,7 @@ test("the browser half injects slots, locale, connection, layout, sessions, the 
 		"remote",
 		"remote.session",
 		"remote.credentials",
+		"remote.workspace",
 	]);
 });
 
@@ -114,6 +117,13 @@ test("every cordis-injected service has its real declaring package in dsh.client
 	// in their own `dsh.client.inject`, exactly as `dsh-telegram` does for the
 	// same pair (`remote`, `remote.credentials`) — already present in this
 	// plugin's manifest, so no new entry was needed there.
+	//
+	// `remote.workspace` follows the same dynamic pattern as `remote.session`:
+	// `@deepseek-ai/dsh-api-workspace-controller`'s own browser client half
+	// (`lib/client.js`) declares `exports.inject = ["remote", "remote.workspace"]`
+	// and mounts `ClientWorkspaceModel` on `ctx.remote.workspace`, so that
+	// package is the real declaring package for this service, exactly as
+	// `dsh-api-session-controller` is for `remote.session`.
 	const client = loadClient();
 	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 		dsh: { client: { inject: string[] } };
@@ -129,6 +139,7 @@ test("every cordis-injected service has its real declaring package in dsh.client
 		remote: "@deepseek-ai/dsh-api-remotes",
 		"remote.session": "@deepseek-ai/dsh-api-session-controller",
 		"remote.credentials": "@deepseek-ai/dsh-api-remotes",
+		"remote.workspace": "@deepseek-ai/dsh-api-workspace-controller",
 	};
 
 	for (const service of client.inject) {

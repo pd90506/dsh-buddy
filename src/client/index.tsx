@@ -51,11 +51,23 @@ const SECTION_ORDER = 27;
  *
  * `connection` carries the RPC caller for this plugin's own `buddyPersona/*`
  * endpoints; `layout` selects the main panel; `sessions` opens a conversation;
- * `remote.session` creates a buddy conversation with its preset and model;
- * `remote.credentials` is what the Telegram module writes the bot token
- * through — `remote` alone carries only `$on`/`$mount`, not the namespace.
+ * `remote.workspace` creates (or adopts) the workspace a new conversation
+ * attaches to; `remote.session` creates a buddy conversation with its preset
+ * and model; `remote.credentials` is what the Telegram module writes the bot
+ * token through — `remote` alone carries only `$on`/`$mount`, not the
+ * namespace.
  */
-export const inject = ["slots", "locale", "connection", "layout", "sessions", "remote", "remote.session", "remote.credentials"];
+export const inject = [
+	"slots",
+	"locale",
+	"connection",
+	"layout",
+	"sessions",
+	"remote",
+	"remote.session",
+	"remote.credentials",
+	"remote.workspace",
+];
 
 const en = {
 	nav: "Buddy",
@@ -265,12 +277,17 @@ export function apply(ctx: any): void {
 	const newConversation = async (): Promise<void> => {
 		const session = ctx.remote?.session;
 		if (session === undefined) throw new Error("remote.session is not mounted");
+		const workspace = ctx.remote?.workspace;
+		if (workspace === undefined) throw new Error("remote.workspace is not mounted");
 		const prefs = (await call("buddyPersona/preferences", {})) as {
 			model: { provider: string; model: string; reasoningEffort: string };
 			conversationCwd: string;
 		};
+		const ws = remoteValue(await workspace.create({ path: prefs.conversationCwd }), "workspace create") as {
+			workspace: { workspaceId: string };
+		};
 		const created = remoteValue(
-			await session.create({ cwd: prefs.conversationCwd, agentPreset: BUDDY_PRESET_ID }),
+			await session.create({ workspaceId: ws.workspace.workspaceId, agentPreset: BUDDY_PRESET_ID }),
 			"session create",
 		) as { sessionId: string };
 		const selection = selectionFromDefault(prefs.model);

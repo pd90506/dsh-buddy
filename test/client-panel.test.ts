@@ -107,9 +107,33 @@ test("the soul module saves only its own field", async () => {
 	assert.deepEqual(write?.payload, { args: { patch: { soul: "a voice" } } });
 });
 
-test("New Buddy conversation creates a buddy-preset session in the conversation cwd, applies the buddy model, and opens it", async () => {
+/** A `remote.workspace` stub whose `create` records its arg and returns a fixed workspace. */
+function workspaceStub(remoteCalls: { method: string; arg: unknown }[]): unknown {
+	return {
+		create: async (arg: unknown) => {
+			remoteCalls.push({ method: "workspace.create", arg });
+			return {
+				ok: true,
+				value: {
+					workspace: {
+						workspaceId: "w-1",
+						path: "/home/u/buddy-workspace",
+						title: "buddy-workspace",
+						sessionIds: [],
+						createdAt: 0,
+						updatedAt: 0,
+					},
+					created: true,
+				},
+			};
+		},
+	};
+}
+
+test("New Buddy conversation creates a workspace, attaches a buddy-preset session to it, applies the buddy model, and opens it", async () => {
 	const remoteCalls: { method: string; arg: unknown }[] = [];
 	const remote = {
+		workspace: workspaceStub(remoteCalls),
 		session: {
 			create: async (arg: unknown) => {
 				remoteCalls.push({ method: "create", arg });
@@ -141,7 +165,8 @@ test("New Buddy conversation creates a buddy-preset session in the conversation 
 	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
 	await settle();
 	assert.deepEqual(remoteCalls, [
-		{ method: "create", arg: { cwd: "/home/u/buddy-workspace", agentPreset: "buddy" } },
+		{ method: "workspace.create", arg: { path: "/home/u/buddy-workspace" } },
+		{ method: "create", arg: { workspaceId: "w-1", agentPreset: "buddy" } },
 		{ method: "selectModel", arg: { sessionId: "s-new", provider: "p", model: "m" } },
 	]);
 	assert.deepEqual(panel.actions.slice(-3), [
@@ -154,6 +179,12 @@ test("New Buddy conversation creates a buddy-preset session in the conversation 
 test("without a buddy model New Buddy conversation does not pick a model", async () => {
 	const remoteCalls: string[] = [];
 	const remote = {
+		workspace: {
+			create: async () => ({
+				ok: true,
+				value: { workspace: { workspaceId: "w-1", path: "/home/u/buddy-workspace", title: "t", sessionIds: [], createdAt: 0, updatedAt: 0 }, created: true },
+			}),
+		},
 		session: {
 			create: async () => {
 				remoteCalls.push("create");
@@ -191,6 +222,12 @@ test("without a buddy model New Buddy conversation does not pick a model", async
 
 test("a failed model selection still opens the created session, and reports the error", async () => {
 	const remote = {
+		workspace: {
+			create: async () => ({
+				ok: true,
+				value: { workspace: { workspaceId: "w-1", path: "/home/u/buddy-workspace", title: "t", sessionIds: [], createdAt: 0, updatedAt: 0 }, created: true },
+			}),
+		},
 		session: {
 			create: async () => ({ ok: true, value: { sessionId: "s-new" } }),
 			selectModel: async () => ({ ok: false, error: { message: "bad model" } }),
@@ -327,7 +364,15 @@ test("the telegram token is written through remote.credentials and never read ba
 });
 
 test("a failed create is shown and nothing is opened", async () => {
-	const remote = { session: { create: async () => ({ ok: false, error: { message: "no workspace" } }), selectModel: async () => ({ ok: true }) } };
+	const remote = {
+		workspace: {
+			create: async () => ({
+				ok: true,
+				value: { workspace: { workspaceId: "w-1", path: "/home/u/buddy-workspace", title: "t", sessionIds: [], createdAt: 0, updatedAt: 0 }, created: true },
+			}),
+		},
+		session: { create: async () => ({ ok: false, error: { message: "no workspace" } }), selectModel: async () => ({ ok: true }) },
+	};
 	const panel = mountPanel(
 		async (endpoint) =>
 			endpoint === "buddyPersona/preferences"
@@ -344,5 +389,37 @@ test("a failed create is shown and nothing is opened", async () => {
 	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
 	await settle();
 	assert.ok(texts(panel.tree()).includes("no workspace"));
+	assert.ok(!panel.actions.some((action) => action.service === "sessions.open"));
+});
+
+test("a failed workspace create is shown, and no session is created or opened", async () => {
+	const sessionCalls: string[] = [];
+	const remote = {
+		workspace: { create: async () => ({ ok: false, error: { message: "bad path" } }) },
+		session: {
+			create: async () => {
+				sessionCalls.push("create");
+				throw new Error("session create must not run when the workspace create failed");
+			},
+			selectModel: async () => ({ ok: true, value: {} }),
+		},
+	};
+	const panel = mountPanel(
+		async (endpoint) =>
+			endpoint === "buddyPersona/preferences"
+				? {
+						ok: true,
+						// Not under test here; hidden so the Telegram module never mounts
+						// and needs no endpoint stub of its own.
+						value: { ...PREFS, panel: { sections: { ...PREFS.panel.sections, model: false, telegram: false } } },
+					}
+				: { ok: true, value: { soul: "", agents: "", home: "/h" } },
+		remote,
+	);
+	await settle();
+	(button(panel.tree(), "settings.buddy:newConversation").props["onClick"] as () => void)();
+	await settle();
+	assert.ok(texts(panel.tree()).includes("bad path"));
+	assert.deepEqual(sessionCalls, []);
 	assert.ok(!panel.actions.some((action) => action.service === "sessions.open"));
 });
