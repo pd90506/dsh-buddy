@@ -212,7 +212,7 @@ export function contextStub(
 			},
 		},
 		layout: options.layout ?? { selectPanel: () => {} },
-		sessions: options.sessions ?? {},
+		sessions: options.sessions ?? { list: { getSnapshot: () => ({}), subscribe: () => () => undefined } },
 		remote: options.remote,
 	};
 	return { ctx, registrations, injected, effects, dictionaries };

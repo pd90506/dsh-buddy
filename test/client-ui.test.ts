@@ -27,22 +27,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { MAIN_PANEL_KEY } from "../src/index.ts";
 import { createCall } from "../src/client/call.ts";
-import {
-	bundleText,
-	clientSourceText,
-	loadClient,
-	contextStub,
-	createRenderer,
-	type StubElement,
-	type SectionOptions,
-	type MainPanelOptions,
-} from "./support/client-harness.ts";
-
-/** Node's `require`, used as the default module resolver for a stubbed renderer. */
-const nodeRequire = createRequire(import.meta.url);
+import { bundleText, clientSourceText, loadClient, contextStub, type SectionOptions } from "./support/client-harness.ts";
 
 test("the browser half is wrapped in the module-loader factory", async () => {
 	const text = await bundleText();
@@ -165,11 +152,10 @@ test("the settings tab registers into settings.section with a stable id, order a
 	const { ctx, registrations, injected } = contextStub();
 	client.apply(ctx);
 
-	// Task 8 adds the "main" and "sidebar.panellist" pair alongside task 7's
-	// settings tab; those are asserted separately below, so here only the count
-	// and the settings.section entry itself are pinned.
-	assert.deepEqual(injected, ["settings.section", "main", "sidebar.panellist"]);
-	assert.equal(registrations.length, 3, "settings.section, main and sidebar.panellist — nothing else");
+	// The "main" and "sidebar.footer.action" pair is asserted separately below,
+	// so here only the count and the settings.section entry itself are pinned.
+	assert.deepEqual(injected, ["settings.section", "main", "sidebar.footer.action"]);
+	assert.equal(registrations.length, 3, "settings.section, main and sidebar.footer.action — nothing else");
 	const registration = registrations.find((r) => r.options.name === "settings.section");
 	assert.ok(registration !== undefined);
 	const options = registration.options as SectionOptions;
@@ -182,38 +168,25 @@ test("the settings tab registers into settings.section with a stable id, order a
 	assert.equal(typeof registration.component, "function");
 });
 
-test("the main panel and the sidebar button are registered as one pair, addressed by the shared key", () => {
+test("the browser half registers the settings tab, the main panel and the sidebar folder — no panellist button", () => {
 	const client = loadClient();
-	const { ctx, registrations } = contextStub();
+	const { ctx, registrations, injected } = contextStub();
 	client.apply(ctx);
-
-	const main = registrations.find((r) => r.options.name === "main");
-	assert.ok(main !== undefined, "the generator-shaped main registration must actually run, not just be injected");
-	assert.equal((main.options as MainPanelOptions).key, MAIN_PANEL_KEY);
-	assert.equal(typeof main.component, "function");
-
-	const button = registrations.find((r) => r.options.name === "sidebar.panellist");
-	assert.ok(button !== undefined);
-	const buttonOptions = button.options as SectionOptions;
-	// This is the pairing itself: the sidebar addresses the main panel by this
-	// same id, so a drift here is a button that throws on click in the browser.
-	assert.equal(buttonOptions.id, MAIN_PANEL_KEY);
-	assert.equal((main.options as MainPanelOptions).key, buttonOptions.id, "the button's id and the panel's key must be the same string");
-	// Left-column render order is panellist → workspaces → settings → footer, so
-	// any order here lands above Settings; this only pins it away from 0/undefined.
-	assert.equal(buttonOptions.order, 10);
-	assert.equal(buttonOptions.locale, "settings.buddy");
-	assert.equal(buttonOptions.label(), "settings.buddy:nav", "the label must resolve through the bound namespace");
-	assert.equal(typeof button.component, "function");
+	assert.deepEqual(injected, ["settings.section", "main", "sidebar.footer.action"]);
+	assert.equal(registrations.length, 3);
+	const folder = registrations.find((r) => r.options.name === "sidebar.footer.action");
+	assert.ok(folder !== undefined);
+	assert.equal((folder.options as { id: string }).id, "buddy-folder");
+	assert.equal((folder.options as { order: number }).order, -10);
+	assert.ok(!registrations.some((r) => r.options.name === "sidebar.panellist"));
 });
 
 test("no registration happens when the shell has none of the matching slots", () => {
 	const client = loadClient();
 	const { ctx, registrations, injected } = contextStub({ runSlotCallback: false });
 	client.apply(ctx);
-
-	assert.deepEqual(injected, ["settings.section", "main", "sidebar.panellist"]);
-	assert.equal(registrations.length, 0, "every registration must be gated on slots.inject, not unconditional");
+	assert.deepEqual(injected, ["settings.section", "main", "sidebar.footer.action"]);
+	assert.equal(registrations.length, 0);
 });
 
 test("both dictionaries are registered, as a reversible effect", () => {
@@ -369,24 +342,3 @@ test("an envelope that is not a success throws even when it carries no error", a
 	}
 });
 
-test("the sidebar icon defaults to size 16 and honours a supplied size", () => {
-	const renderer = createRenderer();
-	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
-	const { ctx, registrations } = contextStub();
-	client.apply(ctx);
-
-	const registration = registrations.find((r) => r.options.name === "sidebar.panellist");
-	assert.ok(registration !== undefined);
-	const Icon = registration.component as (props: { size?: number }) => StubElement;
-
-	assert.equal(Icon({}).props["width"], 16, "the sidebar row's default glyph size is 16");
-	assert.equal(Icon({ size: 24 }).props["width"], 24, "a supplied size must be honoured, not ignored");
-});
-
-test("the button and the panel are both registered — neither alone", async () => {
-	// A sidebar row without a main entry throws on click, because
-	// ctx.layout.selectPanel rejects a key the main slot never registered.
-	const built = await bundleText();
-	assert.match(built, /sidebar\.panellist/);
-	assert.match(built, /"main"|'main'/);
-});

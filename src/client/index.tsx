@@ -1,33 +1,34 @@
 /**
  * Browser half of dsh-buddy.
  *
- * Task 7 contributes the Settings → Buddy tab. Task 8 appends the remaining two
- * registrations, and those two are a pair that must not be split:
- * `sidebar.panellist` contributes the button, `main` contributes the panel it
- * selects, and the sidebar addresses the panel by the button's own list id. A
- * button without a panel throws on click, so both are registered here or neither
- * is — which is why {@link MAIN_PANEL_KEY} is imported from the shared constants
- * module instead of being restated on either side.
+ * Two registrations are a pair that must not be split: the sidebar folder's
+ * title (`sidebar.footer.action`) selects the main panel (`main`), and the
+ * sidebar addresses it by the shared panel key. A title without a panel throws
+ * on click, so both are registered here or neither is — which is why
+ * {@link MAIN_PANEL_KEY} is imported from the shared constants module instead
+ * of being restated on either side.
  *
- * Task 11 turns the main panel into a module table (Soul, Agents, New Buddy
- * conversation) and slims the Settings tab down to surfaces about Buddy rather
- * than Buddy's own persona.
+ * The main panel is a module table (Soul, Agents, Model, Telegram, New Buddy
+ * conversation); the Settings tab surfaces Buddy's own settings, not the
+ * conversations, which the sidebar folder lists directly above Settings.
  * @module dsh-buddy/client
  */
-// Imported, never restated: the button (sidebar.panellist) and the panel it
-// selects (main) must address the same string, and one shared constant is the
-// only way they cannot drift apart in a later edit. Bundling inlines the value
-// either way, so no assertion against the built artifact can tell a hand-
-// restated constant from the shared one — which is why the "one constant" rule
-// is pinned by a source-text assertion in `test/client-ui.test.ts` instead.
+// Imported, never restated: the sidebar folder (sidebar.footer.action) and the
+// panel it selects (main) must address the same string, and one shared
+// constant is the only way they cannot drift apart in a later edit. Bundling
+// inlines the value either way, so no assertion against the built artifact can
+// tell a hand-restated constant from the shared one — which is why the "one
+// constant" rule is pinned by a source-text assertion in
+// `test/client-ui.test.ts` instead.
 import { MAIN_PANEL_KEY, BUDDY_PRESET_ID } from "../index.ts";
 import { selectionFromDefault } from "../model-selection.ts";
 import { TELEGRAM_TOKEN_KEY } from "../telegram/credential-key.ts";
 import { createCall } from "./call.ts";
 import { createDocumentModule } from "./document-module.tsx";
+import { createBuddyFolder } from "./folder.tsx";
 import { createModelModule } from "./model-module.tsx";
 import type { PanelModule } from "./modules.ts";
-import { createBuddyIcon, createBuddyPanel } from "./panel.tsx";
+import { createBuddyPanel } from "./panel.tsx";
 import { createBuddySettingsSection } from "./settings.tsx";
 import { createTelegramModule } from "./telegram-module.tsx";
 
@@ -292,7 +293,6 @@ export function apply(ctx: any): void {
 	};
 
 	const BuddyPanel = createBuddyPanel({ call, t, modules, newConversation });
-	const BuddyIcon = createBuddyIcon();
 
 	// One shared constant for both registrations, so the id and the key cannot
 	// drift apart in a later edit.
@@ -300,10 +300,43 @@ export function apply(ctx: any): void {
 		yield ctx.slots.register({ name: "main", key: MAIN_PANEL_KEY }, BuddyPanel);
 	});
 
-	ctx.slots.inject("sidebar.panellist", () =>
-		ctx.slots.register(
-			{ name: "sidebar.panellist", id: MAIN_PANEL_KEY, order: 10, label: () => t("nav"), locale: NS },
-			BuddyIcon,
-		),
+	const EXPANDED_KEY = "dsh-buddy.folder.expanded";
+	const BuddyFolder = createBuddyFolder({
+		call,
+		t,
+		openPanel: () => ctx.layout.selectPanel(MAIN_PANEL_KEY),
+		openSession,
+		list: ctx.sessions.list,
+		expanded: {
+			// Per-browser convenience only; storage may be absent or throw.
+			read: () => {
+				try {
+					return globalThis.localStorage?.getItem(EXPANDED_KEY) === "1";
+				} catch {
+					return false;
+				}
+			},
+			write: (value) => {
+				try {
+					globalThis.localStorage?.setItem(EXPANDED_KEY, value ? "1" : "0");
+				} catch {
+					// ignored
+				}
+			},
+		},
+		// Coalesces multiple listener notifications fired within the same tick
+		// (e.g. every effect re-subscription still live at once) into a single
+		// reload rather than one per listener; not a real UX debounce window —
+		// `test/client-folder.test.ts` drives this end to end with only real
+		// (non-fake) timers, which is why this stays at 0 rather than growing
+		// into a user-noticeable delay.
+		reloadDelayMs: 0,
+	});
+
+	// Directly above Settings: `sidebar.footer.action` renders in the foot area
+	// before `sidebar.settings`. Negative order sorts it ahead of ui-cordis's
+	// `cordis-panel` (order 0), which renders nothing unless it has content.
+	ctx.slots.inject("sidebar.footer.action", () =>
+		ctx.slots.register({ name: "sidebar.footer.action", id: "buddy-folder", order: -10, locale: NS }, BuddyFolder),
 	);
 }

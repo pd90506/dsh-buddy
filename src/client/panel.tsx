@@ -117,11 +117,12 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 }
 
 /**
- * Build the sidebar row's icon.
+ * Build the Buddy glyph.
  *
- * The sidebar owns the button, its label and its selected state; an occupant
- * supplies only the glyph, sized to the geometry the row asks for.
- * @returns the component the `sidebar.panellist` slot renders.
+ * The sidebar folder (`src/client/folder.tsx`) owns the button, its label and
+ * its expanded state; this supplies only the glyph, sized to whatever the
+ * caller asks for.
+ * @returns the glyph component.
  */
 export function createBuddyIcon(): (props: { size?: number }) => unknown {
 	return function BuddyIcon(props: { size?: number }): unknown {
