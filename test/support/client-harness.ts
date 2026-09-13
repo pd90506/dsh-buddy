@@ -151,6 +151,11 @@ export function contextStub(
 	const injected: string[] = [];
 	const effects: string[] = [];
 	const dictionaries: Dictionary[] = [];
+	// Keyed by namespace, holding the `en` half of whatever was last registered
+	// there — just enough for `bind` to answer a function-valued key (see below)
+	// without turning every string key's synthetic label into the real copy,
+	// which every id/order/label test in this file depends on staying literal.
+	const registeredEnglish = new Map<string, Record<string, unknown>>();
 	let depth = 0;
 
 	const ctx: Record<string, unknown> = {
@@ -166,10 +171,21 @@ export function contextStub(
 		},
 		locale: {
 			// A label built from the namespace proves it resolved through this
-			// plugin's own bound lookup rather than a bare global key.
-			bind: (ns: string) => (key: string) => `${ns}:${key}`,
+			// plugin's own bound lookup rather than a bare global key — for an
+			// ordinary string-valued key. A function-valued key (e.g.
+			// `telegramStatusSessions`) cannot be represented that way at all: the
+			// component calls what `t(key)` returns, so this falls back to the real
+			// registered function, looked up lazily (register always runs before
+			// any render reads it, even though `bind` itself is called first in
+			// `apply()`).
+			bind: (ns: string) => (key: string) => {
+				const value = registeredEnglish.get(ns)?.[key];
+				return typeof value === "function" ? value : `${ns}:${key}`;
+			},
 			register: (ns: string, dictionary: Record<string, unknown>) => {
 				dictionaries.push({ ns, dictionary, insideEffect: depth > 0 });
+				const english = (dictionary as { en?: Record<string, unknown> }).en;
+				if (english !== undefined) registeredEnglish.set(ns, english);
 				return () => {};
 			},
 		},

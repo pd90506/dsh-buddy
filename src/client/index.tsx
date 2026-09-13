@@ -22,11 +22,14 @@
 // is pinned by a source-text assertion in `test/client-ui.test.ts` instead.
 import { MAIN_PANEL_KEY, BUDDY_PRESET_ID } from "../index.ts";
 import { selectionFromDefault } from "../model-selection.ts";
+import { TELEGRAM_TOKEN_KEY } from "../telegram/credential-key.ts";
 import { createCall } from "./call.ts";
 import { createDocumentModule } from "./document-module.tsx";
+import { createModelModule } from "./model-module.tsx";
 import type { PanelModule } from "./modules.ts";
 import { createBuddyIcon, createBuddyPanel } from "./panel.tsx";
 import { createBuddySettingsSection } from "./settings.tsx";
+import { createTelegramModule } from "./telegram-module.tsx";
 
 /** Dictionary namespace owned by this plugin. */
 const NS = "settings.buddy";
@@ -47,9 +50,11 @@ const SECTION_ORDER = 27;
  *
  * `connection` carries the RPC caller for this plugin's own `buddyPersona/*`
  * endpoints; `layout` selects the main panel; `sessions` opens a conversation;
- * `remote.session` creates a buddy conversation with its preset and model.
+ * `remote.session` creates a buddy conversation with its preset and model;
+ * `remote.credentials` is what the Telegram module writes the bot token
+ * through — `remote` alone carries only `$on`/`$mount`, not the namespace.
  */
-export const inject = ["slots", "locale", "connection", "layout", "sessions", "remote", "remote.session"];
+export const inject = ["slots", "locale", "connection", "layout", "sessions", "remote", "remote.session", "remote.credentials"];
 
 const en = {
 	nav: "Buddy",
@@ -71,6 +76,55 @@ const en = {
 	fromTelegram: "Telegram",
 	expand: "Show conversations",
 	collapse: "Hide conversations",
+	modelHint: "Default model for new Buddy conversations. A chat's own /model choice still wins.",
+	modelFollow: "Follow the global default model",
+	modelProvider: "Provider",
+	modelModel: "Model",
+	modelEffort: "Reasoning effort",
+	modelEffortDefault: "Model default",
+	modelChoose: "Choose…",
+	telegramTokenTitle: "Bot token",
+	telegramTokenHint: "From @BotFather. Stored in your harness credential file and never shown again once saved.",
+	telegramTokenConfigured: "Token configured",
+	telegramTokenMissing: "No token yet",
+	telegramTokenWritable: "editable",
+	telegramTokenReadOnly: "read-only",
+	telegramTokenPlaceholder: "123456:ABC-DEF…",
+	tokenSave: "Save token",
+	tokenClear: "Clear token",
+	telegramSave: "Save",
+	telegramSaved: "Saved.",
+	telegramCleared: "Token cleared.",
+	telegramConfigTitle: "Configuration",
+	telegramOwnerLabel: "Owner user id",
+	telegramOwnerHint: "The only Telegram account allowed to use this bot. Message @userinfobot to find yours.",
+	telegramCwdLabel: "Working directory",
+	telegramCwdHint: "Where Buddy's Telegram conversations run. Created on first use if it does not exist.",
+	telegramPresetLabel: "Permission level",
+	telegramPresetHint: "Telegram sessions ask for approval before risky calls, and answer with buttons in the chat.",
+	telegramPresetReadOnly: "Read only",
+	telegramPresetWorkspace: "Workspace write",
+	telegramPresetFull: "Full access",
+	telegramMarkdownLabel: "Native formatting",
+	telegramMarkdownHint:
+		"Render the agent's Markdown as Telegram formatting: bold headings, lists, quotes, links, tables, language-tagged code blocks.",
+	telegramMediaLabel: "Send media back",
+	telegramMediaHint:
+		"Images and files the agent produces arrive in the chat. Files are only ever read from inside the session's working directory.",
+	telegramMediaOff: "Text only",
+	telegramMediaPresented: "Delivered files only",
+	telegramMediaAll: "Generated images and delivered files",
+	telegramEnabledLabel: "Enable the bot",
+	telegramEnabledHint: "Start polling while a token is configured.",
+	telegramStatusTitle: "Status",
+	telegramStatusOff: "Stopped",
+	telegramStatusStarting: "Starting…",
+	telegramStatusRunning: "Running",
+	telegramStatusError: "Error",
+	telegramStatusSessions: (count: number) => `${String(count)} session(s)`,
+	telegramLoading: "Loading…",
+	telegramRetry: "Retry",
+	telegramUnsaved: "You have unsaved changes.",
 };
 
 const zh: typeof en = {
@@ -93,6 +147,53 @@ const zh: typeof en = {
 	fromTelegram: "Telegram",
 	expand: "展开对话",
 	collapse: "收起对话",
+	modelHint: "新建 Buddy 对话默认使用的模型。聊天里用 /model 单独选的模型仍然优先。",
+	modelFollow: "跟随全局默认模型",
+	modelProvider: "Provider",
+	modelModel: "模型",
+	modelEffort: "推理强度",
+	modelEffortDefault: "模型默认",
+	modelChoose: "请选择…",
+	telegramTokenTitle: "Bot token",
+	telegramTokenHint: "从 @BotFather 拿。存在 harness 的凭据文件里，保存后不再回显。",
+	telegramTokenConfigured: "已配置 token",
+	telegramTokenMissing: "还没有 token",
+	telegramTokenWritable: "可修改",
+	telegramTokenReadOnly: "只读",
+	telegramTokenPlaceholder: "123456:ABC-DEF…",
+	tokenSave: "保存 token",
+	tokenClear: "清除 token",
+	telegramSave: "保存",
+	telegramSaved: "已保存。",
+	telegramCleared: "token 已清除。",
+	telegramConfigTitle: "配置",
+	telegramOwnerLabel: "Owner user id",
+	telegramOwnerHint: "只有这个 Telegram 账号能用这个 bot。给 @userinfobot 发条消息就能查到自己的 id。",
+	telegramCwdLabel: "工作目录",
+	telegramCwdHint: "Buddy 的 Telegram 对话在这里跑。目录不存在会在首次使用时创建。",
+	telegramPresetLabel: "权限级别",
+	telegramPresetHint: "Telegram 会话在危险操作前会请求许可，在聊天里用按钮回答。",
+	telegramPresetReadOnly: "只读",
+	telegramPresetWorkspace: "工作区可写",
+	telegramPresetFull: "完全访问",
+	telegramMarkdownLabel: "原生格式渲染",
+	telegramMarkdownHint: "把 agent 的 Markdown 渲染成 Telegram 原生格式：标题加粗、列表、引用、链接、表格、带语言标记的代码块。",
+	telegramMediaLabel: "回传图片与文件",
+	telegramMediaHint: "agent 产出的图片和文件直接出现在聊天里。文件只会从会话的工作目录内部读取。",
+	telegramMediaOff: "只发文字",
+	telegramMediaPresented: "只回传明确交付的文件",
+	telegramMediaAll: "工具生成的图片与交付的文件",
+	telegramEnabledLabel: "启用 bot",
+	telegramEnabledHint: "填了 token 且打开时会开始轮询。",
+	telegramStatusTitle: "状态",
+	telegramStatusOff: "已停止",
+	telegramStatusStarting: "启动中…",
+	telegramStatusRunning: "运行中",
+	telegramStatusError: "出错",
+	telegramStatusSessions: (count: number) => `${String(count)} 条会话`,
+	telegramLoading: "载入中…",
+	telegramRetry: "重试",
+	telegramUnsaved: "有改动还没保存。",
 };
 
 /**
@@ -117,21 +218,47 @@ export function apply(ctx: any): void {
 		),
 	);
 
+	/** Unwrap a `remote.*` RemoteResult. */
+	const remoteValue = (result: any, what: string): any => {
+		if (result?.ok !== true) throw new Error(result?.error?.message ?? `${what} failed`);
+		return result.value;
+	};
+
 	const modules: PanelModule<() => unknown>[] = [
 		{ id: "soul", order: 10, titleKey: "soulTitle", Component: createDocumentModule({ call, t }, "soul") },
 		{ id: "agents", order: 20, titleKey: "agentsTitle", Component: createDocumentModule({ call, t }, "agents") },
+		{
+			id: "model",
+			order: 30,
+			titleKey: "modelTitle",
+			Component: createModelModule({
+				call,
+				t,
+				catalog: async () => remoteValue(await ctx.remote.session.modelCatalog(), "model catalog"),
+			}),
+		},
+		{
+			id: "telegram",
+			order: 40,
+			titleKey: "telegramTitle",
+			Component: createTelegramModule({
+				call,
+				t,
+				writeToken: async (value) => {
+					const credentials = ctx.remote?.credentials;
+					if (credentials === undefined) throw new Error("remote.credentials is not mounted");
+					const result =
+						value === undefined ? await credentials.unset(TELEGRAM_TOKEN_KEY) : await credentials.set(TELEGRAM_TOKEN_KEY, value);
+					if (result?.ok !== true) throw new Error(result?.error?.message ?? "credential write failed");
+				},
+			}),
+		},
 	];
 
 	const openSession = (sessionId: string): void => {
 		ctx.sessions.open(sessionId);
 		// null returns the centre column to the Conversation.
 		ctx.layout.selectPanel(null);
-	};
-
-	/** Unwrap a `remote.*` RemoteResult. */
-	const remoteValue = (result: any, what: string): any => {
-		if (result?.ok !== true) throw new Error(result?.error?.message ?? `${what} failed`);
-		return result.value;
 	};
 
 	const newConversation = async (): Promise<void> => {

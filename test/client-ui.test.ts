@@ -53,14 +53,25 @@ test("the browser half is wrapped in the module-loader factory", async () => {
 	assert.equal(typeof client.apply, "function");
 });
 
-test("the browser half injects slots, locale, connection, layout, sessions and the remote session namespace", () => {
+test("the browser half injects slots, locale, connection, layout, sessions, the remote session namespace and the remote credentials namespace", () => {
 	const client = loadClient();
 	// `remote` and `remote.session` are what "New Buddy conversation" needs to
 	// create and configure a session directly against the Remote layer, bypassing
-	// the client Session list. `inject` is per-fiber rather than per-registration:
-	// one list, declared once, so no registration can mount half-wired. Every one
-	// of these is present in the web shell, so the wait never becomes a stall.
-	assert.deepEqual(client.inject, ["slots", "locale", "connection", "layout", "sessions", "remote", "remote.session"]);
+	// the client Session list. `remote.credentials` is what the Telegram module
+	// writes the bot token through. `inject` is per-fiber rather than
+	// per-registration: one list, declared once, so no registration can mount
+	// half-wired. Every one of these is present in the web shell, so the wait
+	// never becomes a stall.
+	assert.deepEqual(client.inject, [
+		"slots",
+		"locale",
+		"connection",
+		"layout",
+		"sessions",
+		"remote",
+		"remote.session",
+		"remote.credentials",
+	]);
 });
 
 test("every cordis-injected service has its real declaring package in dsh.client.inject, with no exemption", async () => {
@@ -103,6 +114,19 @@ test("every cordis-injected service has its real declaring package in dsh.client
 	// package's own doc comment: "Host service backing the generated
 	// `ctx.remote.session` namespace"), and that package's own client half injects
 	// `remote.session` the same way (its `lib/types/client/index.js`).
+	//
+	// `remote.credentials` is likewise dynamic: `@deepseek-ai/dsh-api-settings-controller`'s
+	// `CredentialsController` carries the identical doc-comment pattern ("Host
+	// service backing the generated `ctx.remote.credentials` namespace"), but —
+	// unlike the session namespace — that host package ships no client half at
+	// all, so it is never itself a `dsh.client.inject` entry. The declaring
+	// package on the browser side is `@deepseek-ai/dsh-api-remotes`: both
+	// first-party client packages that actually inject `remote.credentials`
+	// (`@deepseek-ai/dsh-client-ui-settings-plugins`,
+	// `@deepseek-ai/dsh-client-ui-settings-models`) list only `dsh-api-remotes`
+	// in their own `dsh.client.inject`, exactly as `dsh-telegram` does for the
+	// same pair (`remote`, `remote.credentials`) — already present in this
+	// plugin's manifest, so no new entry was needed there.
 	const client = loadClient();
 	const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
 		dsh: { client: { inject: string[] } };
@@ -117,6 +141,7 @@ test("every cordis-injected service has its real declaring package in dsh.client
 		sessions: "@deepseek-ai/dsh-api-session-controller",
 		remote: "@deepseek-ai/dsh-api-remotes",
 		"remote.session": "@deepseek-ai/dsh-api-session-controller",
+		"remote.credentials": "@deepseek-ai/dsh-api-remotes",
 	};
 
 	for (const service of client.inject) {
@@ -223,10 +248,63 @@ test("both dictionaries are registered, as a reversible effect", () => {
 		"homeLabel",
 		"settingsHint",
 		"sectionsTitle",
+		// Task 12: the Model module.
+		"modelHint",
+		"modelFollow",
+		"modelProvider",
+		"modelModel",
+		"modelEffort",
+		"modelEffortDefault",
+		"modelChoose",
+		// Task 12: the Telegram module. `telegramStatusSessions` is deliberately
+		// excluded from this loop — it is a function, not a string — but it is
+		// still covered by the `Object.keys(...).sort()` comparison above, which
+		// is what actually keeps `en` and `zh` in step for a function-valued key.
+		"telegramTokenTitle",
+		"telegramTokenHint",
+		"telegramTokenConfigured",
+		"telegramTokenMissing",
+		"telegramTokenWritable",
+		"telegramTokenReadOnly",
+		"telegramTokenPlaceholder",
+		"tokenSave",
+		"tokenClear",
+		"telegramSave",
+		"telegramSaved",
+		"telegramCleared",
+		"telegramConfigTitle",
+		"telegramOwnerLabel",
+		"telegramOwnerHint",
+		"telegramCwdLabel",
+		"telegramCwdHint",
+		"telegramPresetLabel",
+		"telegramPresetHint",
+		"telegramPresetReadOnly",
+		"telegramPresetWorkspace",
+		"telegramPresetFull",
+		"telegramMarkdownLabel",
+		"telegramMarkdownHint",
+		"telegramMediaLabel",
+		"telegramMediaHint",
+		"telegramMediaOff",
+		"telegramMediaPresented",
+		"telegramMediaAll",
+		"telegramEnabledLabel",
+		"telegramEnabledHint",
+		"telegramStatusTitle",
+		"telegramStatusOff",
+		"telegramStatusStarting",
+		"telegramStatusRunning",
+		"telegramStatusError",
+		"telegramLoading",
+		"telegramRetry",
+		"telegramUnsaved",
 	]) {
 		assert.equal(typeof english[key], "string", `en.${key} is used by the panel or the settings tab`);
 		assert.equal(typeof chinese[key], "string", `zh.${key} is used by the panel or the settings tab`);
 	}
+	assert.equal(typeof english["telegramStatusSessions"], "function");
+	assert.equal(typeof chinese["telegramStatusSessions"], "function");
 });
 
 test("the browser half takes the shared panel key from src/index.ts and never restates it", async () => {
