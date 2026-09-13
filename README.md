@@ -14,7 +14,7 @@ Phase 1 is a walking skeleton, and it is **finished**: all eleven tasks have lan
 - the browser half: the **Settings → Buddy** tab, the sidebar button, and the main panel it selects, listing buddy conversations and handing off to the shipped conversation view;
 - the `buddy` agent preset (`assets/preset/`) — the `standard` preset's full toolset plus a persona row whose prefix is `{{buddy_soul}}`, which is what actually carries the authored voice to the model.
 
-Memory, skill evolution, scheduler, board and Telegram are later phases with their own plans; nothing here starts them because an interface looks ready.
+Memory, skill evolution, scheduler and board are later phases with their own plans; nothing here starts them because an interface looks ready.
 
 ### Two things worth knowing before you touch this
 
@@ -23,16 +23,17 @@ Memory, skill evolution, scheduler, board and Telegram are later phases with the
 
 ## Architecture
 
-One package, three cordis plugins, one bundle.
+One package, four cordis plugins (three working rows plus the anchor row), one bundle.
 
 | Unit | Kind | Responsibility |
 | --- | --- | --- |
 | `dsh-buddy/store` | host row | Resolves the buddy home, opens the `buddy` storage domain, publishes `ctx.buddyStore`, and installs the shipped `buddy` agent preset under the harness home if none exists yet. Hard-injects `storageDomain`; reads `settings` through a scoped injection so it still boots without a settings plane. |
-| `dsh-buddy/persona` | host row | Holds the persona in memory, registers the `buddy_soul` prompt variable, serves the `buddyPersona/*` typert endpoints. Hard-injects `buddyStore`, `typert`, `systemPrompt`; reads `sessionQuery` softly, per request. |
-| `dsh-buddy/client` | browser half | The Settings → Buddy tab, the sidebar button, and the main panel it selects (buddy conversations, opened in the shipped conversation view). Reaches the host only over `rpc.call('/api', 'buddyPersona/…')`. |
+| `dsh-buddy/persona` | host row | Holds the persona in memory, registers the `buddy_soul` prompt variable, serves the `buddyPersona/*` typert endpoints (`persona`, `updatePersona`, `sessions`, `preferences`, `updatePreferences`). Hard-injects `buddyStore`, `typert`, `systemPrompt`; reads `sessionQuery` softly, per request. |
+| `dsh-buddy/telegram` | host row | Absorbed from dsh-telegram: the Telegram bridge, bound to buddy sessions. Settings namespace `buddy-telegram`, storage domain `buddy_telegram`, service/typert `buddyTelegram`. Hard-injects `typert`, `storageDomain`, `buddyStore`; everything else (`settings`, `credentials`, `agents`, …) is soft. Idles until enabled with a token, and refuses to poll while a still-mounted, still-enabled `dsh-telegram` row holds the same bot. |
+| `dsh-buddy/client` | browser half | The Settings → Buddy tab (module visibility and the buddy home path), the `sidebar.footer.action` Buddy folder (opens the main panel, lists conversations), and the main panel itself — a module table (Soul, Agents, Model, Telegram). Reaches the host only over `rpc.call('/api', 'buddyPersona/…')` plus the platform's own `remote.session` / `remote.credentials`. |
 | `buddy` agent preset | preset (`assets/preset/`) | Copied from the shipped `standard` preset, plus a persona row whose prefix is `{{buddy_soul}}`. Installed to `~/.dsh/.agent-presets/buddy/` on first boot; this is the only thing that puts the authored voice in front of a model. |
 
-The two host rows are inserted by `cordis.patch.yml` and are deliberately separate: each has its own effect scope, so a failure in one does not take the other down, and either can be disabled from a profile's own patch without touching code. The browser half reaches the boot graph through the package's `dsh.client` declaration, which the harness only reads for a row named exactly `dsh-buddy` — hence a third, empty `buddy-client` row that registers nothing.
+The three host rows are inserted by `cordis.patch.yml` and are deliberately separate: each has its own effect scope, so a failure in one does not take the others down, and any of them can be disabled from a profile's own patch without touching code. The browser half reaches the boot graph through the package's `dsh.client` declaration, which the harness only reads for a row named exactly `dsh-buddy` — hence a fourth, empty `buddy-client` row that registers nothing.
 
 ## Where data lives
 
@@ -46,12 +47,16 @@ Three planes, and the split is load-bearing:
 
 Authored content stays as ordinary Markdown on purpose: self-evolution edits it with plain file tools, and files stay greppable, diffable and backup-able. `SOUL.md` and `AGENTS.md` are two files rather than one because only the voice reaches the prompt variable — merging them would push operating rules into `{{buddy_soul}}`.
 
+## Telegram
+
+Configured from the **Telegram** module in the Buddy main panel, not from a separate settings tab: the bot token, owner id, working directory, permission level, Markdown rendering and media delivery all live there. The bot token is shared with the standalone `dsh-telegram` plugin (same credential key), so the two cannot run at once — Buddy will not poll while `dsh-telegram` is still installed in the profile and enabled, and its Telegram module says so instead of failing silently with a 409 from Telegram's own API.
+
 ## Development
 
 ```bash
-npm run build       # esbuild → lib/{index,store,persona}.js (ESM) + lib/client.js (browser factory)
+npm run build       # esbuild → lib/{index,store,persona,telegram}.js (ESM) + lib/client.js (browser factory)
 npm run typecheck   # tsc --noEmit
-npm test            # pretest builds first, then node --test test/*.test.ts
+npm test            # pretest builds first, then node --test test/*.test.ts test/telegram/*.test.ts
 npm run check       # typecheck + build + test — the gate before any commit
 ```
 

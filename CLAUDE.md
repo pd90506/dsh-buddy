@@ -10,9 +10,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-npm run build       # esbuild → lib/{index,store,persona}.js (ESM) + lib/client.js (browser factory)
+npm run build       # esbuild → lib/{index,store,persona,telegram}.js (ESM) + lib/client.js (browser factory)
 npm run typecheck   # tsc --noEmit
-npm test            # pretest runs build, then node --test test/*.test.ts
+npm test            # pretest runs build, then node --test test/*.test.ts test/telegram/*.test.ts
 npm run check       # typecheck + build + test — the gate before any commit
 ```
 
@@ -23,20 +23,23 @@ npm run build && node --test test/store.test.ts
 node --test --test-name-pattern 'already-open' test/store.test.ts
 ```
 
+`test/*.test.ts` and `test/telegram/*.test.ts` are the two suites `npm test` runs; `test/support/` holds the browser-half test harness (`createRenderer` and friends) and is only ever imported, never matched by either glob.
+
 ## Architecture
 
-A DSH (deepseek-harness) plugin, shipped as one package containing **two host cordis rows plus one browser half**, all sharing constants from `src/index.ts`.
+A DSH (deepseek-harness) plugin, shipped as one package containing **three host cordis rows (plus the empty `dsh-buddy` anchor row) and one browser half**, all sharing constants from `src/index.ts`.
 
-- `cordis.patch.yml` inserts the two host rows (`buddy-store`, `buddy-persona`) plus an empty anchor row `buddy-client` (name `dsh-buddy`, `apply` in `src/index.ts`) into a profile's bundle stack; `package.json`'s `dsh.bundle.patch` / `dsh.client` are what make the harness pick them up. The browser half reaches the boot graph through `dsh.client` — but `dsh-client-modules` only reads that declaration for a row named **exactly** the package (`exactPackageSpecifier` skips `dsh-buddy/store`), so the anchor row is load-bearing. Without it the host rows boot, every unit test passes, and the sidebar button and settings tab silently never appear. `test/patch.test.ts` guards it.
+- `cordis.patch.yml` inserts the three host rows (`buddy-store`, `buddy-persona`, `buddy-telegram`) plus an empty anchor row `buddy-client` (name `dsh-buddy`, `apply` in `src/index.ts`) into a profile's bundle stack; `package.json`'s `dsh.bundle.patch` / `dsh.client` are what make the harness pick them up. The browser half reaches the boot graph through `dsh.client` — but `dsh-client-modules` only reads that declaration for a row named **exactly** the package (`exactPackageSpecifier` skips `dsh-buddy/store`), so the anchor row is load-bearing. Without it the host rows boot, every unit test passes, and the sidebar folder and settings tab silently never appear. `test/patch.test.ts` guards it.
 - **Row `dsh-buddy/store`** (`src/store/`): resolves the buddy home (`buddy.home` setting → `dshHomePath('buddy')`), `mkdir`s it, opens the `buddy` storage domain, publishes `ctx.buddyStore`. Hard-injects `storageDomain` only; `settings` is a *scoped* injection so the row still boots without a settings plane. The boot waits on a barrier for the settings source, bounded by an internal 2 s timeout that is deliberately not a user tunable.
-- **Row `dsh-buddy/persona`** (`src/persona/`): hard-injects `buddyStore`, `typert`, `systemPrompt`. Holds the persona in memory (prompt assembly must never touch disk), registers the `buddy_soul` prompt **variable**, and publishes the `buddyPersona` typert endpoints (`persona`, `updatePersona`, `sessions`). `sessionQuery` stays soft (`ctx.get`) and is read per request.
-- **Browser half** (`src/client/`): registers the Settings → Buddy tab, the `sidebar.panellist` button, and the `main` panel it selects. `src/client/call.ts` is plain `.ts` (not `.tsx`) so tests can drive the RPC envelope unwrap directly.
+- **Row `dsh-buddy/persona`** (`src/persona/`): hard-injects `buddyStore`, `typert`, `systemPrompt`. Holds the persona in memory (prompt assembly must never touch disk), registers the `buddy_soul` prompt **variable**, and publishes the `buddyPersona` typert endpoints (`persona`, `updatePersona`, `sessions`, `preferences`, `updatePreferences`). `sessionQuery` stays soft (`ctx.get`) and is read per request.
+- **Row `dsh-buddy/telegram`** (`src/telegram/`): absorbed from dsh-telegram's working tree at commit `d38a02c` plus an uncommitted credentials-readiness resync fix on top of that import (see `git log` for the "import dsh-telegram host source verbatim" commit). Hard-injects `typert`, `storageDomain`, `buddyStore`; everything else (`settings`, `credentials`, `agents`, `sessionController`, …) stays soft. Settings namespace `buddy-telegram`, storage domain `buddy_telegram`, service/typert `buddyTelegram`. Sessions always mount the `buddy` preset and are fail-closed — a resolve failure refuses to create the session rather than falling back to the global default; model precedence for a new session is chat `/model` > `buddy.model` (Buddy's own default) > the global default. Refuses to poll — reporting `error` status instead — while a non-disabled `dsh-telegram` row is mounted and its `telegram.enabled` setting is `true`, since one bot token admits only one long-poller.
+- **Browser half** (`src/client/`): registers the Settings → Buddy tab (module visibility and the buddy home path only — Buddy's own configuration lives in the main panel), the `sidebar.footer.action` folder (`buddy-folder`, not a `sidebar.panellist` button) that opens the main panel and lists conversations, and the `main` panel itself — a module table (`src/client/modules.ts`) of Soul, Agents, Model and Telegram. `src/client/call.ts` is plain `.ts` (not `.tsx`) so tests can drive the RPC envelope unwrap directly.
 
 Three data planes, strictly separated: **settings** (`~/.dsh/settings.yaml`, only user-tunable non-secrets) / **files on disk** (`<buddy home>/SOUL.md`, `AGENTS.md` — authored prose, greppable and diffable) / **storage domain** `buddy` (derived state nothing can reconstruct, e.g. `lastPersonaWriteAt`).
 
 Persona reaches the model *only* through the `buddy` agent preset, whose persona row carries the literal `{{buddy_soul}}`. That is what structurally keeps Buddy's voice out of ordinary coding sessions — not a scope choice at registration time.
 
-Design spec: `docs/superpowers/specs/2026-09-12-dsh-buddy-design.md`. Phase-1 task plan (with the full rationale behind each of the rules below): `docs/superpowers/plans/2026-09-12-dsh-buddy-phase-1.md`. Phase 1 stops at the walking skeleton — memory, skill evolution, scheduler, board and Telegram are later phases with their own plans; do not start them because an interface looks ready.
+Design specs: `docs/superpowers/specs/2026-09-12-dsh-buddy-design.md` (Phase 1) and `docs/superpowers/specs/2026-09-12-buddy-telegram-design.md` (Phase 6, absorbing dsh-telegram). Task plans, with the full rationale behind each of the rules below: `docs/superpowers/plans/2026-09-12-dsh-buddy-phase-1.md` and `docs/superpowers/plans/2026-09-12-dsh-buddy-phase-6-telegram.md`. Phase 1 stopped at the walking skeleton and Phase 6 absorbed Telegram; memory, skill evolution, scheduler and board are still later phases with their own plans — do not start them because an interface looks ready.
 
 ## Invariants (violating these passes tests and breaks the live harness)
 
@@ -47,11 +50,16 @@ Design spec: `docs/superpowers/specs/2026-09-12-dsh-buddy-design.md`. Phase-1 ta
 - **Endpoints register through `ctx.typert.register(...)` at runtime, never `@Remote` decorators** — a nested `dsh-typert-protocol` copy's decorator table is not the gateway's.
 - **Never serialize live harness data** (services, Sessions, Slots). Read the leaf fields and build a small owned object — see `listSessions` in `src/persona/index.ts`.
 - **Opening an already-open domain rejects**; `openStore` adopts the live handle on `code === 'already-open'` (hot reload). Domain and settings names are lowercase `buddy`.
-- **One constant, two sides.** The sidebar list id and the main panel key are both `MAIN_PANEL_KEY` from `src/index.ts`; `selectPanel` throws on a key the main slot never registered, so the button and the panel are registered together or not at all.
+- **One constant, two sides.** The folder title's `selectPanel` target and the main panel key are both `MAIN_PANEL_KEY` from `src/index.ts`; `selectPanel` throws on a key the main slot never registered, so the folder and the panel are registered together or not at all.
 - **No test file may import a `.tsx` module** — Node's type stripping does not handle JSX. Browser behaviour is asserted against the built `lib/client.js` (`test/client-ui.test.ts`), which also proves it compiles.
 - **Never edit shipped presets** under `@deepseek-ai/dsh-agent-presets/presets/`. Authored presets go to `~/.dsh/.agent-presets/<id>/`.
 - **A prompt variable name must match `/^[a-z][a-z0-9_]*$/`** (`dsh-system-prompt`'s own `VARIABLE_NAME` regex). This is checked at **boot**, not at first render: a camelCase `SOUL_VARIABLE` kills the whole loader entry with `invalid prompt variable name` before any session using it ever starts. Bit Phase 1 for real — `buddySoul` had to become `buddy_soul` after a real-harness boot failure — and `test/preset.test.ts` now asserts the constant against this exact regex.
 - **`installPreset` never repairs an existing install.** It only writes when `~/.dsh/.agent-presets/buddy/` is absent or empty; once a copy exists — including the one this plugin ships — a later version's template fix does not reach it. Do not assume editing `assets/preset/agent.cordis.yml` changes anyone's already-installed preset; the shipped `~/.dsh` copy on this machine is kept manually in sync (see the comment above `assets/preset/agent.cordis.yml`'s twin).
+- **Settings namespaces allow hyphens, storage units allow underscores** — hence `buddy-telegram` (settings) vs `buddy_telegram` (storage domain); the same name cannot be used for both.
+- **The settings plane only describes registered namespaces**: the legacy migration sees `telegram` only while dsh-telegram is mounted. Removing dsh-telegram before the one-shot migration runs leaves nothing to copy from — the cutover order in the design spec exists because of this.
+- **Every string the Telegram bot sends is English** (`test/telegram/english-copy.test.ts`, walking TypeScript AST leaf tokens rather than regex, so comments are excluded structurally and a CJK character after a `//` inside a string or URL is still caught).
+- **The bot token belongs to the credentials plane, never settings.** Only `describeToken`'s posture (`configured` / `writable`) may reach settings, logs or the browser — the token value itself never does, in dsh-telegram's own working code and unchanged here.
+- **Main-panel modules render as components (`<Module />`), never called as functions.** Calling one as a function merges its hooks into the panel's own hook list instead of giving it independent storage, which crashes real React (and `test/support/client-harness.ts`'s `createRenderer`, which enforces the Rules of Hooks per component instance).
 
 ## Verifying against the real harness
 

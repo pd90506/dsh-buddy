@@ -90,6 +90,7 @@ Skills 模块（第 3 期）、Kanban 模块（第 5 期）、记忆、调度器
 - `enabled` 永不迁移：新旧两个轮询者不能因迁移同时启动。
 - 迁移只读旧节，从不修改或删除 `telegram` 节。
 - 已存在 `buddy-telegram` 节时什么都不做（幂等）。
+- 迁移只在 dsh-telegram 仍挂载时可见旧节；若首次启动时已卸载，迁移结果为 `no-legacy`，在 Telegram 模块手动填写 owner 即可。
 
 ### 4.2 不迁移的数据
 
@@ -168,7 +169,7 @@ owner 白名单默认拒绝、审批按钮、文件收发、Markdown 渲染、�
 后续各期只向表中追加模块，不改框架。
 
 顶部：**New Buddy conversation** 按钮 —— 新建带 `buddy` preset 与 5.2 模型的会话并打开。
-客户端建会话请求能否携带模型在计划中核实；不能则改走新端点 `buddyPersona/createSession`，由 host 用 `agents.create` 建会话。
+客户端经 `remote.session.create({ cwd, agentPreset })` 建会话，再以 `remote.session.selectModel` 应用模型；工作目录来自 `buddyPersona/preferences.conversationCwd`（`~/buddy-workspace`）。
 
 | 模块 | 内容 |
 |---|---|
@@ -178,7 +179,7 @@ owner 白名单默认拒绝、审批按钮、文件收发、Markdown 渲染、�
 | Telegram | 状态、`@bot`、会话数、错误详情（含 4.3 占用提示）；token 仅显示 configured/source/writable 并可替换；`enabled`、`ownerUserId`、`defaultCwd`、`permissionPreset`、`renderMarkdown`、`mediaDelivery` |
 
 新增端点（均经 `ctx.typert.register`，浏览器不直接写 settings / credentials 之外的平面）：
-- `buddyPersona/model` / `buddyPersona/updateModel` / `buddyPersona/modelCatalog`
+- `buddyPersona/preferences` / `buddyPersona/updatePreferences`；模型目录来自 `remote.session.modelCatalog()`
 - `buddyTelegram/status` / `buddyTelegram/config` / `buddyTelegram/updateConfig`
 - token 写入沿用平台 `credentials.*` RPC（与 dsh-telegram 相同），token 永不回传浏览器
 
@@ -220,9 +221,9 @@ owner 白名单默认拒绝、审批按钮、文件收发、Markdown 渲染、�
 
 ### 8.2 正式切换（执行前须用户当场确认）
 
-1. 合并到 `master`。
-2. 从 web profile 移除 dsh-telegram（`dsh.profile.bundles` 与依赖），`dsh plugin --profile web install`；确切命令在计划中核实。
-3. 重启 `dsh-web`；确认 `buddy-telegram` 已迁移且关闭。
+1. 合并到 `master`，重启 `dsh-web`。此时 dsh-telegram 仍挂载：`buddy-telegram` 因占用保护不轮询，但设置迁移在此时完成（settings 平面只能描述已注册的命名空间，dsh-telegram 卸载后就读不到旧节）。
+2. 确认 `~/.dsh/settings.yaml` 出现 `buddy-telegram` 节，`ownerUserId` 已迁移、`enabled: false`；Telegram 模块显示占用提示。
+3. `dsh plugin --profile web remove dsh-telegram`，重启 `dsh-web`。
 4. 在主界面开启 Telegram，状态 `running @example_dev_bot`。
 5. 用户手机实测：`/help` 为英文；普通消息得到 Buddy 口吻回复，会话出现在文件夹；审批按钮与发文件各一次。
 6. `~/.dsh` 变化仅限 `settings.yaml` 的 `buddy` / `buddy-telegram` 节与 `buddy_telegram` domain 存储。
