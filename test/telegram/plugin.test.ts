@@ -381,6 +381,34 @@ test("shutdown unwinds every effect without touching the network", async () => {
 	});
 });
 
+/**
+ * Replace `globalThis.fetch` for the duration of `body`, recording every URL it is
+ * called with and throwing instead of ever reaching the network.
+ *
+ * The occupied-state tests combine `enabled: true` with a resolvable token — exactly
+ * the pair `sync()` otherwise turns into `runtime.start()`, which calls
+ * `TelegramApi.getMe()` over real HTTPS. If the occupancy guard ever regressed, this
+ * stub is what stands between that regression and an actual call to
+ * `api.telegram.org` from the test suite; it also gives a direct assertion that the
+ * runtime was never started, rather than only inferring it from log lines.
+ * @param body - the test body to run with the network cut off.
+ * @returns the URLs `fetch` was called with, in order (must be empty for these tests).
+ */
+async function withNoNetwork(body: () => Promise<void>): Promise<string[]> {
+	const calls: string[] = [];
+	const original = globalThis.fetch;
+	globalThis.fetch = (async (input: unknown) => {
+		calls.push(typeof input === "string" ? input : String((input as { url?: unknown })?.url ?? input));
+		throw new Error("test attempted a network call");
+	}) as typeof fetch;
+	try {
+		await body();
+	} finally {
+		globalThis.fetch = original;
+	}
+	return calls;
+}
+
 test("stays down and reports occupied while dsh-telegram still polls the bot", async () => {
 	// A mounted, enabled dsh-telegram row occupies the token. Buddy's own switch
 	// is on and a token would resolve, but the occupancy check runs before the
@@ -414,23 +442,100 @@ test("stays down and reports occupied while dsh-telegram still polls the bot", a
 			describe: async () => ({ configured: true, writable: true }),
 		},
 	});
-	apply(ctx as never);
-	await settle();
 
-	const gateway = provided.get("buddyTelegram") as {
-		status(): Promise<{ state: string; detail?: string; sessions: number }>;
-	};
-	const status = await gateway.status();
-	assert.equal(status.state, "error");
-	assert.equal(status.detail, OCCUPIED_DETAIL);
+	const fetchCalls = await withNoNetwork(async () => {
+		apply(ctx as never);
+		await settle();
 
-	// Boot's own diagnostic line reads the token once regardless (it only reports
-	// presence, never starts anything); a reconcile triggered afterwards must not
-	// read it again, because `sync()` returns on the occupancy check before ever
-	// calling `readToken`.
-	const afterBoot = reads;
-	if (hooks === undefined) assert.fail("the settings section must hand the plugin its hooks");
-	hooks.onChange();
-	await settle();
-	assert.equal(reads, afterBoot, "the token must never be read again while dsh-telegram still holds the bot");
+		const gateway = provided.get("buddyTelegram") as {
+			status(): Promise<{ state: string; detail?: string; sessions: number }>;
+		};
+		const status = await gateway.status();
+		assert.equal(status.state, "error");
+		assert.equal(status.detail, OCCUPIED_DETAIL);
+
+		// Boot's own diagnostic line reads the token once regardless (it only reports
+		// presence, never starts anything); a reconcile triggered afterwards must not
+		// read it again, because `sync()` returns on the occupancy check before ever
+		// calling `readToken`.
+		const afterBoot = reads;
+		if (hooks === undefined) assert.fail("the settings section must hand the plugin its hooks");
+		hooks.onChange();
+		await settle();
+		assert.equal(reads, afterBoot, "the token must never be read again while dsh-telegram still holds the bot");
+	});
+	assert.deepEqual(fetchCalls, [], "the runtime must never be started (no network call) while occupied");
+});
+
+test("the settings/updated listener re-syncs only when the legacy telegram namespace changes", async () => {
+	// Wiring test: the listener registered at src/telegram/index.ts:247-250 is what
+	// notices the legacy switch turning off without a restart. Nothing else in this
+	// suite fires it, so this is the only place a regression there (wrong namespace
+	// check, or the listener never registered at all) would be caught.
+	let legacyEnabled = true;
+	// `sync()` reads the config source unconditionally as its very first line,
+	// before either the occupancy check or the enable/token check, so counting
+	// calls to the source function is a direct, branch-independent count of how
+	// many times `sync()` ran — a resync that never happened leaves this alone,
+	// regardless of what occupied/enabled end up deciding.
+	let configReads = 0;
+	const { ctx, provided, listeners } = contextStub({
+		loader: { entries: () => [{ options: { name: "dsh-telegram" }, disabled: false }] },
+		settings: {
+			installSection: (_owner: unknown, _ns: string, _schema: unknown, _entry: unknown, accepted: unknown) => {
+				(accepted as { setSource: (source: () => unknown) => void }).setSource(() => {
+					configReads += 1;
+					return {
+						enabled: true,
+						ownerUserId: "42",
+						defaultCwd: "/tmp/x",
+						permissionPreset: "workspace-write",
+						renderMarkdown: true,
+						mediaDelivery: "all",
+					};
+				});
+			},
+			describe: () => [],
+			update: async () => undefined,
+			get: (ns: string) => (ns === "telegram" ? { enabled: legacyEnabled } : undefined),
+		},
+		credentials: {
+			// No token: once the occupancy clears, `sync()` still must not reach the
+			// network from this test — that path is covered by the occupied-state
+			// test above. This test only exercises whether the listener re-syncs.
+			resolve: async () => undefined,
+			describe: async () => ({ configured: false, writable: true }),
+		},
+	});
+
+	const fetchCalls = await withNoNetwork(async () => {
+		apply(ctx as never);
+		await settle();
+
+		const gateway = provided.get("buddyTelegram") as {
+			status(): Promise<{ state: string; detail?: string; sessions: number }>;
+		};
+		assert.equal((await gateway.status()).detail, OCCUPIED_DETAIL, "starts occupied");
+
+		const listener = listeners.get("settings/updated") as ((ns: unknown) => void) | undefined;
+		if (listener === undefined) assert.fail("the plugin must watch settings/updated to notice the legacy switch");
+
+		// An unrelated namespace changing must not re-judge anything.
+		const beforeUnrelated = configReads;
+		listener("other");
+		await settle();
+		assert.equal(configReads, beforeUnrelated, "an unrelated namespace must not trigger a resync");
+		assert.equal((await gateway.status()).detail, OCCUPIED_DETAIL, "an unrelated namespace must not change status");
+
+		// The legacy bot is switched off from outside; only the listener firing for
+		// "telegram" tells this plugin to look again.
+		legacyEnabled = false;
+		const beforeRelated = configReads;
+		listener("telegram");
+		await settle();
+		assert.ok(configReads > beforeRelated, "the telegram namespace must trigger a resync");
+		const status = await gateway.status();
+		assert.notEqual(status.detail, OCCUPIED_DETAIL, "the occupancy must clear once the legacy switch is off");
+	});
+	assert.deepEqual(fetchCalls, [], "no network call while the occupancy transition is exercised");
 });
