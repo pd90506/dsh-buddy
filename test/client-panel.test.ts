@@ -71,6 +71,88 @@ function button(tree: unknown, label: string): StubElement {
 	return found;
 }
 
+/** Whether `element`'s space-separated className carries `token`. */
+function hasClass(element: StubElement, token: string): boolean {
+	const className = element.props["className"];
+	return typeof className === "string" && className.split(" ").includes(token);
+}
+
+/** The sub-nav item buttons, in render order. */
+function navItems(tree: unknown): StubElement[] {
+	return elements(tree).filter((e) => e.type === "button" && hasClass(e, "dsh-buddy-subnav-item"));
+}
+
+/** The module content panes (active and hidden alike), in render order. */
+function panes(tree: unknown): StubElement[] {
+	return elements(tree).filter((e) => e.type === "section" && hasClass(e, "dsh-buddy-content-pane"));
+}
+
+/** Whether any element inside this pane's subtree satisfies `predicate`. */
+function paneHas(pane: StubElement, predicate: (e: StubElement) => boolean): boolean {
+	return elements(pane).some(predicate);
+}
+
+/** The sub-nav item whose label is `label`. */
+function navItem(tree: unknown, label: string): StubElement {
+	const found = navItems(tree).find((e) => e.props["children"] === label);
+	assert.ok(found !== undefined, `no sub-nav item "${label}"`);
+	return found;
+}
+
+const FULL_CATALOG = { session: { modelCatalog: async () => ({ ok: true, value: CATALOG }) } };
+
+/** Mount the panel with every module visible and every endpoint answered. */
+function mountAllModules() {
+	return mountPanel(async (endpoint) => {
+		if (endpoint === "buddyPersona/preferences") return { ok: true, value: PREFS };
+		if (endpoint === "buddyPersona/persona") return { ok: true, value: { soul: "", agents: "", home: "/h" } };
+		if (endpoint === "buddyTelegram/status") return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
+		return { ok: true, value: { enabled: false, ownerUserId: "", defaultCwd: "", permissionPreset: "workspace-write", renderMarkdown: true, mediaDelivery: "all" } };
+	}, FULL_CATALOG);
+}
+
+const soulPane = (tree: unknown): StubElement | undefined =>
+	panes(tree).find((p) => paneHas(p, (e) => e.type === "textarea" && e.props["aria-label"] === "settings.buddy:soulTitle"));
+const modelPane = (tree: unknown): StubElement | undefined =>
+	panes(tree).find((p) => paneHas(p, (e) => e.props["role"] === "switch" && e.props["aria-label"] === "settings.buddy:modelFollow"));
+
+test("the panel is a sub-nav of the visible modules, the first active by default", async () => {
+	const panel = mountAllModules();
+	await settle();
+	assert.deepEqual(
+		navItems(panel.tree()).map((item) => item.props["children"]),
+		["settings.buddy:soulTitle", "settings.buddy:agentsTitle", "settings.buddy:modelTitle", "settings.buddy:telegramTitle"],
+		"one sub-nav item per visible module, in module order",
+	);
+	const active = navItems(panel.tree()).filter((item) => item.props["aria-current"] === "page");
+	assert.equal(active.length, 1, "exactly one module is active at a time");
+	assert.equal(active[0]?.props["children"], "settings.buddy:soulTitle", "the first visible module is active by default");
+
+	// Every visible module is mounted; only the active one is shown.
+	assert.equal(panes(panel.tree()).length, 4, "every visible module stays mounted");
+	const shown = panes(panel.tree()).filter((p) => !hasClass(p, "dsh-buddy-content-pane-hidden"));
+	assert.equal(shown.length, 1, "exactly one pane is shown");
+	assert.ok(shown[0] !== undefined && shown[0] === soulPane(panel.tree()), "the shown pane is the soul module");
+});
+
+test("clicking a sub-nav item shows that module and hides — but does not unmount — the previous one", async () => {
+	const panel = mountAllModules();
+	await settle();
+	const before = modelPane(panel.tree());
+	assert.ok(before !== undefined && hasClass(before, "dsh-buddy-content-pane-hidden"), "the model module starts hidden");
+
+	(navItem(panel.tree(), "settings.buddy:modelTitle").props["onClick"] as () => void)();
+	await settle();
+
+	const activeAfter = navItems(panel.tree()).filter((item) => item.props["aria-current"] === "page");
+	assert.equal(activeAfter[0]?.props["children"], "settings.buddy:modelTitle", "the clicked module becomes active");
+	const modelAfter = modelPane(panel.tree());
+	assert.ok(modelAfter !== undefined && !hasClass(modelAfter, "dsh-buddy-content-pane-hidden"), "the clicked module is now shown");
+	const soulAfter = soulPane(panel.tree());
+	assert.ok(soulAfter !== undefined, "the previously active module is still mounted");
+	assert.ok(hasClass(soulAfter, "dsh-buddy-content-pane-hidden"), "the previously active module is hidden, not unmounted");
+});
+
 test("the panel shows only the modules preferences leave visible", async () => {
 	const panel = mountPanel(async (endpoint) =>
 		endpoint === "buddyPersona/preferences"

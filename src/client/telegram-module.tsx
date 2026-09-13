@@ -3,9 +3,9 @@
  *
  * Ported from `dsh-telegram`'s own Settings tab (`TelegramSection`) into a
  * Buddy main-panel module: the endpoints move to this plugin's own
- * `buddyTelegram/*` namespace, the card chrome (title, description) is dropped
- * because the panel already supplies the card and its title, and every locale
- * key moves into Buddy's own `settings.buddy` namespace under a `telegram`
+ * `buddyTelegram/*` namespace, the chrome (title, description) is dropped
+ * because the panel's sub-nav already supplies the module's title, and every
+ * locale key moves into Buddy's own `settings.buddy` namespace under a `telegram`
  * prefix so it cannot collide with `dsh-telegram`'s own dictionary.
  * @module dsh-buddy/client/telegram-module
  */

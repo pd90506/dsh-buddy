@@ -6,9 +6,9 @@
  * pattern instead: the textarea restates `dsh-client-ui-message-feedback`'s
  * FeedbackDialog `detail` field, and the selector is `dsh-client-locale`'s
  * LanguageRow pill (a `Menu` anchored to a rounded button). Field labels, hints
- * and toggle rows follow `dsh-client-ui-settings-plugins`; the panel's cards
- * follow that package's plugin cards. Every colour is a
- * `--dsw-*` token.
+ * and toggle rows follow `dsh-client-ui-settings-plugins`. The main panel is a
+ * master-detail split: a left sub-nav of the visible modules beside the active
+ * module's content pane. Every colour is a `--dsw-*` token.
  * @module dsh-buddy/client/form-css
  */
 
@@ -31,8 +31,13 @@ export const FORM_CLASS = {
 	panelHeader: "dsh-buddy-panel-header",
 	panelTitle: "dsh-buddy-panel-title",
 	panelBody: "dsh-buddy-panel-body",
-	card: "dsh-buddy-card",
-	cardTitle: "dsh-buddy-card-title",
+	split: "dsh-buddy-split",
+	subnav: "dsh-buddy-subnav",
+	subnavItem: "dsh-buddy-subnav-item",
+	subnavItemActive: "dsh-buddy-subnav-item-active",
+	content: "dsh-buddy-content",
+	contentPane: "dsh-buddy-content-pane",
+	contentPaneHidden: "dsh-buddy-content-pane-hidden",
 } as const;
 
 const c = FORM_CLASS;
@@ -62,9 +67,19 @@ export const FORM_CSS = [
 	`.${c.panel}{display:flex;flex-direction:column;height:100%;min-height:0;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}`,
 	`.${c.panelHeader}{box-sizing:border-box;flex:none;display:flex;align-items:center;gap:8px;height:54px;padding:0 24px;border-bottom:.5px solid var(--dsw-alias-border-l2)}`,
 	`.${c.panelTitle}{font-size:16px;font-weight:500;line-height:24px}`,
-	`.${c.panelBody}{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px;padding:20px 24px 32px}`,
-	`.${c.card}{display:flex;flex-direction:column;gap:12px;padding:16px 20px;border:.5px solid var(--dsw-alias-border-l4);border-radius:16px;background:var(--dsw-alias-bg-layer-3)}`,
-	`.${c.cardTitle}{margin:0;color:var(--dsw-alias-label-primary);font-size:15px;font-weight:500;line-height:24px}`,
+	`.${c.panelBody}{flex:1;min-height:0;display:flex;flex-direction:column}`,
+	// Master-detail: a left sub-nav of the visible modules beside the active
+	// module's pane. The nav is fixed; only the content column scrolls.
+	`.${c.split}{flex:1;min-height:0;display:flex;align-items:stretch}`,
+	`.${c.subnav}{box-sizing:border-box;flex:none;width:180px;display:flex;flex-direction:column;gap:2px;padding:16px 12px;overflow-y:auto;border-right:.5px solid var(--dsw-alias-border-l2)}`,
+	`.${c.subnavItem}{box-sizing:border-box;cursor:pointer;width:100%;padding:8px 12px;display:flex;align-items:center;border:none;border-radius:10px;background:0 0;color:var(--dsw-alias-label-secondary);font-family:inherit;font-size:14px;line-height:20px;font-weight:500;text-align:left}`,
+	`.${c.subnavItem}:hover{background:var(--dsw-alias-interactive-bg-hover)}`,
+	`.${c.subnavItem}:focus-visible{outline:2px solid var(--dsw-alias-label-primary);outline-offset:-2px}`,
+	`.${c.subnavItemActive}{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}`,
+	`.${c.content}{flex:1;min-width:0;min-height:0;overflow-y:auto;display:flex;flex-direction:column;padding:20px 24px 32px}`,
+	`.${c.contentPane}{display:flex;flex-direction:column;gap:12px;min-width:0}`,
+	`.${c.contentPaneHidden}{display:none}`,
+	`@media (max-width:640px){.${c.split}{flex-direction:column}.${c.subnav}{flex-direction:row;flex-wrap:wrap;width:auto;border-right:none;border-bottom:.5px solid var(--dsw-alias-border-l2)}.${c.subnavItem}{width:auto}}`,
 	`@media (prefers-reduced-motion:reduce){.${c.textarea}{transition:none}}`,
 ].join("");
 

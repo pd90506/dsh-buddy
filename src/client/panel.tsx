@@ -1,5 +1,6 @@
 /**
- * The Buddy main panel: Buddy's own configuration, one module per card.
+ * The Buddy main panel: Buddy's own configuration as a master-detail split — a
+ * left sub-nav of the visible modules beside the active module's content pane.
  * Conversations are listed in the sidebar folder, not here.
  * @module dsh-buddy/client/panel
  */
@@ -28,6 +29,9 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 	return function BuddyPanel(): unknown {
 		const [sections, setSections] = useState<Partial<Record<PanelSectionId, boolean>> | undefined>(undefined);
 		const [error, setError] = useState<string | undefined>(undefined);
+		// Which module the sub-nav has selected. Empty until the first load picks
+		// the first visible one; a still-visible selection survives a reload.
+		const [active, setActive] = useState<PanelSectionId | undefined>(undefined);
 
 		const load = useCallback(async (): Promise<void> => {
 			try {
@@ -52,6 +56,12 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 		// panel through props or context — only through the shared notifier.
 		useEffect(() => deps.preferencesChanged.subscribe(() => void load()), [load]);
 
+		// The selected module, falling back to the first visible one — so a module
+		// hidden from the Settings tab while it was active hands off to a neighbour
+		// rather than leaving the content column blank.
+		const visible = sections === undefined ? [] : visibleModules(deps.modules, sections);
+		const current = visible.find((module) => module.id === active)?.id ?? visible[0]?.id;
+
 		return (
 			<div className={FORM_CLASS.panel}>
 				<div className={FORM_CLASS.panelHeader}>
@@ -59,23 +69,55 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 				</div>
 				<div className={FORM_CLASS.panelBody}>
 					{error !== undefined && <p className={FORM_CLASS.error}>{error}</p>}
-					{sections !== undefined &&
-						visibleModules(deps.modules, sections).map((module) => {
-							// A capitalised local, not `<module.Component />` directly: every
-							// module's return type is `unknown` (like `BuddyPanel`'s own,
-							// below), and TS's JSX component check wants `ReactNode` — the
-							// member expression itself is a perfectly ordinary component
-							// reference either way (JSX only treats a lower-case *bare
-							// identifier* as a host tag; a member expression is always a
-							// value reference), so this cast changes nothing at runtime.
-							const ModuleComponent = module.Component as unknown as () => ReactNode;
-							return (
-								<section key={module.id} className={FORM_CLASS.card}>
-									<h3 className={FORM_CLASS.cardTitle}>{deps.t(module.titleKey)}</h3>
-									<ModuleComponent />
-								</section>
-							);
-						})}
+					{sections !== undefined && (
+						<div className={FORM_CLASS.split}>
+							<nav className={FORM_CLASS.subnav} aria-label={deps.t("panelTitle")}>
+								{visible.map((module) => (
+									<button
+										key={module.id}
+										type="button"
+										className={
+											module.id === current
+												? `${FORM_CLASS.subnavItem} ${FORM_CLASS.subnavItemActive}`
+												: FORM_CLASS.subnavItem
+										}
+										aria-current={module.id === current ? "page" : undefined}
+										onClick={() => setActive(module.id)}
+									>
+										{deps.t(module.titleKey)}
+									</button>
+								))}
+							</nav>
+							<div className={FORM_CLASS.content}>
+								{visible.map((module) => {
+									// A capitalised local, not `<module.Component />` directly: every
+									// module's return type is `unknown` (like `BuddyPanel`'s own,
+									// below), and TS's JSX component check wants `ReactNode` — the
+									// member expression itself is a perfectly ordinary component
+									// reference either way (JSX only treats a lower-case *bare
+									// identifier* as a host tag; a member expression is always a
+									// value reference), so this cast changes nothing at runtime.
+									//
+									// Every visible module is mounted; the inactive ones are hidden
+									// by class, not unmounted, so a half-typed SOUL.md survives a
+									// hop to another module and back.
+									const ModuleComponent = module.Component as unknown as () => ReactNode;
+									return (
+										<section
+											key={module.id}
+											className={
+												module.id === current
+													? FORM_CLASS.contentPane
+													: `${FORM_CLASS.contentPane} ${FORM_CLASS.contentPaneHidden}`
+											}
+										>
+											<ModuleComponent />
+										</section>
+									);
+								})}
+							</div>
+						</div>
+					)}
 				</div>
 			</div>
 		);
