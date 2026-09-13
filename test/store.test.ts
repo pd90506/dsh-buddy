@@ -9,7 +9,7 @@ import * as row from "../src/store/index.ts";
 import { BuddyStore } from "../src/store/index.ts";
 import type { BuddyDomainHandle, BuddyGlobal } from "../src/store/domain.ts";
 import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../src/config.ts";
-import { resolveBuddyPaths } from "../src/paths.ts";
+import { resolveBuddyPaths, type BuddyPaths } from "../src/paths.ts";
 
 /** A domain stand-in plus the flags a test needs to read back. */
 interface HandleStub extends BuddyDomainHandle {
@@ -75,6 +75,19 @@ async function settle(): Promise<void> {
 const storeRow = row as unknown as Plugin;
 
 /**
+ * The `ctx`/`paths`/`handle` triple most direct `new BuddyStore(...)` cases in
+ * this file need. Async so a fixture that later needs real I/O (e.g. a scratch
+ * home) drops in without changing every call site.
+ * @returns a fresh cordis context, a stand-in path set, and a domain handle stub.
+ */
+async function storeFixture(): Promise<{ ctx: Context; paths: BuddyPaths; handle: HandleStub }> {
+	const ctx = new Context();
+	const handle = handleStub();
+	const paths = { home: "/tmp/x", soul: "/tmp/x/SOUL.md", agents: "/tmp/x/AGENTS.md" };
+	return { ctx, paths, handle };
+}
+
+/**
  * Point `$DSH_HOME` at a throwaway directory for one test.
  * @returns the temporary harness home and its restore function.
  */
@@ -99,9 +112,7 @@ test("the row names itself and declares storageDomain as its only hard dependenc
 });
 
 test("every service member survives cordis's traceable proxy", async () => {
-	const ctx = new Context();
-	const handle = handleStub();
-	const paths = { home: "/tmp/x", soul: "/tmp/x/SOUL.md", agents: "/tmp/x/AGENTS.md" };
+	const { ctx, paths, handle } = await storeFixture();
 	new BuddyStore(ctx as unknown as Context, paths, handle);
 
 	// Consumers never hold the raw instance: cordis dispatches through a proxy
@@ -214,7 +225,7 @@ test("a home set through the settings plane is the home the store boots on", asy
 	/** Every ordering-relevant step of the boot, in the order it happened. */
 	const order: string[] = [];
 	try {
-		ctx.provide("settings", settingsStub({ home: userHome }, sections, order));
+		ctx.provide("settings", settingsStub({ ...FALLBACK_CONFIG, home: userHome }, sections, order));
 		ctx.provide("storageDomain", {
 			open: async () => {
 				order.push("open");
@@ -316,7 +327,10 @@ test(
 		try {
 			// `settings` is genuinely mounted, so `ctx.get("settings")` reports
 			// it and the boot takes the waiting branch.
-			ctx.provide("settings", settingsStub({ home: join(scratch.home, "never-delivered") }, []));
+			ctx.provide(
+				"settings",
+				settingsStub({ ...FALLBACK_CONFIG, home: join(scratch.home, "never-delivered") }, []),
+			);
 			ctx.provide("storageDomain", {
 				open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
 				get: () => undefined,
@@ -376,7 +390,7 @@ test("the composition entry is the fallback config, so a settings detach stays u
 	const handle = handleStub();
 	const sections: InstalledSection[] = [];
 	try {
-		ctx.provide("settings", settingsStub({ home: "" }, sections));
+		ctx.provide("settings", settingsStub({ ...FALLBACK_CONFIG, home: "" }, sections));
 		ctx.provide("storageDomain", {
 			open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
 			get: () => undefined,
@@ -472,4 +486,30 @@ test("a store that cannot open publishes nothing and says why", async () => {
 		console.error = previousError;
 		scratch.restore();
 	}
+});
+
+test("the store exposes the live config and writes preferences through the settings plane", async () => {
+	const writes: { ns: string; patch: unknown }[] = [];
+	let current: BuddyConfig = { ...FALLBACK_CONFIG, model: { provider: "p", model: "m", reasoningEffort: "" } };
+	const { ctx, paths, handle } = await storeFixture();
+	const store = new BuddyStore(ctx as unknown as Context, paths, handle, {
+		read: () => current,
+		write: async (patch) => {
+			writes.push({ ns: SETTINGS_NAMESPACE, patch });
+			current = { ...current, ...(patch as Partial<BuddyConfig>) };
+		},
+	});
+	assert.equal(store.config().model.provider, "p");
+	await store.updateConfig({ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } });
+	assert.deepEqual(writes, [
+		{ ns: "buddy", patch: { panel: { sections: { soul: true, agents: true, model: true, telegram: false } } } },
+	]);
+	assert.equal(store.config().panel.sections.telegram, false, "config() must read live, not a boot snapshot");
+});
+
+test("a store built without config access reports the fallback and refuses writes", async () => {
+	const { ctx, paths, handle } = await storeFixture();
+	const store = new BuddyStore(ctx as unknown as Context, paths, handle);
+	assert.deepEqual(store.config(), FALLBACK_CONFIG);
+	await assert.rejects(() => store.updateConfig({ model: FALLBACK_CONFIG.model }), /settings service is unavailable/);
 });

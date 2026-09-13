@@ -54,6 +54,22 @@ export const name = "dsh-buddy-store";
 /** Hard dependency: without storage there is nowhere to keep derived state. */
 export const inject = ["storageDomain"];
 
+/** Live access to the `buddy` settings section. */
+export interface ConfigAccess {
+	/** The resolved section, read at call time. */
+	read(): BuddyConfig;
+	/** Merge a patch into the section through the settings plane. */
+	write(patch: Partial<Pick<BuddyConfig, "model" | "panel">>): Promise<void>;
+}
+
+/** Used when the row runs without a settings plane. */
+const NO_SETTINGS: ConfigAccess = {
+	read: () => FALLBACK_CONFIG,
+	write: async () => {
+		throw new Error("dsh-buddy: the settings service is unavailable");
+	},
+};
+
 /**
  * The `buddyStore` service.
  *
@@ -68,15 +84,20 @@ export class BuddyStore extends Service {
 
 	private readonly handle: BuddyDomainHandle;
 
+	private readonly configAccess: ConfigAccess;
+
 	/**
 	 * @param ctx - the plugin fiber's context; the service registers immediately.
 	 * @param paths - resolved buddy file locations.
 	 * @param handle - the opened `buddy` domain.
+	 * @param configAccess - live read/write access to the `buddy` settings section;
+	 * defaults to a stand-in that reports the fallback and refuses writes.
 	 */
-	constructor(ctx: Context, paths: BuddyPaths, handle: BuddyDomainHandle) {
+	constructor(ctx: Context, paths: BuddyPaths, handle: BuddyDomainHandle, configAccess: ConfigAccess = NO_SETTINGS) {
 		super(ctx, "buddyStore");
 		this.paths = paths;
 		this.handle = handle;
+		this.configAccess = configAccess;
 	}
 
 	/**
@@ -93,6 +114,23 @@ export class BuddyStore extends Service {
 	 */
 	async markPersonaWritten(at: string): Promise<void> {
 		await this.handle.global.set({ ...this.handle.global.get(), lastPersonaWriteAt: at });
+	}
+
+	/**
+	 * The `buddy` settings section as it reads now.
+	 * @returns the resolved configuration.
+	 */
+	config(): BuddyConfig {
+		return this.configAccess.read();
+	}
+
+	/**
+	 * Write Buddy-wide preferences. `home` is deliberately not writable here: it
+	 * is read once at boot and moving it under a live row strands open handles.
+	 * @param patch - whole `model` and/or `panel` objects.
+	 */
+	async updateConfig(patch: Partial<Pick<BuddyConfig, "model" | "panel">>): Promise<void> {
+		await this.configAccess.write(patch);
 	}
 }
 
@@ -229,7 +267,17 @@ export function apply(ctx: PluginContext): void {
 				// the panel, the settings tab and the endpoints all still work.
 				console.error(`dsh-buddy-store: preset install skipped: ${(error as Error).message}`);
 			});
-			new BuddyStore(ctx as unknown as Context, paths, opened);
+			new BuddyStore(ctx as unknown as Context, paths, opened, {
+				read: () => readConfig(),
+				write: async (patch) => {
+					// `ctx.get`, never `ctx.settings`: settings is a scoped, soft dependency.
+					const settings = ctx.get("settings") as
+						| { update(ns: string, patch: Record<string, unknown>): Promise<void> }
+						| undefined;
+					if (settings === undefined) throw new Error("dsh-buddy: the settings service is unavailable");
+					await settings.update(SETTINGS_NAMESPACE, patch);
+				},
+			});
 			return () => {
 				void opened.close().catch(() => undefined);
 			};

@@ -42,3 +42,12 @@ export const MAIN_PANEL_KEY = "dsh-buddy";
 
 /** The agent preset id whose sessions this plugin treats as buddy conversations. */
 export const BUDDY_PRESET_ID = "buddy";
+
+/**
+ * Working directory for buddy conversations that have no other: new web
+ * conversations, and Telegram when `buddy-telegram.defaultCwd` is empty.
+ *
+ * Deliberately not the buddy home: an agent working there could rewrite its own
+ * SOUL.md and AGENTS.md, and self-modification is a later phase's decision.
+ */
+export const BUDDY_WORKSPACE_DEFAULT = "~/buddy-workspace";
