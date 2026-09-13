@@ -164,6 +164,9 @@ export function apply(ctx: PluginContext): void {
 			presetId: BUDDY_PRESET_ID,
 			// `buddyStore` is a declared hard dependency, so the property read is safe.
 			buddyModel: () => selectionFromDefault(ctx.buddyStore.config().model),
+			// The post-commit append feed a turn streams from; `ctx.on` returns the
+			// disposer the manager holds only for the life of one turn.
+			onSessionEvent: (handler) => ctx.on("session/event", handler as never),
 		});
 		runtime = new TelegramRuntime({
 			get: (service) => ctx.get(service),

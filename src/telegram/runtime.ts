@@ -34,7 +34,7 @@ import { SessionManager, type ResolvedChat, type SessionLike, type TurnPart } fr
 import type { TelegramStore } from "./store.ts";
 import { backoff, TelegramApi, TelegramApiError, type TelegramMessage, type TelegramUpdate } from "./telegram/api.ts";
 import { planReply, type Outbound } from "./telegram/deliver.ts";
-import type { AttachmentRefLike, MediaIo } from "./telegram/media.ts";
+import { MediaLedger, type AttachmentRefLike, type MediaIo } from "./telegram/media.ts";
 import { MessageMerger } from "./telegram/merge.ts";
 import { TELEGRAM_TEXT_LIMIT, ordinalSuffix, plainToTelegramHtml, planPlain } from "./telegram/render.ts";
 
@@ -473,12 +473,18 @@ export class TelegramRuntime {
 		}
 		this.#running.set(chatId, resolved.chat);
 		this.#startTyping(chatId, resolved.chat);
+		// One ledger for the whole turn, shared across every streamed chunk: an image
+		// that is both generated and presented arrives in two separate events, and the
+		// budget must still send it once.
+		const ledger = new MediaLedger();
+		let delivered = 0;
 		try {
-			const parts = await this.#deps.manager.runTurn(resolved.chat, text);
-			if (parts.length === 0) {
+			await this.#deps.manager.runTurn(resolved.chat, text, async (parts) => {
+				delivered += parts.length;
+				await this.#deliverParts(chatId, resolved.threadId, parts, resolved.cwd, ledger);
+			});
+			if (delivered === 0) {
 				await this.#send(chatId, resolved.threadId, "(This turn produced no text output)");
-			} else {
-				await this.#deliver(chatId, resolved.threadId, parts, resolved.cwd);
 			}
 		} catch (error) {
 			this.#deps.log(`turn failed: ${(error as Error).message}`);
@@ -554,18 +560,27 @@ export class TelegramRuntime {
 	}
 
 	/**
-	 * Deliver one turn: text, images and files in the order the agent wrote them.
+	 * Deliver one streamed chunk of a turn: text, images and files in the order the
+	 * agent wrote them.
 	 *
 	 * The planner decides everything about *what* is sent and how it is grouped;
 	 * this method owns the wire: pacing, the retry after a flood response, and the
 	 * degradation paths (a photo Telegram refuses is retried as a document, a
-	 * refused body is retried as plain text).
+	 * refused body is retried as plain text). The turn's `ledger` is shared across
+	 * chunks so the media budget and duplicate-suppression span the whole reply.
 	 * @param chatId - the chat id as a string.
 	 * @param threadId - the topic, when the chat has one.
-	 * @param parts - the turn's parts, in reading order.
+	 * @param parts - the chunk's parts, in reading order.
 	 * @param cwd - the session's working directory, which bounds every file read.
+	 * @param ledger - the turn-wide media budget, shared across every chunk.
 	 */
-	async #deliver(chatId: string, threadId: number | undefined, parts: readonly TurnPart[], cwd: string): Promise<void> {
+	async #deliverParts(
+		chatId: string,
+		threadId: number | undefined,
+		parts: readonly TurnPart[],
+		cwd: string,
+		ledger: MediaLedger,
+	): Promise<void> {
 		const api = this.#api;
 		if (api === undefined) return;
 		const config = this.#deps.config();
@@ -575,6 +590,7 @@ export class TelegramRuntime {
 				io: this.#mediaIo(cwd),
 				mediaDelivery: isMediaDeliveryMode(config.mediaDelivery) ? config.mediaDelivery : "all",
 				renderMarkdown: config.renderMarkdown,
+				ledger,
 			});
 		} catch (error) {
 			// Planning is pure apart from reading bytes; if it still fails, the prose

@@ -131,6 +131,9 @@ function deps(options: {
 		log: options.log ?? (() => undefined),
 		presetId: options.presetId ?? "buddy",
 		buddyModel: () => options.buddyModel,
+		// These tests drive `ensure`/`setSelection`, not `runTurn`, so the firehose
+		// is never subscribed; a no-op feed satisfies the dependency.
+		onSessionEvent: () => () => undefined,
 	};
 }
 

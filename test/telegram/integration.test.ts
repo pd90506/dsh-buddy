@@ -263,9 +263,13 @@ test("a message travels the whole path and its reply reaches the Bot API", async
 			},
 			created: true,
 		}),
-		runTurn: async (_chat: unknown, text: string) => {
+		runTurn: async (
+			_chat: unknown,
+			text: string,
+			onParts: (parts: readonly { kind: "text"; text: string }[]) => Promise<void>,
+		) => {
 			turns.push(text);
-			return [{ kind: "text" as const, text: "构建通过，3 个测试失败的都是旧的。" }];
+			await onParts([{ kind: "text" as const, text: "构建通过，3 个测试失败的都是旧的。" }]);
 		},
 		steer: () => undefined,
 		cancel: () => undefined,

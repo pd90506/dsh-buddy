@@ -87,6 +87,8 @@ function harness(
 		answer?: string | undefined;
 		/** Turn parts to deliver, when a test needs media or several pieces. */
 		parts?: readonly TurnPart[] | undefined;
+		/** Parts to deliver as separate streamed chunks, one `onParts` call each. */
+		chunks?: readonly (readonly TurnPart[])[] | undefined;
 		/** Settings overrides, e.g. turning media delivery off. */
 		configOverrides?: Partial<TelegramConfig> | undefined;
 		updates?: TelegramUpdate[] | undefined;
@@ -231,11 +233,15 @@ function harness(
 				created: true,
 			};
 		},
-		runTurn: async (_chat: unknown, text: string) => {
+		runTurn: async (_chat: unknown, text: string, onParts: (parts: readonly TurnPart[]) => Promise<void>) => {
 			turns.push(text);
 			if (options.gate !== undefined) await options.gate;
-			if (options.parts !== undefined) return options.parts;
-			return [{ kind: "text", text: options.answer ?? "the answer" }];
+			if (options.chunks !== undefined) {
+				for (const chunk of options.chunks) await onParts(chunk);
+				return;
+			}
+			const parts = options.parts ?? [{ kind: "text", text: options.answer ?? "the answer" } as TurnPart];
+			await onParts(parts);
 		},
 		steer: (_chat: unknown, text: string) => {
 			steered.push(text);
@@ -817,5 +823,26 @@ test("a media upload that fails on the wire says so instead of going quiet (R29,
 	assert.equal(notices.length, 1);
 	assert.match(notices[0] ?? "", /chart\.png/);
 	assert.match(notices[0] ?? "", /PHOTO_INVALID_DIMENSIONS/);
+	await h.runtime.stop();
+});
+
+test("the same image streamed in two chunks is sent once (shared per-turn budget)", async () => {
+	// Streaming plans each chunk separately; the turn's media ledger must still be
+	// shared across chunks, or an image that is both generated and later presented
+	// — two separate events — would reach the phone twice.
+	const image: TurnPart = {
+		kind: "media",
+		via: "tool",
+		source: {
+			kind: "attachment",
+			attachment: { attachmentId: "sha256:dd", mediaType: "image/png", bytes: 4, width: 2, height: 2, name: "chart.png" },
+		},
+	};
+	const h = harness("42", { chunks: [[image], [image]] });
+	await h.runtime.start(TOKEN);
+	await h.runtime.handleUpdate(message(42, "同一张图"));
+	await settle();
+
+	assert.equal(h.uploads.length, 1, "the duplicate image must be suppressed across streamed chunks");
 	await h.runtime.stop();
 });

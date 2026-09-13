@@ -84,6 +84,11 @@ export interface ResolvedChat {
 	readonly created: boolean;
 }
 
+/** The `session/event` firehose, as this module consumes it. */
+export type SessionEventFeed = (
+	handler: (session: { readonly id: unknown }, event: SessionEventLike) => void,
+) => () => void;
+
 /** Services this module needs from the plugin context. */
 export interface SessionDeps {
 	/** `ctx.get` for the optional services below. */
@@ -96,6 +101,13 @@ export interface SessionDeps {
 	readonly presetId: string;
 	/** Buddy's default model, read at creation time. */
 	readonly buddyModel: () => BuddyModelSelection | undefined;
+	/**
+	 * Subscribe to the post-commit `session/event` firehose, returning a disposer.
+	 * A turn streams by watching this feed for its own session's appends and
+	 * delivering each one the moment it commits, rather than folding the whole
+	 * turn after `whenIdle()`.
+	 */
+	readonly onSessionEvent: SessionEventFeed;
 }
 
 /** Handle returned by `agents.create` / `agents.resume`. */
@@ -253,34 +265,47 @@ export function foldTurnParts(events: readonly SessionEventLike[], baseline: num
 		if (event.seq < baseline) continue;
 		const data = asRecord(event.data);
 		if (data === undefined || numberField(data, "turn") !== owned) continue;
-
-		if (event.type === "tool/call") {
-			const callId = stringField(data, "callId");
-			const name = stringField(data, "name");
-			if (callId !== undefined && name !== undefined) toolNames.set(callId, name);
-			continue;
-		}
-
-		if (event.type === "assistant/message") {
-			// One part per assistant message, never merged: DSH shows each message as
-			// its own bubble, and Telegram should send each as its own message rather
-			// than gluing a turn's separate thoughts into one wall of text.
-			const text = messageText((data as { message?: unknown }).message);
-			if (text.trim() !== "") parts.push({ kind: "text", text });
-			continue;
-		}
-
-		if (event.type === "deliverables/presented") {
-			for (const file of presentedFiles(data)) parts.push(file);
-			continue;
-		}
-
-		if (event.type === "tool/result") {
-			for (const image of toolImages(data, toolNames)) parts.push(image);
-		}
+		parts.push(...eventParts(event, toolNames));
 	}
 
 	return parts;
+}
+
+/**
+ * The deliverable parts of ONE event, in reading order.
+ *
+ * Shared by the batch fold ({@link foldTurnParts}) and the live stream
+ * ({@link SessionManager.runTurn}) so both attribute an event identically. A
+ * `tool/call` produces no part but records its tool name into `toolNames` as a
+ * side effect, so a later `tool/result` can name the tool behind an image.
+ * @param event - one owned-turn event.
+ * @param toolNames - call id → tool name, accumulated across the turn (mutated here).
+ * @returns the event's text and media parts, possibly empty.
+ */
+export function eventParts(event: SessionEventLike, toolNames: Map<string, string>): TurnPart[] {
+	const data = asRecord(event.data);
+	if (data === undefined) return [];
+
+	if (event.type === "tool/call") {
+		const callId = stringField(data, "callId");
+		const name = stringField(data, "name");
+		if (callId !== undefined && name !== undefined) toolNames.set(callId, name);
+		return [];
+	}
+
+	if (event.type === "assistant/message") {
+		// One part per assistant message, never merged: DSH shows each message as
+		// its own bubble, and Telegram should send each as its own message rather
+		// than gluing a turn's separate thoughts into one wall of text.
+		const text = messageText((data as { message?: unknown }).message);
+		return text.trim() !== "" ? [{ kind: "text", text }] : [];
+	}
+
+	if (event.type === "deliverables/presented") return presentedFiles(data);
+
+	if (event.type === "tool/result") return toolImages(data, toolNames);
+
+	return [];
 }
 
 /** The turn this delivery owns: the first one that opened at or after `baseline`. */
@@ -462,17 +487,68 @@ export class SessionManager {
 	}
 
 	/**
-	 * Queue a message and wait for the turn it starts.
+	 * Queue a message and stream the turn it starts.
+	 *
+	 * Each deliverable part is handed to `onParts` the moment its event commits on
+	 * the `session/event` firehose — so a multi-step reply reaches Telegram one
+	 * message at a time, the way DSH chat shows it, instead of a batch after the
+	 * turn goes idle. Deliveries are chained so they keep log order and never
+	 * overlap; only this turn's own session and its owned turn are delivered (a GUI
+	 * message typed into the same session meanwhile is a later turn — AC-13). After
+	 * `whenIdle()` a final sweep re-reads the flushed log and delivers anything a
+	 * fire-and-forget tail callback did not reach us in time to send, so nothing the
+	 * log recorded is ever dropped.
 	 * @param resolved - the chat's live agent.
 	 * @param text - the user's message.
-	 * @returns the turn's text and media parts, in reading order.
+	 * @param onParts - delivers one or more parts; awaited in log order.
 	 */
-	async runTurn(resolved: ResolvedChat, text: string): Promise<readonly TurnPart[]> {
+	async runTurn(
+		resolved: ResolvedChat,
+		text: string,
+		onParts: (parts: readonly TurnPart[]) => Promise<void>,
+	): Promise<void> {
 		const baseline = resolved.agent.session.seq;
-		resolved.agent.followup(createUserMessage({ content: [{ type: "text", text }], source: { kind: "user" } }));
-		await resolved.agent.whenIdle();
+		const sessionId = String(resolved.sessionId);
+		const toolNames = new Map<string, string>();
+		const delivered = new Set<number>();
+		let ownedTurn: number | undefined;
+		let chain: Promise<void> = Promise.resolve();
+
+		const consume = (event: SessionEventLike): void => {
+			if (event.seq < baseline || delivered.has(event.seq)) return;
+			if (ownedTurn === undefined) {
+				// The turn this delivery owns is the first that opened at or after the
+				// baseline; nothing can be attributed until it does.
+				if (event.type !== "turn/start") return;
+				ownedTurn = numberField(asRecord(event.data) ?? {}, "turn");
+				delivered.add(event.seq);
+				return;
+			}
+			const data = asRecord(event.data);
+			if (data === undefined || numberField(data, "turn") !== ownedTurn) return;
+			delivered.add(event.seq);
+			const parts = eventParts(event, toolNames);
+			if (parts.length === 0) return;
+			chain = chain
+				.then(() => onParts(parts))
+				.catch((error: unknown) => {
+					this.#deps.log(`stream delivery failed: ${(error as Error).message}`);
+				});
+		};
+
+		const dispose = this.#deps.onSessionEvent((session, event) => {
+			if (String((session as { id?: unknown }).id) !== sessionId) return;
+			consume(event);
+		});
+		try {
+			resolved.agent.followup(createUserMessage({ content: [{ type: "text", text }], source: { kind: "user" } }));
+			await resolved.agent.whenIdle();
+		} finally {
+			dispose();
+		}
 		await this.#flush(resolved.agent);
-		return foldTurnParts(resolved.agent.session.snapshotEvents(baseline), baseline);
+		for (const event of resolved.agent.session.snapshotEvents(baseline)) consume(event);
+		await chain;
 	}
 
 	/**
