@@ -14,11 +14,10 @@
  * @module dsh-buddy/persona
  */
 import { mkdir } from "node:fs/promises";
-import { expandHomePath } from "@deepseek-ai/dsh-home-paths";
-import { BUDDY_PRESET_ID, BUDDY_WORKSPACE_DEFAULT, SOUL_VARIABLE } from "../index.ts";
+import { BUDDY_PRESET_ID, SOUL_VARIABLE } from "../index.ts";
 import { readPersona, soulForPrompt, writePersona, type PersonaDocument } from "./soul.ts";
 import { BuddyPersonaGateway, type BuddySessionSummary, type PersonaView, type PreferencesView } from "./gateway.ts";
-import type { BuddyPaths } from "../paths.ts";
+import { resolveBuddyPaths, type BuddyPaths } from "../paths.ts";
 import type { BuddyConfig } from "../config.ts";
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -146,7 +145,10 @@ export function apply(ctx: PluginContext): void {
 
 	const preferences = async (): Promise<PreferencesView> => {
 		const config = ctx.buddyStore.config();
-		const conversationCwd = expandHomePath(BUDDY_WORKSPACE_DEFAULT);
+		// Derived from the buddy home so it honours a user-set `buddy.home`: buddy
+		// conversations run in `<home>/main/workspace`, a sibling of the authored
+		// files, never their directory.
+		const conversationCwd = resolveBuddyPaths(config.home).workspace;
 		// Created here, not by the caller: the browser cannot mkdir, and the session
 		// store rejects a cwd that does not exist.
 		await mkdir(conversationCwd, { recursive: true });

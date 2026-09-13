@@ -253,7 +253,10 @@ export function apply(ctx: PluginContext): void {
 			handle = await openStore(ctx);
 			const opened = handle;
 			const paths = resolveBuddyPaths(readConfig().home);
-			await mkdir(paths.home, { recursive: true });
+			// `main` holds the authored files (SOUL.md, AGENTS.md); creating it
+			// recursively creates the home too. The workspace under it is created
+			// on demand, when a conversation is first opened there.
+			await mkdir(paths.main, { recursive: true });
 			// The preset root follows the harness home (`dshHomePath()`), not the
 			// buddy home resolved above: it is the harness that reads authored
 			// presets, and a relocated buddy home must not hide the preset from it.

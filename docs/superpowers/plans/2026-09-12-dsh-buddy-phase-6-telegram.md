@@ -1,5 +1,7 @@
 # dsh-buddy Phase 6 (Telegram + main panel) Implementation Plan
 
+> **2026-09-13 follow-up revision (authoritative):** The buddy home layout is now `<buddy home>/main/` (holding `SOUL.md`, `AGENTS.md`) plus `<buddy home>/main/workspace/` (the session cwd), resolved by `resolveBuddyPaths` in `src/paths.ts`; the `~/buddy-workspace` default and the `BUDDY_WORKSPACE_DEFAULT` constant are gone. New Telegram/web sessions are **no longer** registered with `workspaceRegistry` and are **no longer** force-titled `Telegram: <chat>` — `meta.cwd` is the resolved workspace as-is, sessions appear only under the Buddy folder (never grouped under Workspaces), and the title is left to the harness's content-based auto-titling. Wherever this document mentions `~/buddy-workspace`, workspace attach, or the `Telegram:` title, this revision supersedes it (see `CLAUDE.md` and the source for current behavior).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Absorb the dsh-telegram plugin into dsh-buddy as a `dsh-buddy/telegram` row whose sessions always use the `buddy` preset, give Buddy a default model, and restructure the browser half into a modular Buddy main panel opened from a sidebar folder above Settings.

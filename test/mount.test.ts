@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
@@ -140,8 +140,12 @@ function dispatch(service: ServiceProxy, method: string, args: unknown[]): unkno
  */
 async function mount(options: MountOptions = {}): Promise<Mounted> {
 	const home = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-"));
-	if (options.soulOnDisk !== undefined) await writeFile(join(home, "SOUL.md"), options.soulOnDisk, "utf8");
-	if (options.agentsIsFifo === true) execFileSync("mkfifo", [join(home, "AGENTS.md")]);
+	// Authored files live under `main/`; create it before seeding them, since the
+	// store row's own `mkdir` has not run yet at fixture-build time.
+	const main = join(home, "main");
+	if (options.soulOnDisk !== undefined || options.agentsIsFifo === true) await mkdir(main, { recursive: true });
+	if (options.soulOnDisk !== undefined) await writeFile(join(main, "SOUL.md"), options.soulOnDisk, "utf8");
+	if (options.agentsIsFifo === true) execFileSync("mkfifo", [join(main, "AGENTS.md")]);
 
 	// The store row's boot also installs the shipped preset under the *harness*
 	// home, resolved independently of `home` above via `dshHomePath()` reading
@@ -379,7 +383,7 @@ test("the persona endpoint never answers with the pre-read placeholder", async (
 		// reverted this assertion throws before the fifo ever gets its writer,
 		// and the boot's still-pending `readFile` on it would otherwise hold the
 		// process open rather than letting the mutation surface as a clean fail.
-		await writeFile(join(mounted.home, "AGENTS.md"), "Rules.", "utf8");
+		await writeFile(join(mounted.home, "main", "AGENTS.md"), "Rules.", "utf8");
 	}
 
 	const view = await pending;
@@ -416,7 +420,7 @@ test("a persona write reaches disk and the prompt variable without a remount", a
 	// Prompt assembly reads the in-memory snapshot, so a write that only landed
 	// on disk would leave every running session on the stale voice.
 	assert.equal(mounted.variables.get(SOUL_VARIABLE)?.({}), "Terse.");
-	assert.equal(await readFile(join(mounted.home, "SOUL.md"), "utf8"), "Terse.");
+	assert.equal(await readFile(join(mounted.home, "main", "SOUL.md"), "utf8"), "Terse.");
 	assert.equal(view.soul, "Terse.");
 	assert.equal(view.home, mounted.home);
 	assert.equal(typeof view.lastWriteAt, "string", "the write must be recorded in the store");
@@ -502,21 +506,13 @@ test("sessions all report source web when the Telegram plane is absent", async (
 });
 
 test("preferences are served through the proxy with the conversation cwd", async () => {
-	// `preferences()` resolves `BUDDY_WORKSPACE_DEFAULT` (`~/buddy-workspace`)
-	// against the OS home, so `$HOME` must be isolated the same way `$DSH_HOME`
-	// is above — otherwise this test would `mkdir` inside the real account home.
-	const previousHome = process.env["HOME"];
-	const workspaceHome = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-workspace-"));
-	process.env["HOME"] = workspaceHome;
-	try {
-		const mounted = await mount();
-		const persona = mounted.persona();
-		if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
-		const view = (await dispatch(persona, "preferences", [])) as PreferencesView;
-		assert.ok(view.conversationCwd.endsWith("buddy-workspace"));
-		assert.deepEqual(view.panel, { sections: { soul: true, agents: true, model: true, telegram: true } });
-	} finally {
-		if (previousHome === undefined) delete process.env["HOME"];
-		else process.env["HOME"] = previousHome;
-	}
+	// `preferences()` derives the conversation cwd from the buddy home, so it lands
+	// at `<home>/main/workspace` under this mount's throwaway home — no `$HOME`
+	// isolation needed, and it never `mkdir`s inside the real account home.
+	const mounted = await mount();
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+	const view = (await dispatch(persona, "preferences", [])) as PreferencesView;
+	assert.equal(view.conversationCwd, join(mounted.home, "main", "workspace"));
+	assert.deepEqual(view.panel, { sections: { soul: true, agents: true, model: true, telegram: true } });
 });

@@ -83,7 +83,13 @@ const storeRow = row as unknown as Plugin;
 async function storeFixture(): Promise<{ ctx: Context; paths: BuddyPaths; handle: HandleStub }> {
 	const ctx = new Context();
 	const handle = handleStub();
-	const paths = { home: "/tmp/x", soul: "/tmp/x/SOUL.md", agents: "/tmp/x/AGENTS.md" };
+	const paths = {
+		home: "/tmp/x",
+		main: "/tmp/x/main",
+		soul: "/tmp/x/main/SOUL.md",
+		agents: "/tmp/x/main/AGENTS.md",
+		workspace: "/tmp/x/main/workspace",
+	};
 	return { ctx, paths, handle };
 }
 
@@ -122,7 +128,7 @@ test("every service member survives cordis's traceable proxy", async () => {
 	assert.equal(store.lastPersonaWriteAt(), undefined);
 	await store.markPersonaWritten("2026-01-01T00:00:00.000Z");
 	assert.equal(store.lastPersonaWriteAt(), "2026-01-01T00:00:00.000Z");
-	assert.equal(store.paths.soul, "/tmp/x/SOUL.md");
+	assert.equal(store.paths.soul, "/tmp/x/main/SOUL.md");
 	// The write reached the domain, not just a field on the instance.
 	assert.equal(handle.global.get().lastPersonaWriteAt, "2026-01-01T00:00:00.000Z");
 });
@@ -135,7 +141,13 @@ test("marking a persona write leaves the rest of the global alone", async () => 
 	(handle.global.get() as Record<string, unknown>)["future"] = "keep me";
 	const store = new BuddyStore(
 		ctx as unknown as Context,
-		{ home: "/tmp/x", soul: "/tmp/x/SOUL.md", agents: "/tmp/x/AGENTS.md" },
+		{
+			home: "/tmp/x",
+			main: "/tmp/x/main",
+			soul: "/tmp/x/main/SOUL.md",
+			agents: "/tmp/x/main/AGENTS.md",
+			workspace: "/tmp/x/main/workspace",
+		},
 		handle,
 	);
 
@@ -168,7 +180,8 @@ test("the row waits for storageDomain, then creates the home and publishes the s
 		// No settings plane is mounted here, and the row still boots on the
 		// documented default home.
 		assert.equal(store.paths.home, join(scratch.home, "buddy"));
-		assert.equal(existsSync(store.paths.home), true, "the buddy home must exist after boot");
+		assert.equal(store.paths.main, join(scratch.home, "buddy", "main"));
+		assert.equal(existsSync(store.paths.main), true, "the buddy main/ dir must exist after boot");
 
 		await fiber.dispose();
 		await until(() => handle.closed);
@@ -241,8 +254,8 @@ test("a home set through the settings plane is the home the store boots on", asy
 		// user's `buddy.home` is silently replaced by the default.
 		const store = ctx.get("buddyStore") as BuddyStore;
 		assert.equal(store.paths.home, userHome);
-		assert.equal(store.paths.soul, join(userHome, "SOUL.md"));
-		assert.equal(existsSync(userHome), true, "the configured home must be created");
+		assert.equal(store.paths.soul, join(userHome, "main", "SOUL.md"));
+		assert.equal(existsSync(join(userHome, "main")), true, "the configured home's main/ must be created");
 		assert.notEqual(store.paths.home, join(scratch.home, "buddy"));
 
 		// The registration itself, so a wrong namespace or a placeholder schema
@@ -299,7 +312,7 @@ test(
 			await until(() => ctx.get("buddyStore") !== undefined);
 			const store = ctx.get("buddyStore") as BuddyStore;
 			assert.equal(store.paths.home, join(scratch.home, "buddy"));
-			assert.equal(existsSync(store.paths.home), true, "the default home must exist after boot");
+			assert.equal(existsSync(store.paths.main), true, "the default main/ must exist after boot");
 
 			// And disposal completes rather than hanging on the same barrier.
 			await fiber.dispose();
@@ -365,7 +378,7 @@ test(
 			await until(() => ctx.get("buddyStore") !== undefined, 1_000);
 			const store = ctx.get("buddyStore") as BuddyStore;
 			assert.equal(store.paths.home, join(scratch.home, "buddy"));
-			assert.equal(existsSync(store.paths.home), true, "the default home must exist after boot");
+			assert.equal(existsSync(store.paths.main), true, "the default main/ must exist after boot");
 
 			// A degraded boot must be visible, not silent, and it uses the same
 			// log path as a boot failure.

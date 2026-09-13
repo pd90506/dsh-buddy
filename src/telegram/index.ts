@@ -15,9 +15,16 @@
  * so a profile that lacks one degrades instead of failing to mount.
  * @module dsh-buddy-telegram
  */
-import { BUDDY_PRESET_ID, BUDDY_WORKSPACE_DEFAULT } from "../index.ts";
+import { BUDDY_PRESET_ID } from "../index.ts";
 import { selectionFromDefault } from "../model-selection.ts";
-import { Config, DEFAULT_MEDIA_DELIVERY, resolveDefaultCwd, SETTINGS_NAMESPACE, type TelegramConfig } from "./config.ts";
+import {
+	Config,
+	DEFAULT_CWD,
+	DEFAULT_MEDIA_DELIVERY,
+	resolveDefaultCwd,
+	SETTINGS_NAMESPACE,
+	type TelegramConfig,
+} from "./config.ts";
 import { describeToken, readToken, TELEGRAM_TOKEN_REF } from "./credentials.ts";
 import { TelegramGateway } from "./gateway.ts";
 import { ApprovalBridge } from "./approvals.ts";
@@ -59,7 +66,7 @@ interface PluginContext {
 const FALLBACK: TelegramConfig = {
 	enabled: false,
 	ownerUserId: "",
-	defaultCwd: BUDDY_WORKSPACE_DEFAULT,
+	defaultCwd: DEFAULT_CWD,
 	permissionPreset: "workspace-write",
 	renderMarkdown: true,
 	mediaDelivery: DEFAULT_MEDIA_DELIVERY,

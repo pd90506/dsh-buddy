@@ -1,5 +1,7 @@
 # dsh-buddy 设计方案
 
+> **2026-09-13 后续修订（以此为准）：** Buddy 目录布局改为 `<buddy home>/main/`（存放 `SOUL.md`、`AGENTS.md`）与 `<buddy home>/main/workspace/`（会话工作目录），由 `src/paths.ts` 的 `resolveBuddyPaths` 解析；不再有 `~/buddy-workspace` 默认值或 `BUDDY_WORKSPACE_DEFAULT` 常量。Telegram/web 新会话**不再**注册进 `workspaceRegistry`，也**不再**被强制命名为 `Telegram: <chat>`——`meta.cwd` 直接用解析出的 workspace，会话只出现在 Buddy 文件夹、不在顶部 Workspaces 分组下，标题交由 harness 依内容自动生成。下文凡涉及 `~/buddy-workspace`、workspace 挂载、`Telegram:` 标题处，均以此修订为准（权威描述见仓库 `CLAUDE.md` 与源码）。
+
 - 日期：2026-09-12
 - 状态：已通过设计评审，待实施计划
 - 范围：终局架构 + 第一期（窥探切片）详设

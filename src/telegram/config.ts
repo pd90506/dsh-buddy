@@ -12,7 +12,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import z from "@deepseek-ai/schemastery";
-import { BUDDY_WORKSPACE_DEFAULT } from "../index.ts";
+import { resolveBuddyPaths } from "../paths.ts";
 
 /** This plugin's settings namespace. Lowercase, per the settings grammar. */
 export const SETTINGS_NAMESPACE = "buddy-telegram";
@@ -59,8 +59,13 @@ export interface TelegramConfig {
 	mediaDelivery: string;
 }
 
-/** Default working directory, matching the plan's decision. */
-export const DEFAULT_CWD = BUDDY_WORKSPACE_DEFAULT;
+/**
+ * Default working directory: the buddy workspace under the harness home
+ * (`<harness home>/buddy/main/workspace`). Computed from `dshHomePath` so it
+ * honours `$DSH_HOME`; a custom `buddy.home` is not read here, so a deployment
+ * that relocates the home also sets this setting.
+ */
+export const DEFAULT_CWD = resolveBuddyPaths("").workspace;
 
 /** Approval default: every risky call is asked about, on the phone. */
 export const DEFAULT_PERMISSION_PRESET: PermissionPreset = "workspace-write";

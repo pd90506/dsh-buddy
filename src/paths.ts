@@ -14,27 +14,44 @@
 import { isAbsolute, join, resolve } from "node:path";
 import { dshHomePath, expandHomePath } from "@deepseek-ai/dsh-home-paths";
 
-/** Absolute locations of buddy's authored files. */
+/** Absolute locations of buddy's authored files and its working directory. */
 export interface BuddyPaths {
 	/** The buddy home directory itself. */
 	readonly home: string;
+	/** The `main` layer under the home: authored files and the workspace. */
+	readonly main: string;
 	/** Persona: voice, attitude, opinions. */
 	readonly soul: string;
 	/** Operating rules, kept separate from voice on purpose. */
 	readonly agents: string;
+	/**
+	 * Where buddy conversations run. A sibling of the authored files under
+	 * `main/`, never their directory: the `workspace-write` permission preset
+	 * scopes writes to the session cwd, so an agent working here cannot reach
+	 * `../SOUL.md` or `../AGENTS.md` — self-modification stays a later phase's
+	 * decision.
+	 */
+	readonly workspace: string;
 }
 
 /**
- * Resolve the buddy home and the files inside it.
+ * Resolve the buddy home and the paths inside it.
  *
  * @param configuredHome - the `buddy.home` setting; empty or whitespace means
  * "use the harness home", which is the documented default.
- * @returns absolute paths; the directory is not created here (see `ensureBuddyHome`).
+ * @returns absolute paths; the directories are not created here (see the store row).
  */
 export function resolveBuddyPaths(configuredHome: string): BuddyPaths {
 	const raw = configuredHome.trim();
 	const home = raw === "" ? dshHomePath("buddy") : absolute(expandHomePath(raw));
-	return { home, soul: join(home, "SOUL.md"), agents: join(home, "AGENTS.md") };
+	const main = join(home, "main");
+	return {
+		home,
+		main,
+		soul: join(main, "SOUL.md"),
+		agents: join(main, "AGENTS.md"),
+		workspace: join(main, "workspace"),
+	};
 }
 
 /**

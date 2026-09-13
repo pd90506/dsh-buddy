@@ -204,7 +204,7 @@ test("a first contact creates a session with the default model and an absolute c
 	assert.equal(records.get("42")?.provider, "deepseek-official");
 });
 
-test("a new session is created inside its workspace and attached to it (R7)", async () => {
+test("a new session runs in the requested cwd and is never attached to a workspace", async () => {
 	const created: Record<string, unknown>[] = [];
 	const agents = {
 		get: () => undefined,
@@ -217,63 +217,19 @@ test("a new session is created inside its workspace and attached to it (R7)", as
 		},
 	};
 	const { store } = storeStub();
+	// A registry is present, but the manager must not touch it: buddy sessions are
+	// deliberately kept out of the GUI's workspace grouping and only appear under
+	// the Buddy folder, so a workspace is never created nor attached.
 	const { registry, createdWith, attached } = workspaceRegistryStub("/real/telegram-work");
 	const manager = new SessionManager(deps({ store, agents, presets: presetStub().service, workspaceRegistry: registry }));
 
-	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-	assert.deepEqual(createdWith, ["/tmp/telegram-work"]);
-	assert.deepEqual(created[0]?.["meta"], { cwd: "/real/telegram-work", agentPreset: "buddy" });
-	// attachSession must run only after the session itself was created.
-	assert.deepEqual(attached, [resolved.sessionId]);
-});
-
-test("without a workspace registry a new session keeps the configured cwd and logs why", async () => {
-	const created: Record<string, unknown>[] = [];
-	const agents = {
-		get: () => undefined,
-		create: async (options: Record<string, unknown>) => {
-			created.push(options);
-			return { agent: agentStub(String(options["sessionId"])), dispose: () => undefined };
-		},
-		resume: async () => {
-			throw new Error("unused");
-		},
-	};
-	const { store } = storeStub();
-	const lines: string[] = [];
-	const manager = new SessionManager(deps({ store, agents, presets: presetStub().service, log: (line) => lines.push(line) }));
-
 	await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
 	assert.deepEqual(created[0]?.["meta"], { cwd: "/tmp/telegram-work", agentPreset: "buddy" });
-	assert.ok(lines.some((line) => line.includes("workspace registry unavailable")));
+	assert.deepEqual(createdWith, [], "no workspace is created for a buddy session");
+	assert.deepEqual(attached, [], "the session is never attached to a workspace");
 });
 
-test("a workspace attach failure does not undo the session creation", async () => {
-	const created: Record<string, unknown>[] = [];
-	const agents = {
-		get: () => undefined,
-		create: async (options: Record<string, unknown>) => {
-			created.push(options);
-			return { agent: agentStub(String(options["sessionId"])), dispose: () => undefined };
-		},
-		resume: async () => {
-			throw new Error("unused");
-		},
-	};
-	const { store, records } = storeStub();
-	const { registry } = workspaceRegistryStub("/real/telegram-work", { attachFails: "workspace is gone" });
-	const lines: string[] = [];
-	const manager = new SessionManager(
-		deps({ store, agents, presets: presetStub().service, workspaceRegistry: registry, log: (line) => lines.push(line) }),
-	);
-
-	const resolved = await manager.ensure("42", "Test Chat", "/tmp/telegram-work");
-	assert.equal(resolved.created, true);
-	assert.equal(records.get("42")?.sessionId, String(resolved.sessionId));
-	assert.ok(lines.some((line) => line.includes("workspace attach failed") && line.includes("workspace is gone")));
-});
-
-test("a new session is labelled so the GUI groups it recognizably (R7)", async () => {
+test("a new session is not force-titled; the harness titles it from content", async () => {
 	const renamed: { title: string }[] = [];
 	const agents = {
 		get: () => undefined,
@@ -292,7 +248,7 @@ test("a new session is labelled so the GUI groups it recognizably (R7)", async (
 		get: (name: string) => (name === "sessionTitle" ? { rename: (_s: unknown, title: string) => renamed.push({ title }) } : base.get(name)),
 	});
 	await manager.ensure("42", "Alice", "/tmp/telegram-work");
-	assert.deepEqual(renamed, [{ title: "Telegram: Alice" }]);
+	assert.deepEqual(renamed, [], "no forced 'Telegram: …' rename; the auto-generated title stands");
 });
 
 test("a chat whose session is already live is adopted, never resumed", async () => {

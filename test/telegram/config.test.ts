@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { join } from "node:path";
 import { DEFAULT_CWD, expandHome, isPermissionPreset, resolveDefaultCwd } from "../../src/telegram/config.ts";
 
 test("expandHome handles ~, ~/x and plain paths", () => {
@@ -16,14 +17,15 @@ test("expandHome handles ~, ~/x and plain paths", () => {
 test("resolveDefaultCwd returns an absolute path for every accepted input", () => {
 	assert.equal(resolveDefaultCwd({ defaultCwd: "/srv/work" }), "/srv/work");
 	assert.equal(resolveDefaultCwd({ defaultCwd: "~/dsh-telegram" }).startsWith("/"), true);
-	assert.equal(resolveDefaultCwd({ defaultCwd: "" }).endsWith("buddy-workspace"), true);
-	assert.equal(resolveDefaultCwd({ defaultCwd: "   " }).endsWith("buddy-workspace"), true);
+	assert.equal(resolveDefaultCwd({ defaultCwd: "" }).endsWith(join("main", "workspace")), true);
+	assert.equal(resolveDefaultCwd({ defaultCwd: "   " }).endsWith(join("main", "workspace")), true);
 	assert.equal(resolveDefaultCwd({ defaultCwd: "relative" }).startsWith("/"), true);
 });
 
-test("the documented default is the dedicated directory, not the home directory", () => {
-	assert.equal(DEFAULT_CWD, "~/buddy-workspace");
-	assert.ok(!resolveDefaultCwd({ defaultCwd: DEFAULT_CWD }).endsWith("/buddy-workspace/.."));
+test("the documented default is the buddy workspace under main/, always absolute", () => {
+	assert.equal(DEFAULT_CWD.startsWith("/"), true);
+	assert.equal(DEFAULT_CWD.endsWith(join("buddy", "main", "workspace")), true);
+	assert.ok(!resolveDefaultCwd({ defaultCwd: DEFAULT_CWD }).endsWith(join("workspace", "..")));
 });
 
 test("only the three known permission presets are accepted", () => {

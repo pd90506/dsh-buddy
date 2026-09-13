@@ -378,10 +378,12 @@ test("a rejected token surfaces as an error status instead of throwing", async (
 	assert.equal(runtime.status().detail, undefined);
 });
 
-test("an ordinary message labels the session with the chat's name (AC-6)", async () => {
+test("an ordinary message hands the chat's name to ensure, not a placeholder (AC-6)", async () => {
 	// A plain text message carries no attachment, so its turn starts after the merge
-	// window with no message left to read a name from. Both live sessions were
-	// titled `Telegram: chat` for exactly that reason.
+	// window with no message left to read a name from; the derived name falls back to
+	// the `chat` placeholder for exactly that reason. The runtime still hands this
+	// name to `manager.ensure`, even though the session's own title is now left to
+	// the harness's auto-titling.
 	const h = harness("42");
 	await h.runtime.start(TOKEN);
 	await h.runtime.handleUpdate(message(42, "hello?", 1, "Panda"));
@@ -391,7 +393,7 @@ test("an ordinary message labels the session with the chat's name (AC-6)", async
 	await h.runtime.stop();
 
 	assert.deepEqual(h.turns, ["hello?"], "the turn still runs");
-	assert.deepEqual(h.titles, ["Panda"], "the session must carry the chat's name, not a placeholder");
+	assert.deepEqual(h.titles, ["Panda"], "the runtime passes the chat's name to ensure, not a placeholder");
 });
 
 test("a session that cannot be resolved explains itself instead of going silent", async () => {

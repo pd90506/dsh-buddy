@@ -15,8 +15,10 @@ test("an empty configured home falls back to the harness home", () => {
 		process.env.DSH_HOME = harnessHome;
 		const paths = resolveBuddyPaths("");
 		assert.equal(paths.home, join(harnessHome, "buddy"), "default home must sit under the harness home");
-		assert.equal(paths.soul, join(paths.home, "SOUL.md"));
-		assert.equal(paths.agents, join(paths.home, "AGENTS.md"));
+		assert.equal(paths.main, join(paths.home, "main"), "authored files live under main/");
+		assert.equal(paths.soul, join(paths.main, "SOUL.md"));
+		assert.equal(paths.agents, join(paths.main, "AGENTS.md"));
+		assert.equal(paths.workspace, join(paths.main, "workspace"), "session cwd is main/workspace");
 	} finally {
 		if (previous === undefined) delete process.env.DSH_HOME;
 		else process.env.DSH_HOME = previous;

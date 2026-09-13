@@ -116,18 +116,6 @@ interface SessionStoreLike {
 	flush(session: unknown): Promise<void>;
 }
 
-/**
- * The `ctx.workspaceRegistry` slice used here.
- *
- * `create` is idempotent by canonical path and its `attachSession` requires the
- * session's own header `cwd` to equal `workspace.path` — which is exactly why a
- * new session's `meta.cwd` is set to `workspace.path` rather than the requested
- * `defaultCwd` before `agents.create` runs.
- */
-interface WorkspaceRegistryLike {
-	create(path: string): Promise<{ readonly path: string; attachSession(sessionId: unknown): Promise<unknown> }>;
-}
-
 /** One preset id, as the roster reports it. */
 export interface AgentPresetRef {
 	/** The resolved preset id. */
@@ -447,7 +435,10 @@ export class SessionManager {
 	 * `SessionAlreadyOwnedError`, because a live agent holds the single write
 	 * handle — and the GUI, which shares this process, may be holding it.
 	 * @param chatId - the Telegram chat id, as a string.
-	 * @param chatTitle - label used for the session title.
+	 * @param chatTitle - the chat's human name. No longer forced onto the session
+	 * title: the harness auto-titles a session from its conversation content, and
+	 * the Buddy folder already labels the source as Telegram. Kept on the public
+	 * signature for the caller, which tracks the chat name for its own use.
 	 * @param defaultCwd - absolute directory for a newly created session.
 	 * @returns the live agent plus whether it was just created.
 	 */
@@ -474,7 +465,7 @@ export class SessionManager {
 				this.#deps.log(`chat ${chatId}: stored session ${record.sessionId} is gone; starting a new one`);
 			}
 		}
-		return this.#create(chatId, chatTitle, defaultCwd);
+		return this.#create(chatId, defaultCwd);
 	}
 
 	/**
@@ -655,7 +646,7 @@ export class SessionManager {
 	}
 
 	/** Create a fresh session for a chat and remember the binding. */
-	async #create(chatId: string, chatTitle: string, defaultCwd: string): Promise<ResolvedChat> {
+	async #create(chatId: string, defaultCwd: string): Promise<ResolvedChat> {
 		// Resolved before anything else: a profile without Buddy's preset must
 		// refuse the whole creation rather than leave a directory, a handle, or a
 		// chat binding behind for a session that was never composed as Buddy.
@@ -665,34 +656,19 @@ export class SessionManager {
 		// `agents.create()` does not create the directory the way the session
 		// controller's own path does, so it is created here first.
 		await mkdir(defaultCwd, { recursive: true });
-		const registry = this.#deps.get("workspaceRegistry") as WorkspaceRegistryLike | undefined;
-		let cwd = defaultCwd;
-		let workspace: Awaited<ReturnType<WorkspaceRegistryLike["create"]>> | undefined;
-		if (registry === undefined) {
-			this.#deps.log("workspace registry unavailable: session is not attached to a workspace");
-		} else {
-			workspace = await registry.create(defaultCwd);
-			cwd = workspace.path;
-		}
+		// Deliberately not registered with the workspace registry: a buddy session
+		// stays out of the GUI's Workspaces grouping and appears only under the
+		// Buddy folder. Its cwd is the requested directory as-is, and its record
+		// lands in DSH's default per-session location — no extra wiring.
 		const ref = this.#selectionRef(sessionId, undefined);
 		if (ref.current === undefined) ref.current = this.#defaultSelection();
 		const handle = await agents.create({
 			sessionId,
-			meta: { cwd, agentPreset: presetId },
+			meta: { cwd: defaultCwd, agentPreset: presetId },
 			...this.#agentOptions(ref.current),
 			setup: this.#setupFor(() => ref, presetId),
 		});
 		this.#adopt(String(sessionId), handle);
-		if (workspace !== undefined) {
-			try {
-				await workspace.attachSession(sessionId);
-			} catch (error) {
-				// The session is fully usable from Telegram either way — a failed
-				// attach only means it will not show up grouped under the workspace
-				// in the GUI, which is not worth rolling the creation back over.
-				this.#deps.log(`workspace attach failed: ${(error as Error).message}`);
-			}
-		}
 		await this.#deps.store.chats.put(chatId, {
 			sessionId: String(sessionId),
 			...(ref.current === undefined
@@ -705,7 +681,8 @@ export class SessionManager {
 			updatedAt: new Date().toISOString(),
 		});
 		await this.#deps.store.origins.put(String(sessionId), { chatId, createdAt: new Date().toISOString() });
-		this.#label(handle.agent, chatTitle);
+		// No forced title: the harness auto-titles the session from its content, and
+		// the Buddy folder already marks the source as Telegram.
 		return { sessionId, agent: handle.agent, created: true };
 	}
 
@@ -768,19 +745,6 @@ export class SessionManager {
 			const id = storedPreset(agent) ?? fallbackPresetId ?? (await this.#presetId());
 			await presets.mount(agentCtx, id);
 		};
-	}
-
-	/** Best-effort title, so the GUI groups Telegram sessions recognizably. */
-	#label(agent: AgentLike, chatTitle: string): void {
-		const titles = this.#deps.get("sessionTitle") as
-			| { rename(session: unknown, title: string): unknown }
-			| undefined;
-		if (titles === undefined) return;
-		try {
-			titles.rename(agent.session, `Telegram: ${chatTitle}`);
-		} catch (error) {
-			this.#deps.log(`session title failed: ${(error as Error).message}`);
-		}
 	}
 
 	/** Durability barrier before the log is read back. */

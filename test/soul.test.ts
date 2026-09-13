@@ -9,7 +9,9 @@ import type { BuddyPaths } from "../src/paths.ts";
 /** A real temporary buddy home, because this module's whole job is file IO. */
 async function paths(): Promise<BuddyPaths> {
 	const home = await mkdtemp(join(tmpdir(), "dsh-buddy-"));
-	return { home, soul: join(home, "SOUL.md"), agents: join(home, "AGENTS.md") };
+	// This suite exercises only the soul/agents IO, so `main` is the temp home
+	// itself (already created by mkdtemp) — soul.ts never touches `main`/`workspace`.
+	return { home, main: home, soul: join(home, "SOUL.md"), agents: join(home, "AGENTS.md"), workspace: join(home, "workspace") };
 }
 
 test("an absent SOUL.md reads as the default persona, never empty", async () => {
