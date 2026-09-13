@@ -32,6 +32,7 @@ const hostEntries = [
 	["src/index.ts", "lib/index.js"],
 	["src/store/index.ts", "lib/store.js"],
 	["src/persona/index.ts", "lib/persona.js"],
+	["src/telegram/index.ts", "lib/telegram.js"],
 ];
 
 for (const [entry, outfile] of hostEntries) {
