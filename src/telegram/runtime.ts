@@ -47,6 +47,17 @@ export const TYPING_INTERVAL_MS = 4000;
 /** Wait after an unexpected polling failure. */
 const POLL_ERROR_BACKOFF_MS = 3000;
 
+/**
+ * Waits between startup `getMe` retries, in ms — one entry per retry.
+ *
+ * `getMe` is the first call the bot makes, and a home with no working IPv6 route
+ * to Telegram can see it time out (`ETIMEDOUT`) even when the network is fine a
+ * moment later. Unlike the poll loop, which retries `getUpdates` on its own, a
+ * failed startup would otherwise leave the module stuck in Error until a manual
+ * Retry, so a transient blip is retried here before giving up.
+ */
+const GETME_BACKOFFS_MS: readonly number[] = [1000, 2000, 4000];
+
 /** The commands published to Telegram's menu and answered here. */
 export const COMMANDS: readonly { command: string; description: string }[] = [
 	{ command: "help", description: "How to use this bot" },
@@ -84,6 +95,8 @@ export interface RuntimeDeps {
 				pollBackoffMs?: number;
 				/** Replaces the flood-control wait, so a retry test need not sleep. */
 				floodMs?: number;
+				/** Overrides the wait between startup `getMe` retries, so a retry test need not sleep. */
+				startupBackoffMs?: number;
 		  }
 		| undefined;
 }
@@ -188,14 +201,21 @@ export class TelegramRuntime {
 			...(this.#deps.apiBase === undefined ? {} : { baseUrl: this.#deps.apiBase }),
 			log: this.#deps.log,
 		});
+		// Created before the handshake so a `stop()` mid-startup interrupts the
+		// getMe retries, and so the poll loop can reuse the same signal.
+		const abort = new AbortController();
+		this.#abort = abort;
 		try {
-			const me = await api.getMe();
+			const me = await this.#getMeWithRetry(api, abort.signal);
 			this.#botUsername = me.username;
 			// A webhook left on this token makes getUpdates answer 409, so it is
 			// cleared before the first poll rather than diagnosed later.
 			await api.deleteWebhook();
 			await api.setMyCommands(COMMANDS);
 		} catch (error) {
+			// A stop() landed during startup and already set the status; do not
+			// overwrite "off" with a failure nothing is acting on any more.
+			if (abort.signal.aborted) return;
 			this.#state = "error";
 			// R3: a rejected token is reported as exactly that in the settings tab,
 			// rather than as Telegram's raw `Unauthorized` (or worse, a transport
@@ -211,8 +231,57 @@ export class TelegramRuntime {
 		this.#api = api;
 		this.#state = "running";
 		await this.#recordStatus();
-		this.#abort = new AbortController();
-		void this.#pollLoop(api, this.#abort.signal);
+		void this.#pollLoop(api, abort.signal);
+	}
+
+	/**
+	 * Call `getMe`, retrying a transport failure with backoff before giving up.
+	 *
+	 * An auth rejection is never retried — a wrong token will not come good by
+	 * waiting — and the wait is cancellable, so a `stop()` mid-retry ends it at once.
+	 * @param api - the bound client.
+	 * @param signal - the startup abort signal.
+	 * @returns the bot info once `getMe` succeeds.
+	 * @throws the last error when the token is rejected, the signal aborts, or the retries are exhausted.
+	 */
+	async #getMeWithRetry(api: TelegramApi, signal: AbortSignal): Promise<Awaited<ReturnType<TelegramApi["getMe"]>>> {
+		const waits = this.#deps.timing?.startupBackoffMs === undefined
+			? GETME_BACKOFFS_MS
+			: GETME_BACKOFFS_MS.map(() => this.#deps.timing?.startupBackoffMs ?? 0);
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				return await api.getMe(signal);
+			} catch (error) {
+				if (error instanceof TelegramApiError && error.isUnauthorized) throw error;
+				if (signal.aborted || attempt >= waits.length) throw error;
+				this.#deps.log(
+					`telegram: getMe failed (${(error as Error).message}); retry ${attempt + 1}/${waits.length}`,
+				);
+				await this.#sleep(waits[attempt] ?? 0, signal);
+				if (signal.aborted) throw error;
+			}
+		}
+	}
+
+	/**
+	 * Sleep for `ms`, resolving early (never rejecting) when the signal aborts, so
+	 * a cancelled retry wait unwinds cleanly.
+	 * @param ms - milliseconds to wait; a non-positive value returns at once.
+	 * @param signal - cancellation.
+	 */
+	async #sleep(ms: number, signal: AbortSignal): Promise<void> {
+		if (ms <= 0 || signal.aborted) return;
+		await new Promise<void>((resolve) => {
+			const onAbort = (): void => {
+				clearTimeout(timer);
+				resolve();
+			};
+			const timer = setTimeout(() => {
+				signal.removeEventListener("abort", onAbort);
+				resolve();
+			}, ms);
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
 	}
 
 	/** Stop polling and drop every pending prompt. */

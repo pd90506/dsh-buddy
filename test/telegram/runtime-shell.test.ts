@@ -98,6 +98,8 @@ function harness(
 		floods?: number | undefined;
 		/** Fail every media upload, to exercise the notice path. */
 		mediaFails?: boolean | undefined;
+		/** Fail this many `getMe` calls with a transport error before letting startup succeed. */
+		getMeFailures?: number | undefined;
 	} = {},
 ): Harness {
 	const calls: string[] = [];
@@ -121,9 +123,18 @@ function harness(
 
 	let remainingPollFailures = options.pollFailures ?? 0;
 	let remainingFloods = options.floods ?? 0;
+	let remainingGetMeFailures = options.getMeFailures ?? 0;
 	const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
 		const method = String(url).split("/").pop() ?? "";
 		calls.push(method);
+		if (method === "getMe" && remainingGetMeFailures > 0) {
+			remainingGetMeFailures -= 1;
+			// Shaped like an undici connect timeout, so `api.ts` wraps it as
+			// "getMe: transport failure (ETIMEDOUT)" — the exact real-world failure.
+			const error = new Error("fetch failed");
+			(error as { cause?: unknown }).cause = { code: "ETIMEDOUT" };
+			throw error;
+		}
 		if (method === "sendMessage" && remainingFloods > 0) {
 			remainingFloods -= 1;
 			return new Response(
@@ -285,7 +296,7 @@ function harness(
 		config: () => config(ownerUserId, options.configOverrides),
 		log: (line) => logs.push(line),
 		fetch: fetchImpl,
-		timing: { mergeMs: 5, chunkMs: 0, typingMs: 5, pollBackoffMs: 5, floodMs: 0 },
+		timing: { mergeMs: 5, chunkMs: 0, typingMs: 5, pollBackoffMs: 5, floodMs: 0, startupBackoffMs: 0 },
 	});
 	return {
 		runtime,
@@ -344,6 +355,29 @@ test("startup validates the token, clears any webhook, then publishes commands",
 	assert.deepEqual(h.calls.slice(0, 3), ["getMe", "deleteWebhook", "setMyCommands"]);
 	assert.equal(h.runtime.status().state, "running");
 	assert.equal(h.runtime.status().botUsername, "test_bot");
+	await h.runtime.stop();
+});
+
+test("a transient getMe transport failure is retried, and startup still reaches running", async () => {
+	// The bot's home has no route to Telegram over IPv6, so the first getMe can
+	// time out (ETIMEDOUT) even when the network is fine a moment later. A single
+	// blip must not leave the module stuck in Error: getMe is retried.
+	const h = harness("42", { getMeFailures: 2 });
+	await h.runtime.start(TOKEN);
+	assert.equal(h.runtime.status().state, "running", "startup recovers after transient getMe failures");
+	assert.equal(h.calls.filter((call) => call === "getMe").length, 3, "getMe was retried twice before succeeding");
+	assert.deepEqual(h.calls.filter((call) => call === "deleteWebhook" || call === "setMyCommands"), [
+		"deleteWebhook",
+		"setMyCommands",
+	]);
+	await h.runtime.stop();
+});
+
+test("a persistently failing getMe still ends in a reported error, not a hang", async () => {
+	const h = harness("42", { getMeFailures: 99 });
+	await h.runtime.start(TOKEN);
+	assert.equal(h.runtime.status().state, "error", "after the retries are exhausted it reports error");
+	assert.match(h.runtime.status().detail ?? "", /ETIMEDOUT/);
 	await h.runtime.stop();
 });
 
