@@ -423,3 +423,68 @@ test("a failed workspace create is shown, and no session is created or opened", 
 	assert.deepEqual(sessionCalls, []);
 	assert.ok(!panel.actions.some((action) => action.service === "sessions.open"));
 });
+
+test("the main panel drops a module the settings tab just hid, without remounting (R8)", async () => {
+	// The settings tab and the main panel are two independent slot registrations
+	// from the SAME `apply(ctx)` call, mounted here as siblings of one composite
+	// root so both share the one `react` binding the built bundle captured —
+	// each keeps its own hook storage (per `createRenderer`'s per-instance
+	// addressing), so a re-render of one never resets the other's state, and only
+	// the shared `preferencesChanged` notifier can make the panel reload.
+	const renderer = createRenderer();
+	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
+	let prefs = { ...PREFS, panel: { sections: { soul: true, agents: true, model: true, telegram: true } } };
+	const { ctx, registrations } = contextStub({
+		rpc: {
+			call: async (_route: string, endpoint: string, payload: unknown) => {
+				if (endpoint === "buddyPersona/preferences") return { ok: true, value: prefs };
+				if (endpoint === "buddyPersona/updatePreferences") {
+					const patch = (payload as { args: { patch: { panel: { sections: Record<string, boolean> } } } }).args.patch;
+					prefs = { ...prefs, panel: { sections: { ...prefs.panel.sections, ...patch.panel.sections } } };
+					return { ok: true, value: prefs };
+				}
+				if (endpoint === "buddyPersona/persona") return { ok: true, value: { soul: "", agents: "", home: "/h" } };
+				if (endpoint === "buddyTelegram/config") {
+					return {
+						ok: true,
+						value: { enabled: false, ownerUserId: "", defaultCwd: "", permissionPreset: "workspace-write", renderMarkdown: true, mediaDelivery: "all" },
+					};
+				}
+				if (endpoint === "buddyTelegram/status") {
+					return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
+				}
+				throw new Error(`unexpected endpoint: ${endpoint}`);
+			},
+		},
+		remote: { session: { modelCatalog: async () => ({ ok: true, value: { default: { provider: "", model: "" }, routableProviders: [], groups: [], failures: [] } }) } },
+	});
+	client.apply(ctx);
+	const settingsReg = registrations.find((r) => r.options.name === "settings.section");
+	const mainReg = registrations.find((r) => r.options.name === "main");
+	assert.ok(settingsReg !== undefined && mainReg !== undefined);
+
+	const Root = (): unknown => [
+		{ type: settingsReg.component, props: {} },
+		{ type: mainReg.component, props: {} },
+	];
+	renderer.mount(Root as () => unknown);
+	await settle();
+
+	// `resolve` maps an array preserving position, so the composite tree's two
+	// entries are the settings tab's own rendered output and the panel's, in
+	// that order — checked separately below because the settings tab always
+	// lists every module's toggle (checked or not), while only the panel's own
+	// module cards are expected to come and go.
+	const [, panelTree] = renderer.tree() as [unknown, unknown];
+	assert.ok(texts(panelTree).includes("settings.buddy:telegramTitle"), "the telegram module card renders before the toggle");
+	assert.ok(texts(panelTree).includes("settings.buddy:soulTitle"));
+
+	const telegramCheckbox = elements(renderer.tree()).find((e) => e.type === "input" && e.props["name"] === "telegram");
+	assert.ok(telegramCheckbox !== undefined, "the settings tab's telegram checkbox");
+	(telegramCheckbox.props["onChange"] as (event: { target: { checked: boolean } }) => void)({ target: { checked: false } });
+	await settle();
+
+	const [, panelTreeAfter] = renderer.tree() as [unknown, unknown];
+	assert.ok(!texts(panelTreeAfter).includes("settings.buddy:telegramTitle"), "the panel drops the module live, without a remount");
+	assert.ok(texts(panelTreeAfter).includes("settings.buddy:soulTitle"), "an untouched module keeps rendering");
+});

@@ -28,6 +28,7 @@ import { createDocumentModule } from "./document-module.tsx";
 import { createBuddyFolder } from "./folder.tsx";
 import { createModelModule } from "./model-module.tsx";
 import type { PanelModule } from "./modules.ts";
+import { createNotifier } from "./notifier.ts";
 import { createBuddyPanel } from "./panel.tsx";
 import { createBuddySettingsSection } from "./settings.tsx";
 import { createTelegramModule } from "./telegram-module.tsx";
@@ -222,7 +223,12 @@ export function apply(ctx: any): void {
 	// ./call.ts for why unwrapping it exactly once matters.
 	const call = createCall(rpc);
 
-	const BuddySettingsSection = createBuddySettingsSection({ call, t });
+	// Shared by the settings tab and the main panel, mounted separately below:
+	// this is the only channel a module-visibility change has to reach the
+	// already-mounted panel without remounting it.
+	const preferencesChanged = createNotifier();
+
+	const BuddySettingsSection = createBuddySettingsSection({ call, t, preferencesChanged });
 
 	ctx.slots.inject("settings.section", () =>
 		ctx.slots.register(
@@ -309,7 +315,7 @@ export function apply(ctx: any): void {
 		if (modelError !== undefined) throw modelError;
 	};
 
-	const BuddyPanel = createBuddyPanel({ call, t, modules, newConversation });
+	const BuddyPanel = createBuddyPanel({ call, t, modules, newConversation, preferencesChanged });
 
 	// One shared constant for both registrations, so the id and the key cannot
 	// drift apart in a later edit.

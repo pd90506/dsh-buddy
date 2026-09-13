@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { Call } from "./call.ts";
 import { visibleModules, type PanelModule } from "./modules.ts";
+import type { Notifier } from "./notifier.ts";
 import type { PanelSectionId } from "../config.ts";
 
 /** Collaborators supplied by the plugin's `apply`. */
@@ -16,6 +17,8 @@ export interface PanelDeps {
 	modules: readonly PanelModule<() => unknown>[];
 	/** Create, configure and open a new buddy conversation; rejects with a displayable message. */
 	newConversation(): Promise<void>;
+	/** Fires when the Settings tab changes which modules are visible, so this mounted panel can reload without remounting. */
+	preferencesChanged: Notifier;
 }
 
 const styles = {
@@ -70,6 +73,11 @@ export function createBuddyPanel(deps: PanelDeps): () => unknown {
 		useEffect(() => {
 			void load();
 		}, [load]);
+
+		// The settings tab and this panel are separate component trees mounted
+		// from the same `apply(ctx)`, so a settings-side toggle cannot reach this
+		// panel through props or context — only through the shared notifier.
+		useEffect(() => deps.preferencesChanged.subscribe(() => void load()), [load]);
 
 		const create = async (): Promise<void> => {
 			setBusy(true);

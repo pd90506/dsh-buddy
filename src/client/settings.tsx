@@ -6,12 +6,15 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import type { Call } from "./call.ts";
+import type { Notifier } from "./notifier.ts";
 import { PANEL_SECTION_IDS, type PanelSectionId } from "../config.ts";
 
 /** Collaborators supplied by the plugin's `apply`. */
 export interface SettingsDeps {
 	call: Call;
 	t(key: string): string;
+	/** Notified after a successful `updatePreferences`, so the main panel can reload live. */
+	preferencesChanged: Notifier;
 }
 
 const TITLE_KEYS: Record<PanelSectionId, string> = {
@@ -67,6 +70,7 @@ export function createBuddySettingsSection(deps: SettingsDeps): () => unknown {
 				};
 				setSections(prefs.panel.sections);
 				setError(undefined);
+				deps.preferencesChanged.notify();
 			} catch (cause) {
 				setError((cause as Error).message);
 			}
