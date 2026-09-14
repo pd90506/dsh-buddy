@@ -33,13 +33,21 @@ import type { SkillAction } from "./manage.ts";
 /**
  * The actions that change something the review should have read first.
  *
- * `create` is deliberately absent — there is nothing prior to have read — and
- * so is `delete`, which the batch rules already confine to a single-operation
- * call.
+ * `create` is deliberately absent — there is nothing prior to have read.
+ *
+ * `delete` **is** included, and that is a deliberate tightening rather than the
+ * plan's original enumeration (the plan listed only the four content-mutating
+ * actions, and spec §8.4 phrases the rule as "to patch a skill the review must
+ * have read it"). Read-before-write exists to stop the review mutating a skill
+ * it has not understood, and deletion is the most destructive mutation there
+ * is; the spec is silent on `delete` rather than permissive, and the stricter
+ * reading costs one extra read by a review that intends to delete anyway. The
+ * four-action list can be restored knowingly by removing `"delete"` here.
  */
 const READ_REQUIRED_ACTIONS: ReadonlySet<SkillAction> = new Set<SkillAction>([
 	"patch",
 	"edit",
+	"delete",
 	"write_file",
 	"remove_file",
 ]);
@@ -91,9 +99,12 @@ export function isCuratorManaged(record: GuardRecord | undefined | null): boolea
  * A foreground caller is allowed immediately: the restriction exists to keep the
  * *automatic* review inside what it created, not to police the human. A review
  * is then refused in the order pinned → not curator-managed → read-before-write,
- * so the reported reason is the strongest one that holds. `create` is allowed
- * once it is past the pin check: a skill the review is about to create has no
- * prior provenance to own and nothing to have read.
+ * so the reported reason is the strongest one that holds. That order is
+ * load-bearing, not cosmetic: a **pinned human-created** skill must be told
+ * about the pin, because the not-managed message points at `adopt` and `adopt`
+ * cannot unblock a pin — reporting it there would be actively misleading.
+ * `create` is allowed once it is past the pin check: a skill the review is about
+ * to create has no prior provenance to own and nothing to have read.
  * @param input - the caller's identity, the target's telemetry, the action and
  * the review's read set.
  * @returns the verdict; refusing never throws and touches nothing.
