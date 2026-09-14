@@ -1477,10 +1477,33 @@ git commit -m "feat: the buddy-skills host row and its panel endpoints"
 **Files:**
 - Create: `src/skills-agent/index.ts`
 - Test: `test/skills-agent.test.ts`
+- Modify: `src/skills/index.ts`（`noteSkillRead` → `noteSkillUsed`，`BuddySkillsService` 加 `skillsRoot()`）
+- Modify: `package.json`（peer + dev 加 `@deepseek-ai/dsh-tools`）
+
+> **订正（2026-09-14，session 3 控制者）——原文的三处接口缺口，都是对着已装的 harness 逐个核出来的。**
+> 1. **技能根取不到。** 原文说「从 `ctx.get("buddySkills")` 取技能根」，但 `BuddySkillsService` 的公开面里
+>    没有任何路径访问器（它内部用 `this.host.buddyStore.paths.skills`）。→ 加 `skillsRoot(): string`。
+> 2. **`bumpUse` / `markRead` 不是服务方法。** 它们是 `usage.ts` / `guards.ts` 的内部函数；preset 行绝不能
+>    import 它们（那会把 host 逻辑复制进 `lib/skills-agent.js`，越过分行边界）。Task 13 预留的
+>    `noteSkillRead` 只记 read 标记、不记用量，且**全仓库没有任何调用者**。→ 把它换成
+>    `noteSkillUsed(sessionId, skill)`（记用量 + 记 read 标记），让 preset 行的观察者只调一个方法。
+> 3. **`defineTool` 必须有依赖声明。** `@deepseek-ai/dsh-tools` 在 `node_modules` 里但 package.json 没声明，
+>    而 `build.mjs:23` 的 `hostExternal` 取自 dependencies ∪ peerDependencies —— 不声明就会把整个 dsh-tools
+>    打进 `lib/skills-agent.js`，正是「每个 `@deepseek-ai/*` 都保持 external」这条不变量禁止的。`defineTool`
+>    不是恒等函数（`dsh-tools/lib/index.js:837` 会编译参数 schema 并包住 `execute`），所以它必须被 import。
+>    Task 18 也改 `package.json`，但改的是 `exports`（不同键，互不冲突）。
 
 **Interfaces:**
 - Consumes: Task 8、9、13 的 `ctx.buddySkills`
-- Produces: 一个 preset 行：注册 provider（buddy 层）、`skill_manage` 工具、`session/event` 与 `tools/post-execute` 监听器、`refine` 命令，并调用 `ctx.buddySkills.noteAgentRowMounted()`
+- Produces:
+  - preset 行 `dsh-buddy-skills-agent`：注册 provider（buddy 层）、`skill_manage` 工具、
+    `session/event` 与 `tools/post-execute` 监听器、`refine` 命令，并调 `ctx.buddySkills.noteAgentRowMounted()`
+  - `BuddySkillsService.skillsRoot(): string`（返回 `this.host.buddyStore.paths.skills`）
+  - `BuddySkillsService.noteSkillUsed(sessionId: string, skill: string): Promise<void>`
+    （`bumpUse(skillUsage(), skill, now)` + `markRead(readSets, sessionId, skill)`；两者都不抛）
+  - **五个软依赖一律 `ctx.get(name)` + 本地最小接口声明**，因为 `dsh-skill` / `dsh-commands` 根本不在本包的
+    依赖闭包里，且 `dsh-tools` 只借它的 `defineTool`：
+    `skills` / `tools` / `commands` / `buddySkills` / （若需要）`agentRegistry`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1503,8 +1526,8 @@ test("step and turn events drive the coordinator through the host service", asyn
 test("observing the skill loader bumps use and records a read mark", async () => {
 	const scope = await mountAgentRow({ withSkillsPlane: true });
 	await emitPostExecute(scope, { name: "skill", arguments: { name: "a-b" }, agent: { id: "s1" } });
-	assert.deepEqual(callsTo("bumpUse"), ["a-b"]);
-	assert.deepEqual(callsTo("markRead"), ["s1:a-b"]);
+	// 一个方法做两件事：记用量 + 记 read 标记（见 Interfaces 的订正 2）
+	assert.deepEqual(callsTo("noteSkillUsed"), ["s1:a-b"]);
 });
 
 test("the tool resets the nudge counter and routes writes through the service", async () => {
@@ -1528,24 +1551,56 @@ export const name = "dsh-buddy-skills-agent";
 // 不导出 inject：preset 行必须能在 skills 宿主行缺席时仍然挂载。
 ```
 
-要点：
+要点（每条都已对着 harness 的声明核过，签名照抄）：
 
-- provider 用 `ctx.skills.registerProvider(...)`（**从 preset 行的 ctx 调用才会落进 buddy 层**），并从 `ctx.get("buddySkills")` 取技能根；宿主服务缺席时不注册。
-- 工具用 `ctx.tools.register(defineTool({...}))`，`execute(args, exec)` 里先 `ctx.buddySkills.noteSkillManageCalled(exec.agent?.id)` 再转给 `manage()`；`exec.agent` 缺失时拒绝（review 之外没有 agent 的调用不可信）。
-- `session/event` 监听器只做转发（`step/end` → `noteStep`；`turn/end` → `onTurnEnd`），并带上 `session.header.origin` 与 `delegationDepth`。
-- `tools/post-execute` 监听器只处理 `exec.name === "skill"`：取 `exec.arguments.name`，调 `bumpUse` + `markRead(sessionId, skill)`。
-- `commands.register({ name: "refine", description: "...", handler })` → `ctx.buddySkills.refine(invocation.agent, focus)`。
-- 挂载时调 `ctx.buddySkills.noteAgentRowMounted()`。
+- provider：先 `const plane = ctx.get("buddySkills")`；**缺席就什么都不注册**（整行退化为空，不阻塞 preset
+  挂载）。注册用 `ctx.get("skills")`（软依赖，本地声明最小接口）
+  `registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void`，
+  其中 `SkillProviderControl = { signal: AbortSignal; invalidate: () => void }`
+  （`dsh-skill/lib/types/index.d.ts:190-195,249`）。两个 provider 用 Task 9 已有的
+  `createBuddyProvider({ skillsRoot: plane.skillsRoot() })` 与 `createPromotedProvider(...)`。
+  **`control.invalidate()` 必须由 `skill_manage` 成功写入后调用**——注册表缓存目录，不 invalidate 的话新建
+  的技能永远不可见，而**没有**公开的 `ctx.skills.invalidate()`，唯一的失效入口就是工厂拿到的这个 control。
+  把 control 存进闭包，工具与监听器共用。
+- 工具：`import { defineTool } from "@deepseek-ai/dsh-tools"`（**必须 import**，见订正 3），
+  `ctx.get("tools").register(defineTool({...}))`，`register(definition: ToolDefinition): () => void`
+  （`dsh-tools/lib/types/index.d.ts:601`）。`defineTool` 的选项形状
+  `{ name, description, parameters, output: { schema, render(args, value): ContentBlock[] }, execute(args, exec) }`
+  （`dsh-tools/lib/types/schema.d.ts:178-208`；`output` 是**必填**的 canonical 输出声明）。
+  `parameters` 是 JSON-schema 风格的 DSL（`{ operations: { type: "array", items: {...} } }` 之类，
+  以 `{type:'string'}` / `{type:'array', items}` 为节点）。`execute(args, exec)` 里先
+  `plane.noteSkillManageCalled(exec.agent?.id)` 再 `plane.manage(exec.agent, operations)`；
+  **`exec.agent` 缺失时拒绝**（review 之外没有 agent 的调用不可信）。成功写入后调 `control.invalidate()`。
+- `session/event`：监听器签名是 **两个参数** `(session, event)`
+  （`dsh-session/lib/types/index.d.ts:62`，emit 不是 waterfall）。只做转发：
+  `event.type === "step/end"` → `plane.noteStep(session.header.id)`；
+  `event.type === "turn/end"` → `plane.onTurnEnd({ sessionId: session.header.id, reason: event.data.reason,
+  origin: session.header.origin, delegationDepth: ... })`（`onTurnEnd` 的入参形状以 Task 13 的
+  `src/skills/index.ts` 声明为准，不要自创字段；带不进去的字段宁可不带）。
+- `tools/post-execute`：**waterfall**，必须 `return next()`
+  （`dsh-tools/lib/types/index.d.ts:61`）——漏掉 `next()` 会静默吞掉这次派发。只处理
+  `exec.name === "skill"`：取 `exec.arguments?.name`（字符串才算），调
+  `plane.noteSkillUsed(exec.agent?.id, skill)`。
+- `refine`：`ctx.get("commands").register({ name: "refine", description,
+  handler: (invocation) => ... })`，`CommandDefinition` 形状见
+  `dsh-commands/lib/types/index.d.ts:37-52`，`CommandInvocation = {commandId, agent, rawInput,
+  attachments, signal}`（`:18-35`）——focus 就是 `invocation.rawInput`（去掉首尾空白）。
+  返回 `{ kind: "success" | "error", text }`（`dsh-commands/lib/types/types.d.ts:33-41`）。
+  处理函数转 `plane.refine(invocation.agent, focus)`。
+- 挂载时调 `plane.noteAgentRowMounted()`。
+- **所有注册都走 `ctx.effect(...)`**（`registerProvider` / `tools.register` / `commands.register` 返回的
+  disposer 就是 effect 的返回值；`ctx.on` 本身即 effect）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `node --test test/skills-agent.test.ts && npm run typecheck`
-Expected: PASS
+Run: `node --test test/skills-agent.test.ts test/skills-mount.test.ts && npm run typecheck && npm run build`
+Expected: PASS。`npm run build` 不是可选项：`defineTool` 的 external 与否只有在构建产物里才看得出来
+（订正 3），提交前以 `npm run check` 为准。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/skills-agent/index.ts test/skills-agent.test.ts
+git add src/skills-agent/index.ts src/skills/index.ts package.json test/skills-agent.test.ts
 git commit -m "feat: the buddy preset skills row (provider, tool, listeners, refine)"
 ```
 
