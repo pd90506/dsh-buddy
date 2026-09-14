@@ -787,7 +787,7 @@ git commit -m "feat: skill_manage operations with atomic batches"
 
 **Interfaces:**
 - Consumes: Task 2（usage 表）、Task 6、Task 7 的 `applyOne`
-- Produces: `isCuratorManaged(record): boolean`；`backgroundWriteGuard(input: { reviewSession: boolean; record; pinned; action; skill; readSet: Set<string> }): { allow: true } | { allow: false; reason: string }`；`markRead(readSets: Map<string, Set<string>>, sessionId: string, skill: string): void`；`resetReadSet(readSets, sessionId): void`
+- Produces: `isCuratorManaged(record): boolean`；`backgroundWriteGuard(input: { reviewSession: boolean; record; pinned; action; skill; readSet: Set<string> }): { allow: true } | { allow: false; reason: string }`；`markRead(readSets: Map<string, Set<string>>, sessionId: string, skill: string): void`；`resetReadSet(readSets, sessionId): void`；并在 `ManageDeps` 上加 `guard(action, skill)` 字段、在 `applyOne` 入口调用它
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -831,13 +831,22 @@ Expected: PASS
 
 - [ ] **Step 5: 把守卫接进写路径（本任务的一部分，不是可选）**
 
-`src/skills/manage.ts` 的 `applyOne` 入口调用守卫——**没有这一步，Task 7 的写入就是无守卫的**：
+`src/skills/manage.ts` 的 `applyOne` 入口调用守卫——**没有这一步，Task 7 的写入就是无守卫的**。
+守卫经 `ManageDeps` 注入（`guard(action, skill)`），因为 `reviewSession`（这次调用是否来自本行起过的
+review 子会话）与 `readSet`（Task 14 观察到的技能读取）都是宿主行的状态，`manage.ts` 不该知道
+provenance 从哪来：
+
+```ts
+export interface ManageDeps extends LedgerDeps {
+	// …既有：skillsRoot / usage / actor() / now()
+	/** 管辖权与 read-before-write 的判定；由宿主行按调用方身份注入。 */
+	guard(action: Operation["action"], skill: string): { allow: true } | { allow: false; reason: string };
+}
+```
 
 ```ts
 	// applyOne 的第一件事：管辖权、pinned、read-before-write 三条都在这里判。
-	// 守卫由 deps 提供（`reviewSession` 来自"这个调用是否来自我起过的 review 子会话"，
-	// `readSet` 来自 Task 14 观察到的技能读取），因此 manage.ts 不需要知道 provenance 怎么来的。
-	const verdict = deps.guard({ action: operation.action, skill: operation.name });
+	const verdict = deps.guard(operation.action, operation.name);
 	if (!verdict.allow) return { success: false, error: verdict.reason };
 ```
 
