@@ -742,7 +742,12 @@ export async function runOperations(deps: ManageDeps, operations: readonly Opera
 	const snapshot = await snapshotTouched(deps, operations);
 	if (!snapshot.ok) return { success: false, error: snapshot.error };
 	// 审计账本的 before 快照：尽力而为，失败只是没有 before（spec §8.3 第 2 条）。
-	const before = await captureBefore(deps, operations);
+	// `captureBefore` 一次只取**一个**目录的清单，所以这里按 skill 逐个取、再合并成一个
+	// before 清单交给 recordMutation（它本来就吃扁平的 `{path,sha256}[]`）。任一个取失败就
+	// 整体放弃 before —— 宁可没有，也不要一份缺料的审计记录。
+	const roots = [...new Set(operations.map((op) => join(deps.skillsRoot, op.name)))];
+	const captured = await Promise.all(roots.map((root) => captureBefore(deps, root)));
+	const before = captured.every((part) => part !== undefined) ? captured.flat() : undefined;
 	const results: unknown[] = [];
 	for (const [index, operation] of operations.entries()) {
 		const outcome = await applyOne(deps, operation);
