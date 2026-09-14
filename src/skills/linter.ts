@@ -119,6 +119,9 @@ const INCIDENT_REF_RE = /#\d+/g;
 /** A path a body points at inside one of the support directories. */
 const SUPPORT_PATH_RE = new RegExp(`(?:${SUPPORT_DIRS.join("|")})/[^\\s\`)\\]"'>;,]+`, "g");
 
+/** An absolute URL that immediately precedes a candidate path. */
+const URL_SCHEME_BEFORE_RE = /(?:https?|ftp|file):\/\/\S*$/i;
+
 /**
  * Lint one skill document.
  *
@@ -144,7 +147,7 @@ export function lintSkill(input: LintInput): LintFinding[] {
 		checkIncidentLogShape(findings, body);
 		checkDanglingReferences(findings, body, dirExists);
 		checkPlatformsValue(findings, frontmatter);
-		checkPlatformsGating(findings, frontmatter, content);
+		checkPlatformsGating(findings, frontmatter, body);
 		checkForbiddenFiles(findings, dirExists);
 		checkReferencesSprawl(findings, body);
 		checkShellUtilities(findings, body);
@@ -295,14 +298,16 @@ function checkPlatformsValue(findings: LintFinding[], frontmatter: Record<string
  * Rule `platforms-gating`: a POSIX-only primitive needs `platforms:` declared.
  *
  * The linter only ever sees the document text, so the primitive is looked for
- * there — which is also where a skill's shell snippets actually live.
+ * in the **body** — where a skill's shell snippets actually live. Frontmatter
+ * prose is not evidence: a `description:` that happens to name `systemctl` is
+ * not a script that runs it.
  * @param findings - the accumulator.
  * @param frontmatter - the parsed frontmatter.
- * @param content - the complete document.
+ * @param body - the document text without its frontmatter.
  */
-function checkPlatformsGating(findings: LintFinding[], frontmatter: Record<string, unknown>, content: string): void {
+function checkPlatformsGating(findings: LintFinding[], frontmatter: Record<string, unknown>, body: string): void {
 	if (hasPlatforms(frontmatter)) return;
-	const hits = POSIX_PRIMITIVES.filter((primitive) => content.includes(primitive));
+	const hits = POSIX_PRIMITIVES.filter((primitive) => body.includes(primitive));
 	if (hits.length === 0) return;
 	findings.push({
 		severity: "warning",
@@ -357,17 +362,28 @@ function checkReferencesSprawl(findings: LintFinding[], body: string): void {
 /**
  * Rule `shell-utility-reference`: a shell utility must be named as DSH's tool.
  *
- * Only inline code spans count, so English words like "find", "head" or "tail"
- * in ordinary prose do not turn into findings. All hits travel in one finding,
- * because a caller showing advice wants the whole mapping at once.
+ * Only code context counts — an inline span's first word, and command lines
+ * inside fenced blocks — so English words like "find", "head" or "tail" in
+ * ordinary prose do not turn into findings. A utility whose DSH tool has the
+ * same name (`grep`) is skipped: the body already names the right tool. All
+ * hits travel in one finding, because a caller showing advice wants the whole
+ * mapping at once.
  * @param findings - the accumulator.
  * @param body - the document text without its frontmatter.
  */
 function checkShellUtilities(findings: LintFinding[], body: string): void {
 	const used = new Set<string>();
 	for (const match of body.matchAll(CODE_SPAN_RE)) {
-		const span = (match[1] ?? "").trim();
-		if (Object.prototype.hasOwnProperty.call(SHELL_UTIL_TO_TOOL, span)) used.add(span);
+		collectShellUtility(used, firstWord(match[1] ?? ""));
+	}
+	for (const match of body.matchAll(FENCED_CODE_RE)) {
+		for (const line of (match[0] ?? "").split("\n")) {
+			const trimmed = line.trim();
+			if (trimmed.startsWith("```")) continue;
+			for (const command of trimmed.split(/&&|\|\||[;|]/)) {
+				collectShellUtility(used, firstWord(command));
+			}
+		}
 	}
 	if (used.size === 0) return;
 	const pairs = [...used].map((utility) => `\`${utility}\` → \`${SHELL_UTIL_TO_TOOL[utility] ?? utility}\``);
@@ -379,21 +395,56 @@ function checkShellUtilities(findings: LintFinding[], body: string): void {
 }
 
 /**
+ * Record one candidate utility if it is a mapped one with a different DSH name.
+ * @param used - the accumulator, in order of first appearance.
+ * @param candidate - the token a code context starts with.
+ */
+function collectShellUtility(used: Set<string>, candidate: string): void {
+	if (!Object.prototype.hasOwnProperty.call(SHELL_UTIL_TO_TOOL, candidate)) return;
+	// `grep` maps to `grep`: the body is already naming DSH's tool, so the
+	// advisory would be a no-op. The map itself is mandated and stays as-is.
+	if ((SHELL_UTIL_TO_TOOL[candidate] ?? candidate) === candidate) return;
+	used.add(candidate);
+}
+
+/**
+ * The command word a line or span starts with.
+ * @param text - one inline span or command segment.
+ * @returns the first word, without a shell prompt or a leading indent.
+ */
+function firstWord(text: string): string {
+	const trimmed = text.trim().replace(/^[$>]\s+/, "");
+	return trimmed.split(/\s+/)[0] ?? "";
+}
+
+/**
  * Rule `missing-metadata`: Buddy's own metadata convention must be declared.
  * @param findings - the accumulator.
  * @param frontmatter - the parsed frontmatter.
  */
 function checkMetadata(findings: LintFinding[], frontmatter: Record<string, unknown>): void {
-	const missing = EXPECTED_METADATA.filter((key) => {
-		const value = frontmatter[key];
-		return typeof value !== "string" || value.trim() === "";
-	});
+	const missing = EXPECTED_METADATA.filter((key) => !metadataPresent(frontmatter[key]));
 	if (missing.length === 0) return;
 	findings.push({
 		severity: "warning",
 		rule: "missing-metadata",
 		message: `frontmatter is missing: ${missing.join(", ")}`,
 	});
+}
+
+/**
+ * Whether a metadata field carries a value.
+ *
+ * A scalar is present when it is a non-blank string; a block list of authors
+ * (`author: [Ann, Bob]`) is present metadata too, so a non-empty array of
+ * non-blank strings counts for any of the expected fields.
+ * @param value - the frontmatter value.
+ * @returns true when the field is declared with at least one real value.
+ */
+function metadataPresent(value: unknown): boolean {
+	if (typeof value === "string") return value.trim() !== "";
+	if (Array.isArray(value)) return value.some((item) => typeof item === "string" && item.trim() !== "");
+	return false;
 }
 
 /**
@@ -418,6 +469,9 @@ function supportPaths(body: string): string[] {
 	// `matchAll` needs a fresh cursor; the shared regex is global.
 	SUPPORT_PATH_RE.lastIndex = 0;
 	for (const match of body.matchAll(SUPPORT_PATH_RE)) {
+		// A path inside an absolute URL points outside the skill directory and
+		// is not ours to resolve.
+		if (URL_SCHEME_BEFORE_RE.test(body.slice(0, match.index))) continue;
 		const rel = match[0].replace(/[.,;:!?]+$/, "");
 		const base = rel.slice(rel.lastIndexOf("/") + 1);
 		// A bare directory mention (`references/`) names no file to resolve.
