@@ -169,6 +169,15 @@ interface MountOptions {
 	 * service answers `undefined`, exactly as the registry does.
 	 */
 	readonly agents?: Readonly<Record<string, { provider?: string; model?: string }>>;
+	/**
+	 * Occupy the preset id with a directory that is the USER's own preset,
+	 * written under the temp `DSH_HOME` before any row mounts; default `false`.
+	 *
+	 * The store row's boot `syncPreset` then finds an unmarked, non-empty
+	 * preset directory under it and returns `kept`, which is the state the
+	 * panel has to be able to name — the whole point of the ownership field.
+	 */
+	readonly seedUserPreset?: boolean;
 }
 
 /**
@@ -233,6 +242,23 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 	const previousDshHome = process.env["DSH_HOME"];
 	const dshHome = await mkdtemp(join(tmpdir(), "dsh-buddy-skills-dsh-"));
 	process.env["DSH_HOME"] = dshHome;
+	/**
+	 * Put the ambient `$DSH_HOME` back.
+	 *
+	 * Deliberately NOT run when the mount returns. The store row resolves
+	 * `dshHomePath()` on *every* call, so both its boot `syncPreset` and any
+	 * later `buddyStore.presetOwnership()` read whatever is ambient at that
+	 * moment — and this suite asserts on `status()` after the mount returns,
+	 * while `provideStore()` boots the store row even later. Restoring early
+	 * would point those reads at the real `~/.dsh`, which is both
+	 * non-hermetic and, now that an unmarked directory whose bytes this plugin
+	 * published is CLAIMED and rewritten, destructive. The temp home is held
+	 * until `dispose()`, and the child process exits with it.
+	 */
+	const restoreDshHome = (): void => {
+		if (previousDshHome === undefined) delete process.env["DSH_HOME"];
+		else process.env["DSH_HOME"] = previousDshHome;
+	};
 	// A complete config, the way the settings plane resolves the schema: the rows
 	// read `ctx.buddyStore.config()` whole, so a partial object would make the
 	// coordinator read `undefined` where a number belongs.
@@ -241,6 +267,15 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		home,
 		skills: { ...FALLBACK_CONFIG.skills, ...(options.skills ?? {}) },
 	};
+
+	// Seeded BEFORE any row mounts: the store row's boot `syncPreset` is what
+	// reads this directory, so a seed written afterwards would be observed by
+	// nothing and the test would assert against the wrong state.
+	if (options.seedUserPreset === true) {
+		const presetDir = join(dshHome, ".agent-presets", "buddy");
+		await mkdir(presetDir, { recursive: true });
+		await writeFile(join(presetDir, "agent.cordis.yml"), "mine\n", "utf8");
+	}
 
 	// The heartbeat bound is a real ten-second timer, so it is captured where the
 	// row arms it: every other timeout still goes to the real scheduler (the
@@ -433,6 +468,10 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			skillsRowState: () => skillsFiber.state,
 			provideStore: () => {
 				if (options.withStore !== false) return;
+				// This boot happens after the harness returned, so the temp home
+				// is re-asserted here: `dshHomePath()` is read at call time by
+				// both the boot's `syncPreset` and every later `presetOwnership()`.
+				process.env["DSH_HOME"] = dshHome;
 				mountRow(storeRow as never);
 			},
 			releaseStart: () => releaseStart(),
@@ -459,6 +498,7 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			// depends on, which is what a real reload does.
 			dispose: async () => {
 				for (const fiber of [...fibers].reverse()) await fiber.dispose();
+				restoreDshHome();
 			},
 		};
 	} finally {
@@ -467,8 +507,6 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		// bound has already been armed by the time the harness returns, so the
 		// restore costs the capture nothing.
 		globalThis.setTimeout = realSetTimeout;
-		if (previousDshHome === undefined) delete process.env["DSH_HOME"];
-		else process.env["DSH_HOME"] = previousDshHome;
 	}
 }
 
@@ -611,7 +649,7 @@ test("the heartbeat bound fires the not-synced state after ten seconds", async (
 	assert.equal(await dispatch(service, "presetSyncMissed", []), true);
 	assert.equal(await dispatch(service, "presetSynced", []), false);
 	// The same fact on the wire, which is what a panel actually reads.
-	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: true });
+	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: true, preset: "plugin" });
 });
 
 test("a heartbeat that arrives late still clears the notice", async () => {
@@ -632,7 +670,17 @@ test("a heartbeat that arrived before the bound is never reported as a miss", as
 	mounted.fireHeartbeat();
 	assert.equal(await dispatch(service, "presetSyncMissed", []), false);
 	assert.equal(await dispatch(service, "presetSynced", []), true);
-	assert.deepEqual(await dispatch(service, "status", []), { synced: true, missed: false });
+	assert.deepEqual(await dispatch(service, "status", []), { synced: true, missed: false, preset: "plugin" });
+});
+
+test("a preset id the user's own preset occupies is reported as the user's", async () => {
+	// The mount's temp `DSH_HOME` holds a hand-written, unmarked preset, so the
+	// store row's boot `syncPreset` keeps it. The panel must be able to say
+	// that, because "your own preset is why the row never arrived" is the one
+	// diagnosis a user can act on.
+	const mounted = await mountSkills({ seedUserPreset: true });
+	const service = serviceOf(mounted);
+	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: false, preset: "user" });
 });
 
 test("every endpoint names the service key that actually carries the typert binding", async () => {

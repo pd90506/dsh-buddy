@@ -18,7 +18,8 @@ import type { Context } from "@deepseek-ai/cordis";
 import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../config.ts";
 import { resolveBuddyPaths, type BuddyPaths } from "../paths.ts";
 import { openStore, type BuddyDomainHandle } from "./domain.ts";
-import { presetTargetDir, resolveTemplateDir, syncPreset } from "./preset.ts";
+import { presetOwnership, presetTargetDir, resolveTemplateDir, syncPreset } from "./preset.ts";
+import type { PresetOwnership } from "./preset.ts";
 
 declare module "@deepseek-ai/cordis" {
 	interface Context {
@@ -141,6 +142,19 @@ export class BuddyStore extends Service {
 	 */
 	reviewUsage(): BuddyDomainHandle["reviewUsage"] {
 		return this.handle.reviewUsage;
+	}
+
+	/**
+	 * Who the `buddy` preset directory belongs to, for the panel's notice.
+	 *
+	 * The root is resolved per call rather than captured at boot, so this
+	 * answers about the same directory the boot's own `syncPreset` acted on.
+	 * A soft read of the installed state, never a read-modify-write: asking
+	 * must not change what is on disk.
+	 * @returns `"absent"`, `"plugin"` or `"user"`.
+	 */
+	async presetOwnership(): Promise<PresetOwnership> {
+		return await presetOwnership(presetTargetDir(dshHomePath()));
 	}
 
 	/**

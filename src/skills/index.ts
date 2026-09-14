@@ -44,6 +44,9 @@ import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 import type { BuddyConfig } from "../config.ts";
 import type { BuddyPaths } from "../paths.ts";
 import type { ReviewUsageRecord, SkillLedgerRecord, SkillUsageRecord } from "../store/domain.ts";
+// `import type` only: this module must not pull `src/store/preset.ts` — and its
+// `node:crypto` / `node:fs` imports — into the built `lib/skills.js`.
+import type { PresetOwnership } from "../store/preset.ts";
 import type { DigestMessage } from "./digest.ts";
 import {
 	BuddySkillsGateway,
@@ -102,6 +105,8 @@ interface StoreHandle {
 	skillUsage(): KvTable<string, SkillUsageRecord>;
 	skillLedger(): KvTable<string, SkillLedgerRecord>;
 	reviewUsage(): KvTable<string, ReviewUsageRecord>;
+	/** Who the `buddy` preset directory belongs to, resolved per call. */
+	presetOwnership(): Promise<PresetOwnership>;
 }
 
 /** The context members this row uses. */
@@ -449,12 +454,20 @@ export class BuddySkillsService extends Service {
 	/**
 	 * The preset-sync notice, as the panel reads it (spec §5.2's third bullet).
 	 *
-	 * The two fields are the same fact from both sides so a panel can render
-	 * whichever it wants without knowing which one the bound writes.
-	 * @returns whether the agent row reported in, and whether the notice shows.
+	 * The two heartbeat fields are the same fact from both sides so a panel can
+	 * render whichever it wants without knowing which one the bound writes.
+	 * `preset` is the other half of the diagnosis — told apart, a missing row
+	 * because a heartbeat never came and a row that can never come because the
+	 * user's own preset owns the id are two different things to a user.
+	 * @returns whether the agent row reported in, whether the notice shows, and
+	 * who owns the preset directory.
 	 */
 	async status(): Promise<SkillsStatusView> {
-		return { synced: this.heartbeat, missed: this.heartbeatMissed };
+		return {
+			synced: this.heartbeat,
+			missed: this.heartbeatMissed,
+			preset: await this.host.buddyStore.presetOwnership(),
+		};
 	}
 
 	// ── the write path ───────────────────────────────────────────────────────
