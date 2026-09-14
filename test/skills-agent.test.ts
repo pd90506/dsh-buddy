@@ -769,10 +769,16 @@ test("a tool call with no owning agent is refused and never reaches the write pa
 	await scope.dispose();
 });
 
-test("a successful write invalidates the registry's cached catalog", async () => {
+test("a successful tool write invalidates both catalogs exactly once each", async () => {
 	// The registry caches completed catalogs, and the factory's control is the
 	// only invalidation entry point — there is no public `ctx.skills.invalidate`.
 	// A row that skips this leaves every newly created skill invisible.
+	//
+	// The tool's only write is `plane.manage`, which is the host row's write path
+	// and refreshes both catalogs there; this row deliberately keeps no second
+	// copy of its control. So "exactly once" is the assertion, not just "at
+	// least once": a local call here plus the host row's would be the same
+	// invalidation twice, which is the shape that hides a missing owner.
 	const scope = await mountAgentRow();
 	assert.equal(scope.invalidationsFor("buddy-skills"), 0, "nothing has been written yet");
 	const result = (await scope.callTool(
@@ -781,13 +787,8 @@ test("a successful write invalidates the registry's cached catalog", async () =>
 		AGENT,
 	)) as { success: boolean };
 	assert.equal(result.success, true);
-	// Two registrations, both stale after one write: the preset row's own buddy
-	// catalog (the tool's `control.invalidate()`) and the host row's promoted one
-	// (the service's own invalidation, since a document can carry a visibility
-	// line). Neither may be missed — a stale catalog reads as a write that
-	// silently did not happen.
-	assert.equal(scope.invalidationsFor("buddy-skills"), 1, "the preset row's own catalog must refresh");
-	assert.equal(scope.invalidationsFor("buddy-promoted"), 1, "and so must the host row's promoted catalog");
+	assert.equal(scope.invalidationsFor("buddy-skills"), 1, "the buddy catalog is stale after a create");
+	assert.equal(scope.invalidationsFor("buddy-promoted"), 1, "and so is the promoted one");
 	await scope.dispose();
 });
 
@@ -800,6 +801,51 @@ test("a refused write does not invalidate the catalog", async () => {
 	assert.equal(result.success, false);
 	assert.equal(scope.invalidationsFor("buddy-skills"), 0);
 	assert.equal(scope.invalidationsFor("buddy-promoted"), 0);
+	await scope.dispose();
+});
+
+test("a panel write invalidates both providers' catalogs", async () => {
+	// The panel does not go through `skill_manage`: the endpoint calls the service
+	// directly. This harness mounts **both** rows, so both registrations are live
+	// — the host row's global promoted tier and the preset row's buddy tier — and a
+	// skill created from the panel lands in the shared skills root, which means it
+	// changes what the **buddy** provider contributes too. Invalidating only the
+	// promoted catalog (the shape this test was written to catch) leaves the new
+	// skill invisible to buddy sessions until some unrelated invalidation: exactly
+	// the silent no-op the write path's invalidation exists to prevent.
+	const scope = await mountAgentRow();
+	assert.deepEqual(
+		[...scope.providerNames()].sort(),
+		["buddy-promoted", "buddy-skills"],
+		"both rows must be mounted for this to be the real thing",
+	);
+	const service = scope.skills() as {
+		manage(actor: unknown, operations: readonly unknown[]): Promise<{ success: boolean; message: string }>;
+		setVisibility(skill: string, tier: unknown): Promise<{ success: boolean; message: string }>;
+	};
+
+	// The panel's create, straight through the service.
+	const created = await service.manage(AGENT, [
+		{ action: "create", name: "x-y", content: skillDocument("x-y") },
+	]);
+	assert.equal(created.success, true, created.message);
+	assert.equal(scope.invalidationsFor("buddy-skills"), 1, "the buddy catalog changed too");
+	assert.equal(scope.invalidationsFor("buddy-promoted"), 1);
+
+	// The panel's promotion, which changes specifically what the promoted provider
+	// contributes — and moves the skill out of the buddy tier at the same time.
+	const promoted = await service.setVisibility("x-y", "global");
+	assert.equal(promoted.success, true, promoted.message);
+	assert.equal(scope.invalidationsFor("buddy-skills"), 2);
+	assert.equal(scope.invalidationsFor("buddy-promoted"), 2);
+
+	// A refused write changes nothing, so it must not invalidate anything.
+	const refused = await service.manage(AGENT, []);
+	assert.equal(refused.success, false);
+	const badTier = await service.setVisibility("x-y", "not-a-tier");
+	assert.equal(badTier.success, false);
+	assert.equal(scope.invalidationsFor("buddy-skills"), 2, "a refused write must not invalidate");
+	assert.equal(scope.invalidationsFor("buddy-promoted"), 2);
 	await scope.dispose();
 });
 

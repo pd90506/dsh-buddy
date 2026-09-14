@@ -274,13 +274,27 @@ export class BuddySkillsService extends Service {
 	private pendingParent: ParentAgent | undefined;
 
 	/**
-	 * The promoted provider registration's control, handed over by `apply`.
+	 * The two provider registrations' controls, handed over by the rows that own
+	 * them.
 	 *
-	 * Held because a visibility change and a write both change exactly what that
-	 * provider contributes, the registry caches completed catalogs, and the
-	 * control is the only invalidation entry point there is (`ctx.skills` has no
-	 * public `invalidate()`).
+	 * Both are held because **every** write path this row owns changes what the
+	 * buddy provider contributes (a create lands in the shared skills root) and
+	 * some of them change what the promoted provider contributes as well (a
+	 * visibility change, or a document that carries a `visibility:` line). The
+	 * registry caches completed catalogs and there is no public
+	 * `ctx.skills.invalidate()`, so these controls are the only way to say so.
+	 *
+	 * The buddy control arrives from the **preset row**, which owns that
+	 * registration (spec §4.1's layer split); the promoted one from this row's own
+	 * `apply`. A control whose registration has since been disposed needs no
+	 * cleanup here: `dsh-skill` looks the registration up by provider identity
+	 * before touching the cache (`SkillRegistry.registerProvider`'s `invalidate`,
+	 * `dsh-skill/lib/index.js:150-156`) and the disposable clears that reference,
+	 * so a stale call is a no-op rather than a resurrection.
 	 */
+	private buddyControl: SkillProviderControl | undefined;
+
+	/** The promoted provider registration's control — see {@link buddyControl}. */
 	private promotedControl: SkillProviderControl | undefined;
 
 	/** Whether the agent row has reported that it mounted. */
@@ -532,8 +546,8 @@ export class BuddySkillsService extends Service {
 		// {@link setVisibility}. Nothing in the outcome says whether it did, and a
 		// needless invalidation costs only the next reader one catalog rebuild,
 		// while a missed one leaves the promotion invisible to ordinary sessions —
-		// so every successful batch refreshes the catalog.
-		if (outcome.success) this.invalidatePromoted();
+		// so every successful batch refreshes both catalogs.
+		if (outcome.success) this.invalidateCatalogs();
 		return await this.mutationView(
 			outcome.success,
 			outcome.success ? `applied ${clean.length} operation(s)` : (outcome.error ?? "the batch was refused"),
@@ -576,9 +590,9 @@ export class BuddySkillsService extends Service {
 		const outcome = await runOperations(this.manageDeps("", "user"), [
 			{ action: "patch", name: skill, old_string: document, new_string: patched },
 		]);
-		// The rewrite *is* what the promoted provider filters on, so its cached
-		// catalog is stale the instant this lands.
-		if (outcome.success) this.invalidatePromoted();
+		// The rewrite moves the skill between the two tiers, so both cached
+		// catalogs are stale the instant this lands.
+		if (outcome.success) this.invalidateCatalogs();
 		return await this.mutationView(
 			outcome.success,
 			outcome.success ? `'${skill}' is now visible to ${parsed}` : (outcome.error ?? "the promotion was refused"),
@@ -660,9 +674,9 @@ export class BuddySkillsService extends Service {
 	async rollback(entryId: string): Promise<{ success: boolean; message: string }> {
 		const outcome = await rollbackEntry(this.ledgerDeps(), entryId);
 		// A rollback restores the SKILL.md bytes a prior write replaced — which may
-		// be the very `visibility` line a promotion wrote — so the promoted catalog
-		// is stale after it too.
-		if (outcome.ok) this.invalidatePromoted();
+		// be the very `visibility` line a promotion wrote — so both catalogs are
+		// stale after it too.
+		if (outcome.ok) this.invalidateCatalogs();
 		return { success: outcome.ok, message: outcome.message };
 	}
 
@@ -810,14 +824,26 @@ export class BuddySkillsService extends Service {
 	}
 
 	/**
+	 * Take ownership of the **buddy** provider registration's control.
+	 *
+	 * Called by the preset row at the moment it registers that provider. The
+	 * control is registration-scoped and only the registering factory is ever
+	 * handed it, while everything that makes the buddy catalog stale is a write
+	 * path on *this* row — a panel create as much as a tool one, since both land
+	 * in the same skills root. Handing it over here is what keeps one owner for
+	 * invalidation instead of two half-owners, one of which (the panel path) would
+	 * otherwise never reach the buddy catalog at all.
+	 * @param control - the lifecycle and invalidation control of that registration.
+	 */
+	noteBuddyControl(control: SkillProviderControl): void {
+		this.buddyControl = control;
+	}
+
+	/**
 	 * Take ownership of the promoted provider registration's control.
 	 *
 	 * Called by this row's own `apply` at the moment it registers the promoted
-	 * provider. The control cannot be captured by the service itself — it is
-	 * registration-scoped and only the registering effect is ever handed it —
-	 * while the two things that make the promoted catalog stale are both service
-	 * methods ({@link setVisibility}, {@link manage}), so the handle is handed
-	 * over here.
+	 * provider, for the same reason as {@link noteBuddyControl}.
 	 * @param control - the lifecycle and invalidation control of that registration.
 	 */
 	notePromotedControl(control: SkillProviderControl): void {
@@ -827,12 +853,17 @@ export class BuddySkillsService extends Service {
 	// ── internals ────────────────────────────────────────────────────────────
 
 	/**
-	 * Refresh the promoted provider's cached catalog, when one is registered.
+	 * Refresh both providers' cached catalogs, for the registrations that exist.
 	 *
-	 * A missing control means no `skills` registry existed at mount, so there is
-	 * no catalog to refresh — a degraded plane, never an error.
+	 * Both, always, because the two tiers read the same skills root: one write can
+	 * change what either contributes, and telling them apart would mean parsing
+	 * the batch for a `visibility:` line — a cheap over-invalidation against a
+	 * silent miss, and the miss is the failure the whole write path guards
+	 * against. A missing control means no `skills` registry was present at mount,
+	 * so there is no catalog to refresh — a degraded plane, never an error.
 	 */
-	private invalidatePromoted(): void {
+	private invalidateCatalogs(): void {
+		this.buddyControl?.invalidate();
 		this.promotedControl?.invalidate();
 	}
 
