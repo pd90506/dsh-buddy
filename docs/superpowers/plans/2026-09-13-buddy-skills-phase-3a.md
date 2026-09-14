@@ -1650,27 +1650,45 @@ git commit -m "feat: the buddy preset skills row (provider, tool, listeners, ref
 
 **Files:**
 - Test: `test/skills-isolation.test.ts`
+- Modify: `package.json`（dev 加 `@deepseek-ai/dsh-scope`）
 
 **Interfaces:**
 - Consumes: Task 14
-- Produces: 无（只有测试）
+- Produces: 无产品代码（只有测试）
+
+> **订正（2026-09-14，session 3 控制者）——原文这条测试的形状在本包里做不到，必须按可证明的那一半重写。**
+> 本包的依赖闭包里**有 `dsh-scope` 和 `dsh-tools`，没有 `dsh-skill`**（`node_modules/@deepseek-ai/` 实测），
+> 而 `dsh-skill` 又是**不可安装**的（worktree 的 `node_modules` 是指向主 checkout 的符号链接，且无网络）。
+> 所以原文第一、二条断言里的 `skillNames(scope)` 这种"真技能目录按层隔离"的证明在本包里**没有真身可挂**：
+> 自己用 `ScopedLayers` 拼一个注册表来测，那是在测我们的仿制品，不是在测注册表——**不要伪造它**。
+> 但工具那一半是**真的能证明**的：`dsh-tools` 装着，`ToolRuntime` 是同一个 host+per-scope 分层机制
+> （`dsh-skill` 自己的文档就说它是"the host+per-scope shape the tools registry established"），
+> 它的 `static inject = ["systemPrompt"]`（`dsh-tools/lib/index.js:2568`）在本包是已声明的依赖，
+> 而它直接暴露带 scope 参数的读取口：`schemas(scope?: ScopeKey): ToolSchema[]`
+> （`dsh-tools/lib/types/index.d.ts:676`）与 `get(name, scope?)`（`:655`）。`dsh-scope` 提供
+> `createScope(ctx, key)`（`dsh-scope/lib/types/index.d.ts:78`）——那正是 agent preset 的 standing mount
+> 建 scope 用的东西（注意：`ctx.isolate()` 是 cordis 的服务 realm 隔离，**不是**这套 scope key，用它
+> 证明不了任何可见性）。
 
 - [ ] **Step 1: 写失败的测试**
 
-在一个真 cordis app 里建两个 scope：一个装 skills-agent 行（模拟 buddy preset），一个不装（模拟普通编码会话），然后断言：
+在一个**真 cordis app** 里挂**真的 `dsh-tools` `ToolRuntime`**（提供它要求的 `systemPrompt`），用
+`dsh-scope` 的 `createScope` 建两个 scope：A 里装 skills-agent 行（模拟 buddy preset），B 里什么都不装
+（模拟普通编码会话）。断言：
 
 ```ts
-test("a skill registered in the buddy layer is invisible to another scope", async () => {
+test("skill_manage is absent from a scope that never mounted the row", async () => {
 	const app = await twoScopes();
-	await writeSkill(app.skillsRoot, "buddy-only", "visibility: buddy");
-	assert.deepEqual(await skillNames(app.buddyScope), ["buddy-only"]);
-	assert.deepEqual(await skillNames(app.codingScope), []);
+	assert.ok(app.tools.schemas(app.buddyScope).some((t) => t.name === "skill_manage"));
+	assert.ok(!app.tools.schemas(app.codingScope).some((t) => t.name === "skill_manage"));
 });
 
-test("skill_manage is not in another scope's tool catalog", async () => {
+test("the row's provider registration is filed by a scoped context", async () => {
+	// dsh-skill 不可安装，所以技能目录那一半的真身证明留给 Task 18 的真机 probe（spec §13.2 第 2 条）。
+	// 这里能钉的是机制：注册必须由**带 scope 的 ctx** 发起，而不是某个 ambient/global ctx。
 	const app = await twoScopes();
-	assert.ok((await toolSchemas(app.buddyScope)).some((t) => t.name === "skill_manage"));
-	assert.ok(!(await toolSchemas(app.codingScope)).some((t) => t.name === "skill_manage"));
+	assert.equal(scopeOf(app.registrationCtx), app.buddyScope);
+	assert.equal(scopeOf(app.hostRowCtx), undefined); // 宿主行 = global 层（spec §4.3）
 });
 
 test("skills on disk are not picked up by the deployment's default roots", async () => {
@@ -1680,25 +1698,31 @@ test("skills on disk are not picked up by the deployment's default roots", async
 });
 ```
 
+`skillsRoot` 用真的 `resolveBuddyPaths`（或 store 行）算出来，别写字面量。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `node --test test/skills-isolation.test.ts`
-Expected: FAIL — 第二个 scope 也能看到（说明注册位置不对）
+Expected: FAIL — 模块不存在；随后若 B scope 也看得到 `skill_manage`，说明注册没有落进调用者的 scope。
 
 - [ ] **Step 3: 让测试通过**
 
-若 buddy scope 可见而 coding scope 不可见，测试即通过——**这一步不需要改产品代码**；若两个 scope 都能看到，说明 provider 是从宿主行注册的，回到 Task 14 修正注册位置。这是一条**证明性测试**，它的价值在于把"隔离"从设计意图变成可执行的断言。
+**这一步不需要改产品代码**——Task 14 已经把注册放在 preset 行的 ctx 上。要改的是测试：让 A scope 的
+ctx 去挂行。若两个 scope 都看得到 `skill_manage`，说明行是从宿主行的 ctx 注册的（或测试把行挂在了
+unscoped 的根 ctx 上），回到 Task 14 的注册位置与测试的挂载点去修。这是一条**证明性测试**：它把"隔离"
+从设计意图变成可执行的断言，并且**明确写下它证明不了的那一半**——技能目录的跨 scope 不可见性只有
+Task 18 的真机 probe 能证，本包缺 `dsh-skill`。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `node --test test/skills-isolation.test.ts`
+Run: `node --test test/skills-isolation.test.ts && npm run check`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add test/skills-isolation.test.ts
-git commit -m "test: prove buddy-layer skill isolation across scopes"
+git add test/skills-isolation.test.ts package.json package-lock.json
+git commit -m "test: prove tool-catalog isolation across scopes, and name what only the real harness can prove"
 ```
 
 ---
