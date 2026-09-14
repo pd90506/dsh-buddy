@@ -45,6 +45,15 @@ import { FALLBACK_CONFIG, type BuddyConfig } from "../src/config.ts";
 import { REFINE_FOCUS_SUFFIX } from "../src/skills/prompt.ts";
 import type { ReviewUsageRecord, SkillLedgerRecord, SkillUsageRecord } from "../src/store/domain.ts";
 import { tableStub } from "./support/domain-tables.ts";
+import { holdDshHome } from "./support/dsh-home-hold.ts";
+
+/**
+ * The file's `$DSH_HOME` hold.
+ *
+ * See `./support/dsh-home-hold.ts` for why the ambient home is held for the
+ * whole file rather than put back when a mount returns.
+ */
+const dshHomeHold = holdDshHome();
 
 /** A service as consumers reach it: a traceable proxy, never the instance. */
 type ServiceProxy = Record<string, (...args: unknown[]) => unknown>;
@@ -238,27 +247,12 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 	const home = await mkdtemp(join(tmpdir(), "dsh-buddy-skills-"));
 	// The store row installs the shipped preset under the *harness* home, which
 	// `dshHomePath()` resolves from `$DSH_HOME` at call time. Left unset it would
-	// reach the real `~/.dsh`, so every mount in this suite is hermetic.
-	const previousDshHome = process.env["DSH_HOME"];
-	const dshHome = await mkdtemp(join(tmpdir(), "dsh-buddy-skills-dsh-"));
-	process.env["DSH_HOME"] = dshHome;
-	/**
-	 * Put the ambient `$DSH_HOME` back.
-	 *
-	 * Deliberately NOT run when the mount returns. The store row resolves
-	 * `dshHomePath()` on *every* call, so both its boot `syncPreset` and any
-	 * later `buddyStore.presetOwnership()` read whatever is ambient at that
-	 * moment — and this suite asserts on `status()` after the mount returns,
-	 * while `provideStore()` boots the store row even later. Restoring early
-	 * would point those reads at the real `~/.dsh`, which is both
-	 * non-hermetic and, now that an unmarked directory whose bytes this plugin
-	 * published is CLAIMED and rewritten, destructive. The temp home is held
-	 * until `dispose()`, and the child process exits with it.
-	 */
-	const restoreDshHome = (): void => {
-		if (previousDshHome === undefined) delete process.env["DSH_HOME"];
-		else process.env["DSH_HOME"] = previousDshHome;
-	};
+	// reach the real `~/.dsh`, so every mount in this suite is hermetic — and the
+	// ambient value stays held for the whole file (`./support/dsh-home-hold.ts`),
+	// because both the row's boot `syncPreset` and every later
+	// `buddyStore.presetOwnership()` read it at call time, long after a mount
+	// returns.
+	const dshHome = dshHomeHold.scratch();
 	// A complete config, the way the settings plane resolves the schema: the rows
 	// read `ctx.buddyStore.config()` whole, so a partial object would make the
 	// coordinator read `undefined` where a number belongs.
@@ -322,7 +316,9 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		};
 
 		const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
-			fibers.push(root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) }) as never);
+			const fiber = root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) });
+			fibers.push(fiber as never);
+			dshHomeHold.track(fiber as { dispose(): Promise<void> });
 		};
 		const give = (ctx: unknown, key: string, value: unknown): void => {
 			(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
@@ -451,6 +447,10 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): unknown => {
 			const fiber = root.plugin({ name: row.name, inject: row.inject, apply: row.apply });
 			fibers.push(fiber as never);
+			// The file-scope teardown disposes these too, before the ambient
+			// home returns — a mount a test never disposes must not be able to
+			// resume its boot against the real `~/.dsh` afterwards.
+			dshHomeHold.track(fiber as { dispose(): Promise<void> });
 			return fiber;
 		};
 		if (options.withStore !== false) mountRow(storeRow as never);
@@ -468,10 +468,10 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			skillsRowState: () => skillsFiber.state,
 			provideStore: () => {
 				if (options.withStore !== false) return;
-				// This boot happens after the harness returned, so the temp home
-				// is re-asserted here: `dshHomePath()` is read at call time by
-				// both the boot's `syncPreset` and every later `presetOwnership()`.
-				process.env["DSH_HOME"] = dshHome;
+				// This boot happens after the harness returned, and it must still
+				// see THIS mount's scratch home: the file-scope hold keeps a
+				// throwaway ambient for the whole file, and nothing in between
+				// re-points it.
 				mountRow(storeRow as never);
 			},
 			releaseStart: () => releaseStart(),
@@ -498,7 +498,10 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			// depends on, which is what a real reload does.
 			dispose: async () => {
 				for (const fiber of [...fibers].reverse()) await fiber.dispose();
-				restoreDshHome();
+				// Back to the file's hold home, never the ambient one. It is safe
+				// unconditionally — unlike a captured "previous" value, a second
+				// dispose cannot put the real home back under another live mount.
+				dshHomeHold.release();
 			},
 		};
 	} finally {

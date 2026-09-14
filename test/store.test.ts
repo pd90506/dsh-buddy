@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import type { Plugin } from "@deepseek-ai/cordis";
@@ -17,6 +16,7 @@ import type {
 import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../src/config.ts";
 import { resolveBuddyPaths, type BuddyPaths } from "../src/paths.ts";
 import { tableStub } from "./support/domain-tables.ts";
+import { holdDshHome } from "./support/dsh-home-hold.ts";
 
 /** The storage names of the three skill tables (`UNIT_NAME_RE`: snake_case). */
 type StorageTableName = "skill_usage" | "skill_ledger" | "review_usage";
@@ -127,6 +127,14 @@ async function settle(): Promise<void> {
 const storeRow = row as unknown as Plugin;
 
 /**
+ * The file's `$DSH_HOME` hold.
+ *
+ * See `./support/dsh-home-hold.ts` for why the ambient home is held for the
+ * whole file rather than put back when a test ends.
+ */
+const dshHomeHold = holdDshHome();
+
+/**
  * The `ctx`/`paths`/`handle` triple most direct `new BuddyStore(...)` cases in
  * this file need. Async so a fixture that later needs real I/O (e.g. a scratch
  * home) drops in without changing every call site.
@@ -149,18 +157,21 @@ async function storeFixture(): Promise<{ ctx: Context; paths: BuddyPaths; handle
 
 /**
  * Point `$DSH_HOME` at a throwaway directory for one test.
- * @returns the temporary harness home and its restore function.
+ *
+ * `restore` goes back to the file's own hold home, never the ambient one, and
+ * the real value returns only from the file-scope teardown: the store row's
+ * boot is asynchronous, so a row parked in `openStore` or on the settings
+ * barrier can resume into `syncPreset(presetTargetDir(dshHomePath()))` after
+ * the test that mounted it has already finished — and this suite's `finally`
+ * runs even when an assertion threw, which is exactly when a boot is parked.
+ * The ambient home must not be re-armed underneath it.
+ * @returns the temporary harness home and its release function.
  */
 function scratchHome(): { home: string; restore: () => void } {
-	const previous = process.env["DSH_HOME"];
-	const home = mkdtempSync(join(tmpdir(), "dsh-buddy-store-"));
-	process.env["DSH_HOME"] = home;
+	const home = dshHomeHold.scratch();
 	return {
 		home,
-		restore: () => {
-			if (previous === undefined) delete process.env["DSH_HOME"];
-			else process.env["DSH_HOME"] = previous;
-		},
+		restore: () => dshHomeHold.release(),
 	};
 }
 
@@ -220,7 +231,7 @@ test("the row waits for storageDomain, then creates the home and publishes the s
 	const ctx = new Context();
 	const handle = handleStub();
 	try {
-		const fiber = ctx.plugin(storeRow);
+		const fiber = dshHomeHold.track(ctx.plugin(storeRow));
 		await settle();
 		// No storageDomain yet: the hard dependency keeps the row in waiting.
 		assert.equal(ctx.get("buddyStore"), undefined);
@@ -302,7 +313,7 @@ test("a home set through the settings plane is the home the store boots on", asy
 			},
 			get: () => undefined,
 		});
-		ctx.plugin(storeRow);
+		dshHomeHold.track(ctx.plugin(storeRow));
 		await until(() => ctx.get("buddyStore") !== undefined);
 
 		// The whole point of the section: without the barrier the boot reads
@@ -361,7 +372,7 @@ test(
 				open: async () => (domainOf(handle)),
 				get: () => undefined,
 			});
-			const fiber = ctx.plugin(storeRow);
+			const fiber = dshHomeHold.track(ctx.plugin(storeRow));
 
 			// The row boots on the documented defaults: a broken section costs
 			// the user their `buddy.home`, not the whole plugin.
@@ -464,7 +475,7 @@ test("the composition entry is the fallback config, so a settings detach stays u
 			open: async () => (domainOf(handle)),
 			get: () => undefined,
 		});
-		ctx.plugin(storeRow);
+		dshHomeHold.track(ctx.plugin(storeRow));
 		await until(() => ctx.get("buddyStore") !== undefined);
 
 		const section = sections[0] as InstalledSection;
@@ -494,7 +505,7 @@ test("a dispose that lands mid-boot still closes the opened domain", async () =>
 		releaseOpen = () => resolve();
 	});
 	try {
-		const fiber = ctx.plugin(storeRow);
+		const fiber = dshHomeHold.track(ctx.plugin(storeRow));
 		ctx.provide("storageDomain", {
 			open: async () => {
 				opening = true;
@@ -537,7 +548,7 @@ test("a store that cannot open publishes nothing and says why", async () => {
 		logged.push(String(message));
 	};
 	try {
-		ctx.plugin(storeRow);
+		dshHomeHold.track(ctx.plugin(storeRow));
 		ctx.provide("storageDomain", {
 			open: async () => {
 				throw Object.assign(new Error("invalid record"), { code: "invalid-record" });
