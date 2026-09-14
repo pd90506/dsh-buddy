@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
-import { captureBefore, listEntries, recordMutation, rollbackEntry, type LedgerDeps } from "../src/skills/ledger.ts";
+import { captureBefore, captureManifest, listEntries, recordMutation, rollbackEntry, type LedgerDeps } from "../src/skills/ledger.ts";
 import { atomicSnapshot, readBlob, snapshotPaths, storeBlob } from "../src/skills/snapshot.ts";
 import type { SkillLedgerRecord } from "../src/store/domain.ts";
 import { tableStub } from "./support/domain-tables.ts";
@@ -298,6 +298,58 @@ test("recordMutation writes one well-formed entry and never throws", async () =>
 		assert.deepEqual(entry.evidence, { note: "tightened the trigger" });
 		assert.deepEqual(entry.before, before);
 		assert.deepEqual(entry.after, before);
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("recordMutation prefers an explicit after manifest, empty included", async () => {
+	const f = await fixture();
+	try {
+		await writeFile(join(f.skill, "SKILL.md"), "current");
+		const manifest = await captureManifest(f.deps, f.skill, false);
+		assert.deepEqual(manifest, [{ path: join(f.skill, "SKILL.md"), sha256: sha256Of("current") }]);
+
+		// An explicit manifest is recorded verbatim.
+		await recordMutation(f.deps, {
+			actor: "agent",
+			action: "patch",
+			skill: "a-b",
+			evidence: {},
+			before: [],
+			after: manifest,
+		});
+		// `after: []` means "recorded and empty", which is NOT the same as
+		// absent: it must not fall through to the `afterRoot` capture, or a
+		// delete would quietly record the state it just removed.
+		await recordMutation(f.deps, {
+			actor: "agent",
+			action: "delete",
+			skill: "a-b",
+			evidence: {},
+			before: manifest,
+			after: [],
+			afterRoot: f.skill,
+		});
+
+		const entries = await listEntries(f.deps);
+		assert.equal(entries.length, 2);
+		assert.deepEqual(entries[0]?.after, []);
+		assert.deepEqual(entries[1]?.after, manifest);
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("captureManifest throws, so the caller owns best-effort semantics", async () => {
+	const f = await fixture();
+	try {
+		await writeFile(join(f.skill, "SKILL.md"), "body");
+		// The primitive itself: no swallow, no log, just the manifest or the error.
+		assert.deepEqual(await captureManifest(f.deps, f.skill, false), [
+			{ path: join(f.skill, "SKILL.md"), sha256: sha256Of("body") },
+		]);
+		await assert.rejects(() => captureManifest(f.deps, join(f.home, "missing"), false));
 	} finally {
 		await f.cleanup();
 	}

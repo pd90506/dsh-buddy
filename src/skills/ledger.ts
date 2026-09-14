@@ -7,6 +7,9 @@
  * the reason a skill edit is refused. The one exception is {@link rollbackEntry},
  * which **fails closed**: it restores files, so every step before the first write
  * either completes or leaves the tree exactly as it found it.
+ * {@link captureManifest} is the raw, throwing primitive those best-effort
+ * captures are built on, exported for a caller that merges several roots and
+ * therefore owns the failure semantics itself.
  *
  * `before` and `after` are content-addressed manifests — `{ path, sha256 }`,
  * absolute paths, blobs named by their own digest in the snapshots directory —
@@ -56,7 +59,14 @@ export interface MutationInput {
 	evidence?: Record<string, unknown> | undefined;
 	/** The pre-mutation manifest, normally from {@link captureBefore}. */
 	before?: SnapshotEntry[] | undefined;
-	/** The root to manifest *after* the mutation; omit for a delete. */
+	/**
+	 * The post-mutation manifest to record verbatim. Takes precedence over
+	 * {@link afterRoot}; an explicitly empty array means "recorded and empty" and
+	 * captures nothing, which is deliberately different from leaving it
+	 * `undefined` (that falls back to `afterRoot`).
+	 */
+	after?: SnapshotEntry[] | undefined;
+	/** The root to manifest *after* the mutation; the fallback when `after` is absent. Omit for a delete. */
 	afterRoot?: string | undefined;
 }
 
@@ -130,16 +140,24 @@ export async function captureBefore(
  *
  * Never throws and never rejects: the mutation has already happened by the time
  * this runs, so a ledger failure is logged and dropped. The `after` manifest is
- * captured from `afterRoot` when one is given, and an after-capture failure
- * simply leaves `after` empty rather than losing the entry.
+ * the caller's when supplied — an explicit `after: []` records an empty
+ * post-state and captures nothing — and is otherwise captured from `afterRoot`
+ * when one is given; an after-capture failure simply leaves `after` empty rather
+ * than losing the entry. `before` wins the same way, though it has no root
+ * fallback.
  * @param deps - the home, the snapshot directory and the ledger table.
- * @param input - the actor, action, skill, evidence, `before` and `afterRoot`.
+ * @param input - the actor, action, skill, evidence, `before`, `after` and
+ * `afterRoot`.
  */
 export async function recordMutation(deps: LedgerDeps, input: MutationInput): Promise<void> {
 	try {
 		const ts = new Date().toISOString();
 		let after: SnapshotEntry[] = [];
-		if (input.afterRoot !== undefined) {
+		if (input.after !== undefined) {
+			// An explicitly supplied manifest is the record, empty included: `[]`
+			// must not fall through to a capture that would contradict it.
+			after = ownManifest(input.after);
+		} else if (input.afterRoot !== undefined) {
 			try {
 				after = await captureManifest(deps, input.afterRoot, false);
 			} catch (error) {
@@ -314,12 +332,19 @@ export async function rollbackEntry(deps: LedgerDeps, entryId: string): Promise<
 
 /**
  * Hash every file under a root and store each blob, in one pass.
+ *
+ * The throwing counterpart of {@link captureBefore}: the try/catch is the
+ * **caller's**, which is what a caller merging several roots needs — one failed
+ * part can then void the whole merged manifest instead of half-building one. A
+ * caller that wants the swallow-and-log behaviour should use
+ * {@link captureBefore} instead.
  * @param deps - the snapshot directory.
  * @param root - the directory to capture.
  * @param completePackage - `true` refuses to drop an unreadable entry.
  * @returns the manifest, in sorted path order.
+ * @throws when the root cannot be read or a blob cannot be stored.
  */
-async function captureManifest(deps: LedgerDeps, root: string, completePackage: boolean): Promise<SnapshotEntry[]> {
+export async function captureManifest(deps: LedgerDeps, root: string, completePackage: boolean): Promise<SnapshotEntry[]> {
 	const manifest: SnapshotEntry[] = [];
 	for (const path of await listSnapshotFiles(root, completePackage ? "throw" : "skip")) {
 		let bytes: Buffer;
