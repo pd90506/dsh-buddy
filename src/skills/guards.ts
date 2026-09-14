@@ -13,8 +13,9 @@
  *    hand-over that puts the skill under automatic management (spec §8.5).
  * 3. **Read before write.** The review must have loaded a skill before it may
  *    modify it, so a summary cannot rewrite what it never read. This applies to
- *    the four actions that change existing content and not to `create`, which
- *    is making something new rather than modifying something prior.
+ *    the five actions that change existing content — `delete` included, see
+ *    {@link READ_REQUIRED_ACTIONS} — and not to `create`, which is making
+ *    something new rather than modifying something prior.
  *
  * The **foreground has no jurisdiction restriction**: when a human is chatting
  * with Buddy, every skill in their own home is theirs, so `reviewSession:
