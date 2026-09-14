@@ -302,7 +302,7 @@ git commit -m "feat: skill usage, ledger and review-usage tables in the buddy do
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `SKILL_NAME_RE`、`ALLOWED_SUBDIRS`、`MAX_DESCRIPTION_LENGTH`(1024)、`SKILL_CREATE_DESC_LIMIT`(60)、`MAX_SKILL_CONTENT_CHARS`(100000)、`MAX_SKILL_FILE_BYTES`(1048576)；`validateSkillName(name): string | undefined`；`parseFrontmatter(content): { frontmatter: Record<string, unknown>; body: string } | { error: string }`；`validateSkillDocument(input: { name: string; content: string; creating: boolean }): { ok: true; frontmatter: Record<string, unknown>; body: string } | { ok: false; error: string }`
+- Produces: `SKILL_NAME_RE`、`ALLOWED_SUBDIRS`、`MAX_DESCRIPTION_LENGTH`(1024)、`SKILL_CREATE_DESC_LIMIT`(60)、`MAX_SKILL_CONTENT_CHARS`(100000)、`MAX_SKILL_FILE_BYTES`(1048576)；`validateSkillName(name): string | undefined`；`parseFrontmatter(content): { frontmatter: Record<string, unknown>; body: string } | { error: string }`；`validateSkillDocument(input: { name: string; content: string; creating: boolean }): { ok: true; frontmatter: Record<string, unknown>; body: string } | { ok: false; error: string }`；`validateSupportPath(rel: string): string | undefined`；`validateSupportBytes(rel: string, bytes: number): string | undefined`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -522,6 +522,8 @@ git commit -m "feat: advisory skill linter (13 rules ported)"
   - `snapshotPaths(root: string): Promise<{ path: string; sha256: string }[]>`
   - `atomicSnapshot(dir: string, dest: string): Promise<{ ok: true } | { ok: false; error: string }>`（失败即中止，见 spec §8.3 第 1 条）
   - `recordMutation(deps, input: { actor; action; skill; evidence; before; afterRoot }): Promise<void>`（尽力而为，绝不抛）
+  - `captureBefore(deps, root: string | undefined, options?: { completePackage?: boolean; skill?: string }): Promise<{ path: string; sha256: string }[] | undefined>`（尽力而为，失败返回 `undefined`）
+  - `listEntries(deps, filter?: { skill?: string; limit?: number }): Promise<SkillLedgerRecord[]>`（最新在前，坏行跳过）
   - `rollbackEntry(deps, entryId: string): Promise<{ ok: boolean; message: string }>`
 
 - [ ] **Step 1: 写失败的测试**
@@ -766,10 +768,11 @@ git commit -m "feat: skill_manage operations with atomic batches"
 
 **Files:**
 - Create: `src/skills/guards.ts`
+- Modify: `src/skills/manage.ts`（把守卫接到 `applyOne` 的入口）
 - Test: `test/skills-guards.test.ts`
 
 **Interfaces:**
-- Consumes: Task 2（usage 表）、Task 6
+- Consumes: Task 2（usage 表）、Task 6、Task 7 的 `applyOne`
 - Produces: `isCuratorManaged(record): boolean`；`backgroundWriteGuard(input: { reviewSession: boolean; record; pinned; action; skill; readSet: Set<string> }): { allow: true } | { allow: false; reason: string }`；`markRead(readSets: Map<string, Set<string>>, sessionId: string, skill: string): void`；`resetReadSet(readSets, sessionId): void`
 
 - [ ] **Step 1: 写失败的测试**
@@ -812,7 +815,34 @@ Expected: FAIL — 模块不存在
 Run: `node --test test/skills-guards.test.ts && npm run typecheck`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 把守卫接进写路径（本任务的一部分，不是可选）**
+
+`src/skills/manage.ts` 的 `applyOne` 入口调用守卫——**没有这一步，Task 7 的写入就是无守卫的**：
+
+```ts
+	// applyOne 的第一件事：管辖权、pinned、read-before-write 三条都在这里判。
+	// 守卫由 deps 提供（`reviewSession` 来自"这个调用是否来自我起过的 review 子会话"，
+	// `readSet` 来自 Task 14 观察到的技能读取），因此 manage.ts 不需要知道 provenance 怎么来的。
+	const verdict = deps.guard({ action: operation.action, skill: operation.name });
+	if (!verdict.allow) return { success: false, error: verdict.reason };
+```
+
+在 `test/skills-guards.test.ts` 补一条**穿过 `runOperations`** 的断言（证明接线存在，而不只是守卫函数正确）：
+
+```ts
+test("runOperations refuses an unmanaged skill for a review caller", async () => {
+	const result = await runOperations(reviewDeps({ created_by: null }), [
+		{ action: "patch", name: "a-b", old_string: "one", new_string: "two" },
+	]);
+	assert.equal(result.success, false);
+	assert.match(String(result.error), /not curator-managed/);
+});
+```
+
+Run: `node --test test/skills-guards.test.ts test/skills-manage.test.ts && npm run typecheck`
+Expected: PASS
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add src/skills/guards.ts test/skills-guards.test.ts
@@ -1038,7 +1068,7 @@ git commit -m "feat: review digest algorithm and prompts"
 
 **Interfaces:**
 - Consumes: Task 11、Task 2（`reviewUsage`）、Task 1 settings
-- Produces: `class ReviewCoordinator`，方法 `noteStep(sessionId): void`、`noteSkillManageCalled(sessionId): void`、`onTurnEnd(input: { sessionId; reason; origin?; delegationDepth? }): Promise<void>`、`noteChildEvent(childSessionId, event): void`，构造参数 `{ config(); spawn(input); interrupt(childSessionId); now(); log(line) }`
+- Produces: `class ReviewCoordinator`，方法 `noteStep(sessionId): void`、`noteSkillManageCalled(sessionId): void`、`onTurnEnd(input: { sessionId; reason; origin?; delegationDepth? }): Promise<void>`、`noteChildEvent(childSessionId, event): void`，构造参数 `{ config(); spawn(input: { provider: "fork" | "spawn"; prompt: string; toolFilter: readonly string[] }): { childSessionId: string; done: Promise<unknown> }; interrupt(childSessionId): void; now(); log(line) }`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1147,7 +1177,7 @@ git commit -m "feat: the post-turn skill review coordinator"
 
 **Interfaces:**
 - Consumes: Task 2、5、6、7、9、12
-- Produces: `ctx.buddySkills`（含 `noteStep`、`noteSkillManageCalled`、`onTurnEnd`、`noteChildEvent`、`noteAgentRowMounted()`、`manage()`、`usage()`、`rollback()`、`adopt()`、`setPinned()`、`setVisibility()`、`listSkills()`）；typert 端点 `buddySkills/list|manage|rollback|adopt|pin|visibility|reviewUsage`
+- Produces: `ctx.buddySkills`（含 `noteStep`、`noteSkillManageCalled`、`onTurnEnd`、`noteChildEvent`、`noteAgentRowMounted()`、`presetSynced()`、`refine(agent, focus)`、`manage()`、`usage()`、`rollback()`、`adopt()`、`setPinned()`、`setVisibility()`、`listSkills()`）；typert 端点 `buddySkills/list|manage|rollback|adopt|pin|visibility|reviewUsage`
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1446,7 +1476,13 @@ Expected: FAIL — 没有 skills 模块
 
 `skills-module.tsx` 用既有的 primitives（`Button` / `Switch` / `Input`）与 `src/client/form-css.ts` 的类样式，**不写内联 style**，**不调用组件函数**（必须以 `<SkillsModule />` 形式渲染）。内容：技能列表（名字、描述、用量、最后使用、pinned、是否托管）、pin/unpin 按钮、adopt 按钮、提升可见性按钮、回滚入口（账本列表 + 一键回滚）、review 总开关（读写 `buddy.skills.enabled`）。
 
-`modules.ts` 的模块表加一行 `{ id: "skills", order: 20, titleKey: "module.skills", Component: SkillsModule }`；`config.ts` 的 `panel.sections` schema 加 `skills: z.boolean().default(true)`；`FALLBACK_CONFIG.panel.sections` 同步加 `skills: true`。
+`modules.ts` 的模块表加一行；**`order` 必须是"排在 agents 之后、model 之前"的那个数**——先读 `src/client/modules.ts` / `panel.tsx` 里既有模块的 `order` 值再定，不要照抄下面这个字面量（`20` 是占位猜测）：
+
+```ts
+{ id: "skills", order: 20, titleKey: "module.skills", Component: SkillsModule }
+```
+
+`config.ts` 的 `panel.sections` schema 加 `skills: z.boolean().default(true)`；`FALLBACK_CONFIG.panel.sections` 同步加 `skills: true`。**注意**：Task 1 已经在同一个 `config.ts` 里加了顶层 `skills` 设置段——本任务只动 `panel.sections`，不要重构或覆盖 Task 1 的段。
 
 - [ ] **Step 4: 跑测试确认通过**
 
