@@ -36,7 +36,8 @@
  *   coding sessions.
  * @module dsh-buddy/skills
  */
-import { readFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Service } from "@deepseek-ai/cordis";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
@@ -52,11 +53,11 @@ import {
 	type SkillMutationView,
 	type SkillUsageView,
 	type SkillView,
+	type SkillsStatusView,
 } from "./gateway.ts";
 import { backgroundWriteGuard, markRead, type WriteVerdict } from "./guards.ts";
 import { listEntries, rollbackEntry, type LedgerDeps } from "./ledger.ts";
 import { runOperations, type ManageDeps, type Operation, type SkillAction } from "./manage.ts";
-import { createBuddyProvider, createPromotedProvider, PROMOTED_SKILL_PROVIDER_NAME, type SkillCandidate } from "./provider.ts";
 import { ReviewCoordinator, type ReviewCoordinatorDeps, type ReviewSpawnInput, type ReviewSpawnResult } from "./review.ts";
 import { activityCount, adopt, latestActivityAt, setPinned } from "./usage.ts";
 import { validateSkillName } from "./validate.ts";
@@ -166,9 +167,12 @@ interface AgentRegistry {
 	get(sessionId: string): ParentAgent | undefined;
 }
 
-/** The `sessionQuery` slice this row reads, and only on the digest path. */
+/** The `sessionQuery` slice this row reads. */
 interface SessionQuery {
+	/** The transcript surface; only the cheap-model (digest) path needs it. */
 	readSurface(sessionId: string): Promise<{ readonly events: readonly unknown[] }>;
+	/** The route the session runs on, when the plane exposes one. */
+	readRoute?(sessionId: string): Promise<{ provider: string; model: string } | undefined>;
 }
 
 /** Anything that names a session: an Agent, a header, or a bare id. */
@@ -223,6 +227,13 @@ export class BuddySkillsService extends Service {
 
 	/** Whether the heartbeat deadline passed without a report. */
 	private heartbeatMissed = false;
+
+	/**
+	 * Set by {@link dispose}. A review whose `subagents.start` was still in
+	 * flight when the row unloaded must notice and stop itself: nothing else is
+	 * left to enforce its budgets or attribute its cost.
+	 */
+	private disposed = false;
 
 	/**
 	 * @param ctx - the plugin fiber's context; the service registers immediately.
@@ -312,10 +323,27 @@ export class BuddySkillsService extends Service {
 	 * @param agent - the conversation's live Agent.
 	 * @param focus - the user's focus text, or nothing.
 	 */
-	async refine(agent: ParentAgent, focus: string): Promise<void> {
+	async refine(
+		agent: ParentAgent,
+		focus: string,
+		route?: { readonly provider: string; readonly model: string },
+	): Promise<void> {
 		this.pendingParent = agent;
 		try {
-			await this.coordinator.refine(agent.id, focus);
+			// The route and the transcript travel exactly as they do on the
+			// automatic path: §7.1's decision compares the configured review model
+			// against the route this session really ran on, and the spawn path
+			// cannot build a digest without the surface. An explicit `/refine` is
+			// the *most* user-visible review there is, so it must not be the one
+			// that silently falls back to `buddy.model` or reviews blind.
+			// A caller with no route to hand over gets the same soft resolution
+			// `onTurnEnd` relies on, so the degraded fallback is never taken on
+			// this path when the session plane can answer.
+			const resolved = route ?? (await this.routeFor(agent.id));
+			await this.coordinator.refine(agent.id, focus, {
+				...(resolved === undefined ? {} : { route: resolved }),
+				surface: () => this.surfaceFor(agent.id),
+			});
 		} finally {
 			this.pendingParent = undefined;
 		}
@@ -340,6 +368,7 @@ export class BuddySkillsService extends Service {
 	 * @returns resolution once each review's teardown has settled.
 	 */
 	async dispose(): Promise<void> {
+		this.disposed = true;
 		await this.coordinator.dispose();
 		for (const childSessionId of [...this.liveReviews.keys()]) await this.stopReview(childSessionId);
 		this.pendingParent = undefined;
@@ -391,6 +420,17 @@ export class BuddySkillsService extends Service {
 	 */
 	notePresetSyncMissed(): void {
 		if (!this.heartbeat) this.heartbeatMissed = true;
+	}
+
+	/**
+	 * The preset-sync notice, as the panel reads it (spec §5.2's third bullet).
+	 *
+	 * The two fields are the same fact from both sides so a panel can render
+	 * whichever it wants without knowing which one the bound writes.
+	 * @returns whether the agent row reported in, and whether the notice shows.
+	 */
+	async status(): Promise<SkillsStatusView> {
+		return { synced: this.heartbeat, missed: this.heartbeatMissed };
 	}
 
 	// ── the write path ───────────────────────────────────────────────────────
@@ -553,24 +593,20 @@ export class BuddySkillsService extends Service {
 	 * @returns one owned view per skill, in name order.
 	 */
 	async listSkills(): Promise<readonly SkillView[]> {
-		const root = this.host.buddyStore.paths.skills;
-		const [buddy, promoted] = await Promise.all([
-			createBuddyProvider({ skillsRoot: root }).list({}),
-			// No `cwd`: the panel lists every promoted skill, including the
-			// `project:` ones only sessions inside their path can load.
-			createPromotedProvider({ skillsRoot: root }).list({}),
-		]);
-		const candidates = new Map<string, SkillCandidate>();
-		for (const candidate of [...buddy, ...promoted]) candidates.set(candidate.name, candidate);
 		const usage = this.host.buddyStore.skillUsage();
 		const rows: SkillView[] = [];
-		for (const candidate of candidates.values()) {
-			const record = usage.get(candidate.name);
+		for (const entry of await enumerateSkills(this.host.buddyStore.paths.skills)) {
+			const record = usage.get(entry.name);
 			const latest = record === undefined ? undefined : latestActivityAt(record);
 			rows.push({
-				name: candidate.name,
-				description: candidate.description,
-				visibility: visibilityOf(candidate.provider),
+				name: entry.name,
+				description: entry.description,
+				// The tier the document declares, *not* a guess from a provider
+				// name: `global` and `project:<path>` are served by the same
+				// provider, so a provider cannot tell them apart — and a
+				// `project:` skill must stay visible to the panel even when no
+				// session's cwd would make it loadable.
+				visibility: entry.visibility,
 				useCount: record?.use_count ?? 0,
 				activityCount: record === undefined ? 0 : activityCount(record),
 				// `exactOptionalPropertyTypes`: omit rather than pass `undefined`.
@@ -726,6 +762,18 @@ export class BuddySkillsService extends Service {
 			...(agentOptions === undefined ? {} : { agentOptions }),
 		};
 		const run = await subagents.start(input.provider, request);
+		if (this.disposed) {
+			// The row unloaded while `start` was in flight. Nothing is left to
+			// charge this child's events or attribute its cost, so it is stopped
+			// here through the same abort/dispose chain a budget stop uses, and
+			// the review is reported as failed rather than registered.
+			controller.abort();
+			await run.dispose().catch((error: unknown) => {
+				console.error(`dsh-buddy-skills: disposing a review started during unload failed (${messageOf(error)})`);
+			});
+			console.error("dsh-buddy-skills: a background review was stopped because the row unloaded while starting it");
+			return { childSessionId: run.id, done: Promise.resolve() };
+		}
 		this.liveReviews.set(run.id, { run, parent, signal: controller });
 		this.parentLinks.set(run.id, parent);
 		this.reviewSessions.add(run.id);
@@ -858,6 +906,26 @@ export class BuddySkillsService extends Service {
 	}
 
 	/**
+	 * The route a session is running on, through the soft session plane.
+	 *
+	 * Soft and best-effort, exactly like {@link surfaceFor}: without
+	 * `sessionQuery` the coordinator's documented fallback to `config().model`
+	 * applies, which is the pre-route behaviour rather than a new failure.
+	 * @param sessionId - the session to read.
+	 * @returns the provider/model pair, or `undefined`.
+	 */
+	private async routeFor(sessionId: string): Promise<{ provider: string; model: string } | undefined> {
+		const query = this.host.get("sessionQuery") as SessionQuery | undefined;
+		if (query?.readRoute === undefined) return undefined;
+		try {
+			return await query.readRoute(sessionId);
+		} catch (error) {
+			console.error(`dsh-buddy-skills: reading the session route failed (${messageOf(error)})`);
+			return undefined;
+		}
+	}
+
+	/**
 	 * The transcript surface a digest would need, or nothing.
 	 *
 	 * Soft and best-effort: without `sessionQuery` the cheap-model path cannot
@@ -887,15 +955,28 @@ export function apply(ctx: PluginContext): void {
 	// A synchronous effect, so the disposer exists before `apply` returns: the
 	// coordinator's teardown is registered before anything can start a review,
 	// and a dispose that lands mid-`apply` still unwinds.
-	ctx.effect(() => {
+	ctx.effect((): (() => Promise<void>) => {
 		const service = new BuddySkillsService(ctx);
-		// The panel's wire surface. A missing `typert` throws out of here
-		// deliberately — a row whose panel is invisible is a failure to report,
-		// not to survive.
-		new BuddySkillsGateway(ctx, service as unknown as BuddySkillsRemote);
-		return () => {
-			void service.dispose();
-		};
+		// The panel's wire surface, and only when there is a registry to put it
+		// on. `typert` is soft, like every plane besides the store: without it the
+		// row still publishes `ctx.buddySkills` — the preset row and the
+		// coordinator read that service — and the only loss is the panel, which
+		// is reported rather than thrown.
+		//
+		// Constructed here rather than inside the gateway because the gateway's
+		// base class establishes the typert binding at construction: a gateway
+		// built with no registry cannot be built at all.
+		if (ctx.get("typert") === undefined) {
+			console.error(
+				"dsh-buddy-skills: the typert registry is unavailable; the Skills panel will have no endpoints",
+			);
+		} else {
+			new BuddySkillsGateway(ctx, service as unknown as BuddySkillsRemote);
+		}
+		// The promise is *returned*, not discarded: cordis awaits a thenable
+		// disposer, and a dispose that resolves before the reviews have stopped
+		// would let the row's teardown race its own children.
+		return () => service.dispose();
 	}, "dsh-buddy: skills");
 
 	// The heartbeat bound (spec §5.2): if the agent row has not reported by now,
@@ -913,15 +994,6 @@ export function apply(ctx: PluginContext): void {
 		timer.unref();
 		return () => clearTimeout(timer);
 	}, "dsh-buddy: skills heartbeat");
-}
-
-/**
- * The visibility tier a provider's candidate belongs to.
- * @param provider - the provider name from the candidate.
- * @returns the tier name the panel shows.
- */
-function visibilityOf(provider: string): string {
-	return provider === PROMOTED_SKILL_PROVIDER_NAME ? "global" : "buddy";
 }
 
 /**
@@ -994,6 +1066,92 @@ function withVisibility(document: string, tier: string): string | undefined {
  */
 function needsQuoting(value: string): boolean {
 	return /[:#]/.test(value) || value !== value.trim() || value === "";
+}
+
+/** One skill as the panel's own listing reads it. */
+interface ListedSkill {
+	readonly name: string;
+	readonly description: string;
+	readonly visibility: string;
+}
+
+/** The tier a skill with no usable declaration carries — the providers' own default. */
+const FALLBACK_TIER = "buddy";
+
+/**
+ * Enumerate the skills root for the panel.
+ *
+ * Read from disk, one level down, rather than through the two providers: the
+ * providers answer "what may *this caller* see", and the panel is not a caller —
+ * it lists every skill in Buddy's home, including a `project:<path>` skill that
+ * no live session's cwd would load. Names come from the directory, the
+ * description and tier from the frontmatter, and an unreadable or unparsable
+ * document falls back to the directory name and the `buddy` tier, which is the
+ * same fail-closed shape the provider's own read path applies.
+ * @param root - the absolute skills root.
+ * @returns one entry per readable skill directory, in directory order.
+ */
+async function enumerateSkills(root: string): Promise<ListedSkill[]> {
+	let entries: Dirent[];
+	try {
+		entries = await readdir(root, { withFileTypes: true });
+	} catch {
+		// First boot, or a home that was never created: an empty catalog is the
+		// truth, not a failure.
+		return [];
+	}
+	const listed: ListedSkill[] = [];
+	for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+		if (!entry.isDirectory()) continue;
+		let document: string;
+		try {
+			document = await readFile(join(root, entry.name, "SKILL.md"), "utf8");
+		} catch {
+			// Not a skill directory (or unreadable): skip it rather than
+			// inventing an entry the panel cannot do anything with.
+			continue;
+		}
+		const frontmatter = parseFrontmatter(document);
+		const declared = frontmatter["name"];
+		listed.push({
+			name: typeof declared === "string" && declared.trim() !== "" ? declared.trim() : entry.name,
+			description: typeof frontmatter["description"] === "string" ? frontmatter["description"] : "",
+			visibility: visibilityFrom(frontmatter["visibility"]),
+		});
+	}
+	return listed;
+}
+
+/**
+ * Read a document's frontmatter as flat `key: value` scalars.
+ *
+ * The same flat subset the skill grammar uses, and deliberately minimal: this is
+ * a *display* read, so an exotic document costs one row its label rather than
+ * the whole listing.
+ * @param document - the SKILL.md text.
+ * @returns the scalar pairs; empty when there is no frontmatter fence.
+ */
+function parseFrontmatter(document: string): Record<string, string> {
+	const fence = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(document);
+	const body = fence?.[1];
+	if (body === undefined) return {};
+	const values: Record<string, string> = {};
+	for (const line of body.split(/\r?\n/u)) {
+		const match = /^[ \t]*([A-Za-z][A-Za-z0-9_-]*)[ \t]*:[ \t]*(.*)$/u.exec(line);
+		const key = match?.[1];
+		const raw = match?.[2]?.trim();
+		if (key === undefined || raw === undefined || raw === "") continue;
+		values[key] = raw.replace(/^["']|["']$/gu, "");
+	}
+	return values;
+}
+
+/**
+ * @param declared - the raw `visibility` scalar, when the frontmatter had one.
+ * @returns the tier, defaulting to `buddy` for anything unusable.
+ */
+function visibilityFrom(declared: string | undefined): string {
+	return declared === undefined || declared === "" ? FALLBACK_TIER : declared;
 }
 
 /**

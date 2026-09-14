@@ -15,22 +15,25 @@
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
-/** Cordis service key; also the typert wire namespace. */
+/** Typert wire namespace, and the name the panel calls. */
 export const BUDDY_SKILLS_SERVICE = "buddySkills";
+
+/**
+ * The cordis key the typert binding really lives under.
+ *
+ * Distinct from {@link BUDDY_SKILLS_SERVICE} because the row publishes its own
+ * `buddySkills` service (the coordinator seam and the preset row read it), and
+ * cordis refuses a second registration under one name on a fiber. The
+ * api-gateway resolves a strict descriptor as `ctx.get(descriptor.service)`
+ * and then requires that service to carry a `typertRemote` binding whose
+ * `serviceKey` **and** `namespace` agree with the descriptor
+ * (`dsh-api-gateway/lib/index.js:1002-1005`), so every invocation below names
+ * *this* key while the wire namespace stays `buddySkills`.
+ */
+export const BUDDY_SKILLS_ENDPOINTS = "buddySkillsEndpoints";
 
 /** Package identity for the strict typert contribution. */
 const TYPERT_PACKAGE = "dsh-buddy";
-
-/**
- * Where a skill declares it may be seen.
- *
- * `buddy` is the private tier (the default), `global` reaches every session the
- * promoted provider serves, and `project:<path>` reaches sessions inside that
- * path. Only a human may move a skill out of `buddy` (spec §7.1), which is why
- * this value is written by {@link BuddySkillsRemote.setVisibility} and can never
- * arrive through `skill_manage`.
- */
-export type SkillTier = "buddy" | "global" | `project:${string}`;
 
 /** One skill as the panel lists it. Owned data, never a live provider handle. */
 export interface SkillView {
@@ -38,7 +41,11 @@ export interface SkillView {
 	readonly name: string;
 	/** Short routing description from the document. */
 	readonly description: string;
-	/** Resolved tier, read from the document's frontmatter. */
+	/**
+	 * The tier the document declares, verbatim — `buddy`, `global`, or
+	 * `project:<path>`. Read from the frontmatter, never inferred from which
+	 * provider contributed the skill: one provider serves both promoted tiers.
+	 */
 	readonly visibility: string;
 	/** How many times the model loaded it. */
 	readonly useCount: number;
@@ -96,6 +103,21 @@ export interface SkillLedgerView {
 	readonly after: readonly string[];
 }
 
+/**
+ * Whether the buddy preset's skills row is mounted.
+ *
+ * Spec §5.2's third bullet: a preset that is installed but silently contributes
+ * nothing is the failure this phase exists to make visible. `missed` is the
+ * notice — `true` once the bound fired and no heartbeat had arrived — and
+ * `synced` is the same fact from the other side, so a panel can render either.
+ */
+export interface SkillsStatusView {
+	/** `true` once the agent row reported that it mounted. */
+	readonly synced: boolean;
+	/** `true` while the not-synced notice is showing. */
+	readonly missed: boolean;
+}
+
 /** The outcome of one panel write, plus the listing that follows it. */
 export interface SkillMutationView {
 	/** Whether the write applied. */
@@ -137,6 +159,8 @@ export interface BuddySkillsRemote {
 	usage(): Promise<readonly SkillUsageView[]>;
 	/** Every review's attributed cost. */
 	reviewUsage(): Promise<readonly ReviewUsageView[]>;
+	/** Whether the preset's skills row reported in. */
+	status(): Promise<SkillsStatusView>;
 }
 
 /** The context slice this service needs. */
@@ -148,7 +172,10 @@ export interface GatewayContext {
 function typertContribution(): unknown {
 	const shared = {
 		namespace: BUDDY_SKILLS_SERVICE,
-		service: BUDDY_SKILLS_SERVICE,
+		// The key the binding is registered under — not the wire namespace. A
+		// descriptor naming `buddySkills` here resolves to the *service*, which
+		// carries no binding, and every call fails `gateway/binding-invalid`.
+		service: BUDDY_SKILLS_ENDPOINTS,
 		invocation: { kind: "direct" },
 		result: { mode: "src-json" },
 	};
@@ -191,6 +218,7 @@ function typertContribution(): unknown {
 			},
 			{ ...shared, id: `${TYPERT_PACKAGE}#usage`, method: "usage", parameters: [] },
 			{ ...shared, id: `${TYPERT_PACKAGE}#reviewUsage`, method: "reviewUsage", parameters: [] },
+			{ ...shared, id: `${TYPERT_PACKAGE}#status`, method: "status", parameters: [] },
 		],
 	};
 }
@@ -216,12 +244,10 @@ export class BuddySkillsGateway extends TypertRemoteService {
 	 * @param side - the host row's writer and reader.
 	 */
 	constructor(ctx: GatewayContext, side: BuddySkillsRemote) {
-		// A distinct cordis key, never the wire namespace: `buddySkills` is the
-		// host row's own published service, and cordis refuses a second
-		// registration under one name on the same fiber. The endpoints still
-		// answer through `buddySkills`, because the typert contribution routes
-		// `method` -> this instance.
-		super(ctx as never, `${BUDDY_SKILLS_SERVICE}Endpoints`);
+		// Registered under the key the descriptor names, with the wire namespace
+		// passed explicitly: `buddySkills` is the host row's own published service,
+		// and cordis refuses a second registration under one name on a fiber.
+		super(ctx as never, BUDDY_SKILLS_ENDPOINTS, { namespace: BUDDY_SKILLS_SERVICE });
 		this.side = side;
 		const typert = ctx.get("typert") as { register(contribution: unknown): void } | undefined;
 		if (typert === undefined) throw new Error("dsh-buddy: the typert registry service is unavailable");
@@ -308,6 +334,14 @@ export class BuddySkillsGateway extends TypertRemoteService {
 	/** @returns every review's attributed cost. */
 	async reviewUsage(): Promise<readonly ReviewUsageView[]> {
 		return await this.side.reviewUsage();
+	}
+
+	/**
+	 * Whether the preset's skills row reported in.
+	 * @returns the sync notice state, for spec §5.2's panel warning.
+	 */
+	async status(): Promise<SkillsStatusView> {
+		return await this.side.status();
 	}
 }
 

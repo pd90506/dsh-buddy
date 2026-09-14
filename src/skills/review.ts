@@ -231,14 +231,31 @@ export class ReviewCoordinator {
 	 * @param sessionId - the conversation whose command triggered this.
 	 * @param focus - the user's focus text; empty means the general prompt.
 	 */
-	async refine(sessionId: string, focus: string): Promise<void> {
+	async refine(
+		sessionId: string,
+		focus: string,
+		turn: {
+			readonly route?: { provider: string; model: string } | undefined;
+			readonly surface?: (() => Promise<readonly DigestMessage[] | undefined>) | undefined;
+		} = {},
+	): Promise<void> {
 		if (this.inFlight.has(sessionId)) return;
 		const settings = this.deps.config().skills;
 		this.inFlight.add(sessionId);
 		this.steps.set(sessionId, 0);
 		try {
 			const suffix = focus.trim() === "" ? "" : REFINE_FOCUS_SUFFIX(focus);
-			await this.start(sessionId, settings, { focus: suffix });		} finally {
+			// The route and the transcript are threaded through exactly as on the
+			// automatic path: §7.1's decision compares against the session's real
+			// route, and the spawn path needs the surface for its digest. A
+			// `/refine` that fell back to `buddy.model` would pick the wrong input
+			// path on the one review the user explicitly asked for.
+			await this.start(sessionId, settings, {
+				...(turn.route === undefined ? {} : { route: turn.route }),
+				...(turn.surface === undefined ? {} : { surface: turn.surface }),
+				focus: suffix,
+			});
+		} finally {
 			this.inFlight.delete(sessionId);
 		}
 	}
