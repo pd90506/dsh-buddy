@@ -112,6 +112,10 @@ async function fixture(): Promise<Fixture> {
 			usage,
 			actor: () => "user",
 			now: () => NOW,
+			// These fixtures are foreground callers: every write is in
+			// jurisdiction, so the guard allows unconditionally. The review's
+			// restrictions are exercised in `skills-guards.test.ts`.
+			guard: () => ({ allow: true }),
 		},
 		cleanup: () => rm(home, { recursive: true, force: true }),
 	};
