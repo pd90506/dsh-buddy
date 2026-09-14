@@ -116,6 +116,22 @@ interface ParentAgent {
 	readonly id: string;
 }
 
+/**
+ * A live Agent, with the route it was composed for.
+ *
+ * `Agent.options` is the *documented* runtime face of a live agent
+ * (`@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts:139-141`, declared as
+ * `readonly options: AgentOptions` on the `Agent` interface and populated by the
+ * loop at construction — `dsh-agent-loop/lib/index.js:757`). This is the only
+ * route accessor a host row has: neither `SessionHeader` nor
+ * `SessionQueryEngine.readSurface` carries a provider/model pair, and the
+ * session-controller's durable `modelSelection` is a projection over a live
+ * `Session` object this row cannot reach.
+ */
+interface LiveAgent extends ParentAgent {
+	readonly options?: { readonly provider?: string; readonly model?: string };
+}
+
 /** One content block of a child's initial prompt. */
 interface PromptBlock {
 	readonly type: "text";
@@ -164,15 +180,20 @@ interface SubagentService {
 
 /** The live-agent lookup this row uses to turn a session id into a parent Agent. */
 interface AgentRegistry {
-	get(sessionId: string): ParentAgent | undefined;
+	get(sessionId: string): LiveAgent | undefined;
 }
 
-/** The `sessionQuery` slice this row reads. */
+/**
+ * The `sessionQuery` slice this row reads.
+ *
+ * Deliberately no route reader: no shipped `sessionQuery` method returns one
+ * (there is no `readRoute` anywhere in the packages), so asking for one would
+ * make the row depend on a method that does not exist. The route comes from the
+ * live Agent instead — see {@link LiveAgent}.
+ */
 interface SessionQuery {
 	/** The transcript surface; only the cheap-model (digest) path needs it. */
 	readSurface(sessionId: string): Promise<{ readonly events: readonly unknown[] }>;
-	/** The route the session runs on, when the plane exposes one. */
-	readRoute?(sessionId: string): Promise<{ provider: string; model: string } | undefined>;
 }
 
 /** Anything that names a session: an Agent, a header, or a bare id. */
@@ -336,10 +357,13 @@ export class BuddySkillsService extends Service {
 			// cannot build a digest without the surface. An explicit `/refine` is
 			// the *most* user-visible review there is, so it must not be the one
 			// that silently falls back to `buddy.model` or reviews blind.
-			// A caller with no route to hand over gets the same soft resolution
-			// `onTurnEnd` relies on, so the degraded fallback is never taken on
-			// this path when the session plane can answer.
-			const resolved = route ?? (await this.routeFor(agent.id));
+			// A caller with no route to hand over still gets one: prefer the live
+			// agent the registry resolves — that object carries `options` — and
+			// fall back to the caller's own Agent, which a command invocation may
+			// hold as a bare `{ id }`. The documented fallback to `config().model`
+			// is taken only when the route is genuinely unavailable, and is logged
+			// when it is.
+			const resolved = route ?? this.routeFor(this.agentFor(agent.id) ?? agent);
 			await this.coordinator.refine(agent.id, focus, {
 				...(resolved === undefined ? {} : { route: resolved }),
 				surface: () => this.surfaceFor(agent.id),
@@ -584,12 +608,15 @@ export class BuddySkillsService extends Service {
 	/**
 	 * Every skill under the buddy root, merged with its telemetry.
 	 *
-	 * Discovery is the providers' own coupling point, so the tiers are read from
-	 * them rather than re-parsed here: the buddy provider contributes the `buddy`
-	 * tier and the promoted provider the `global` / `project:` ones, so the tier
-	 * a skill landed in *is* its visibility. A skill with no usage row reads as
-	 * never used instead of vanishing — the row is only written once something
-	 * observes the skill.
+	 * The listing enumerates the skills root directly — one level of directories
+	 * with a readable `SKILL.md` — and reads each document's name, description
+	 * and declared tier, rather than asking the two providers. The providers
+	 * answer "what may *this caller* see": the promoted one filters
+	 * `project:<path>` skills by cwd, so a provider-based listing would hide a
+	 * promoted project skill from the panel entirely, and it cannot distinguish
+	 * the two promoted tiers at all. A skill with no usage row reads as never
+	 * used instead of vanishing — the row is only written once something observes
+	 * the skill.
 	 * @returns one owned view per skill, in name order.
 	 */
 	async listSkills(): Promise<readonly SkillView[]> {
@@ -765,8 +792,11 @@ export class BuddySkillsService extends Service {
 		if (this.disposed) {
 			// The row unloaded while `start` was in flight. Nothing is left to
 			// charge this child's events or attribute its cost, so it is stopped
-			// here through the same abort/dispose chain a budget stop uses, and
-			// the review is reported as failed rather than registered.
+			// here through the same abort/dispose chain a budget stop uses. The
+			// review is *stopped*, which the coordinator records in its `finally`
+			// with a `completed` outcome and whatever the child managed to spend —
+			// there is no child-level failure to report, and claiming one would
+			// misdescribe a review that was simply cut short.
 			controller.abort();
 			await run.dispose().catch((error: unknown) => {
 				console.error(`dsh-buddy-skills: disposing a review started during unload failed (${messageOf(error)})`);
@@ -900,29 +930,35 @@ export class BuddySkillsService extends Service {
 	 * @param sessionId - the durable session id.
 	 * @returns the Agent, or `undefined` when the registry is absent or the session is not live.
 	 */
-	private agentFor(sessionId: string): ParentAgent | undefined {
+	private agentFor(sessionId: string): LiveAgent | undefined {
 		const agents = this.host.get("agents") as AgentRegistry | undefined;
 		return agents?.get(sessionId);
 	}
 
 	/**
-	 * The route a session is running on, through the soft session plane.
+	 * The route one live Agent's requests use.
 	 *
-	 * Soft and best-effort, exactly like {@link surfaceFor}: without
-	 * `sessionQuery` the coordinator's documented fallback to `config().model`
-	 * applies, which is the pre-route behaviour rather than a new failure.
-	 * @param sessionId - the session to read.
-	 * @returns the provider/model pair, or `undefined`.
+	 * Read from `agent.options` — see {@link LiveAgent} for why that is the only
+	 * route source a host row has. A route that cannot be resolved is **said
+	 * out loud**: §7.1's fork/spawn choice compares the configured review model
+	 * against this pair, and silently measuring against `buddy.model` instead is
+	 * wrong for any session pinned by chat `/model` or by the global default.
+	 * The log line is what keeps that degradation actionable rather than
+	 * invisible.
+	 * @param agent - the conversation's live Agent.
+	 * @returns the provider/model pair, or `undefined` when it cannot be read.
 	 */
-	private async routeFor(sessionId: string): Promise<{ provider: string; model: string } | undefined> {
-		const query = this.host.get("sessionQuery") as SessionQuery | undefined;
-		if (query?.readRoute === undefined) return undefined;
-		try {
-			return await query.readRoute(sessionId);
-		} catch (error) {
-			console.error(`dsh-buddy-skills: reading the session route failed (${messageOf(error)})`);
-			return undefined;
+	private routeFor(agent: LiveAgent): { provider: string; model: string } | undefined {
+		const options = agent.options;
+		const provider = options?.provider;
+		const model = options?.model;
+		if (typeof provider === "string" && provider !== "" && typeof model === "string" && model !== "") {
+			return { provider, model };
 		}
+		console.error(
+			"dsh-buddy-skills: the review route is unknown for this conversation; the fork/spawn decision falls back to buddy.model",
+		);
+		return undefined;
 	}
 
 	/**
@@ -1112,11 +1148,15 @@ async function enumerateSkills(root: string): Promise<ListedSkill[]> {
 			continue;
 		}
 		const frontmatter = parseFrontmatter(document);
-		const declared = frontmatter["name"];
 		listed.push({
-			name: typeof declared === "string" && declared.trim() !== "" ? declared.trim() : entry.name,
-			description: typeof frontmatter["description"] === "string" ? frontmatter["description"] : "",
-			visibility: visibilityFrom(frontmatter["visibility"]),
+			// The name the provider would accept, or the directory name. Task 9's
+			// grammar is the one authority here: a frontmatter name the registry
+			// would reject must not become a panel row a human then acts on.
+			name: listingName(frontmatter["name"], entry.name),
+			description: frontmatter["description"] ?? "",
+			// Fail closed to `buddy` for anything that is not a tier the write path
+			// would itself accept — an unknown value is not a tier.
+			visibility: validatedTier(frontmatter["visibility"]),
 		});
 	}
 	return listed;
@@ -1147,11 +1187,34 @@ function parseFrontmatter(document: string): Record<string, string> {
 }
 
 /**
- * @param declared - the raw `visibility` scalar, when the frontmatter had one.
- * @returns the tier, defaulting to `buddy` for anything unusable.
+ * The name one listing row carries.
+ *
+ * A frontmatter `name` is used only when the providers' own validator accepts
+ * it; anything else falls back to the directory name, which the provider's
+ * discovery already treats as the skill's address. This keeps the panel from
+ * showing a name that no provider would ever serve.
+ * @param declared - the frontmatter `name`, when there was one.
+ * @param directory - the directory entry name.
+ * @returns the name to list under.
  */
-function visibilityFrom(declared: string | undefined): string {
-	return declared === undefined || declared === "" ? FALLBACK_TIER : declared;
+function listingName(declared: string | undefined, directory: string): string {
+	if (declared === undefined || declared.trim() === "") return directory;
+	return validateSkillName(declared.trim()) === undefined ? declared.trim() : directory;
+}
+
+/**
+ * The tier one listed row carries, judged by the write path's own vocabulary.
+ *
+ * An unknown or malformed declaration reads as `buddy` — the same fail-closed
+ * default the providers apply on their read path. Passing an unrecognized value
+ * through verbatim would put a tier on the panel that no promotion could have
+ * written and that a human might act on.
+ * @param declared - the raw `visibility` scalar, when the frontmatter had one.
+ * @returns the tier, or `buddy`.
+ */
+function validatedTier(declared: string | undefined): string {
+	const parsed = parseTier(declared);
+	return parsed ?? FALLBACK_TIER;
 }
 
 /**

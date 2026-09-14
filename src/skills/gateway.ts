@@ -250,6 +250,10 @@ export class BuddySkillsGateway extends TypertRemoteService {
 		super(ctx as never, BUDDY_SKILLS_ENDPOINTS, { namespace: BUDDY_SKILLS_SERVICE });
 		this.side = side;
 		const typert = ctx.get("typert") as { register(contribution: unknown): void } | undefined;
+		// A programming error, not a runtime condition to survive: the row only
+		// constructs this class when a registry exists (`src/skills/index.ts`'s
+		// `apply`), so reaching here means a caller skipped that gate. `typert`
+		// itself is a *soft* dependency of the row.
 		if (typert === undefined) throw new Error("dsh-buddy: the typert registry service is unavailable");
 		typert.register(typertContribution());
 	}
