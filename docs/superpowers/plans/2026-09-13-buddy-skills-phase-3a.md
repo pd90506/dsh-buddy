@@ -1101,7 +1101,12 @@ git commit -m "feat: review digest algorithm and prompts"
 
 **Interfaces:**
 - Consumes: Task 11、Task 2（`review_usage` 表）、Task 1 settings
-- Produces: `class ReviewCoordinator`，方法 `noteStep(sessionId): void`、`noteSkillManageCalled(sessionId): void`、`onTurnEnd(input: { sessionId; reason; origin?; delegationDepth? }): Promise<void>`、`noteChildEvent(childSessionId, event): void`，构造参数 `{ config(); spawn(input: { provider: "fork" | "spawn"; prompt: string; toolFilter: readonly string[] }): { childSessionId: string; done: Promise<unknown> }; interrupt(childSessionId): void; now(); log(line) }`
+- Produces: `class ReviewCoordinator`，方法 `noteStep(sessionId): void`、`noteSkillManageCalled(sessionId): void`、`onTurnEnd(input: { sessionId; reason; origin?; delegationDepth?; surface? }): Promise<void>`、`noteChildEvent(childSessionId, event): void`，构造参数 `{ config(); spawn(input: { provider: "fork" | "spawn"; prompt: string; toolFilter: readonly string[] }): { childSessionId: string; done: Promise<unknown> }; interrupt(childSessionId): void; now(); log(line) }`
+
+> **订正（2026-09-14）：** `onTurnEnd` 的入参原先漏了 `surface`（本会话的转录面，Task 11 digest 的原料，
+> 即 `ctx.sessionQuery.readSurface(sessionId)` 的产物）。便宜模型那条路径必须有它才能拼 digest，而
+> 便宜模型路径不可能自己去取转录（协调器不该知道 `sessionQuery`）。`surface` 由宿主行按需传入；
+> fork 路径不需要它。
 
 - [ ] **Step 1: 写失败的测试**
 
