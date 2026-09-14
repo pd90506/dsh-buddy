@@ -99,6 +99,16 @@ interface Mounted {
 	skills(): ServiceProxy | undefined;
 	/** Every contribution handed to `typert.register`. */
 	readonly contributions: unknown[];
+	/**
+	 * Every provider this row registered into `ctx.skills`, by name.
+	 *
+	 * The host row is the **global** layer's owner (spec §4.3): the promoted tier
+	 * is what an ordinary coding session merges, so it must be registered here
+	 * and never from the preset row. Empty when no `skills` registry is present.
+	 */
+	readonly providerNames: string[];
+	/** How many times any promoted registration's `control.invalidate()` was called. */
+	promotedInvalidations(): number;
 	/** Every `subagents.start` call, in order. */
 	readonly started: Started[];
 	/** Every `subagents.interrupt` call, in order. */
@@ -154,6 +164,8 @@ interface MountOptions {
 	readonly withSessionQuery?: boolean;
 	/** Mount a `typert` registry; default `true`. */
 	readonly withTypert?: boolean;
+	/** Mount a `skills` registry; default `true`. */
+	readonly withSkillsRegistry?: boolean;
 	/** Mount an `agents` registry; default `true`. */
 	readonly withAgents?: boolean;
 	/** Skills settings merged over the shipped defaults. */
@@ -296,6 +308,10 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		/** Every mounted fiber, so `dispose` tears the graph down the way a reload does. */
 		const fibers: { dispose(): Promise<void> }[] = [];
 		const contributions: unknown[] = [];
+		/** The providers the row registered, and the controls it was handed. */
+		const providerNames: string[] = [];
+		const providerControls = new Map<string, { readonly signal: AbortSignal; invalidate(): void }>();
+		const promotedCounters = { invalidations: 0 };
 		const started: Started[] = [];
 		const interrupted: string[] = [];
 		const authorities: unknown[] = [];
@@ -330,6 +346,32 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 					register: (contribution: unknown) => {
 						contributions.push(contribution);
 						return () => undefined;
+					},
+				}),
+			);
+		}
+		// The `skills` registry, recording rather than real: `dsh-skill` is not in
+		// this package's dependency closure, so the row can only be driven against
+		// its declared contract — `registerProvider(create)` calls the factory with
+		// a control and answers the disposer that unregisters.
+		if (options.withSkillsRegistry !== false) {
+			sibling("fake-skills", (ctx) =>
+				give(ctx, "skills", {
+					registerProvider: (create: (control: unknown) => { readonly name: string }) => {
+						const control = {
+							signal: new AbortController().signal,
+							invalidate: (): void => {
+								promotedCounters.invalidations += 1;
+							},
+						};
+						const provider = create(control);
+						providerNames.push(provider.name);
+						providerControls.set(provider.name, control);
+						return () => {
+							const at = providerNames.indexOf(provider.name);
+							if (at !== -1) providerNames.splice(at, 1);
+							providerControls.delete(provider.name);
+						};
 					},
 				}),
 			);
@@ -478,6 +520,8 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			skillsRoot: join(home, "main", "skills"),
 			skills: service,
 			contributions,
+			providerNames,
+			promotedInvalidations: () => promotedCounters.invalidations,
 			started,
 			interrupted,
 			authorities,
@@ -684,6 +728,83 @@ test("a preset id the user's own preset occupies is reported as the user's", asy
 	const mounted = await mountSkills({ seedUserPreset: true });
 	const service = serviceOf(mounted);
 	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: false, preset: "user" });
+});
+
+test("the host row registers the promoted provider for the global layer", async () => {
+	// Spec §4.3 puts the `global` / `project: <path>` contribution in the **host**
+	// row, and §3.1 lists it in the host row's box. The split is load-bearing
+	// rather than cosmetic: a registration files into the layer of its calling
+	// context's scope, so the same call made from the preset row would land in
+	// the buddy layer — and a human promoting a skill from the panel would then
+	// be a silent no-op for every ordinary coding session, which is precisely the
+	// failure §5.1 exists to remove.
+	const mounted = await mountSkills();
+	assert.deepEqual(mounted.providerNames, ["buddy-promoted"]);
+	await mounted.dispose();
+});
+
+test("without a skills registry the host row still mounts and registers no provider", async () => {
+	// Soft like every plane besides the store: a profile whose skill registry is
+	// absent must still get `ctx.buddySkills` (the panel, the write path and the
+	// coordinator all read it) and must not fall back to some ambient registry.
+	const mounted = await mountSkills({ withSkillsRegistry: false });
+	const service = mounted.skills();
+	if (service === undefined) assert.fail("a missing skills registry must not take the row down");
+	assert.deepEqual(mounted.providerNames, []);
+	await mounted.dispose();
+});
+
+test("a visibility change invalidates the promoted catalog", async () => {
+	// The registry caches completed catalogs and there is no public
+	// `ctx.skills.invalidate()`: the control handed to the factory is the only
+	// invalidation entry point there is. `setVisibility` rewrites the frontmatter
+	// the promoted provider resolves, so without this call the promotion reads
+	// back as done while ordinary sessions keep seeing the old catalog.
+	const mounted = await mountSkills();
+	await writeSkill(mounted, "alpha-skill");
+	assert.equal(mounted.promotedInvalidations(), 0, "nothing has been promoted yet");
+	const result = (await dispatch(serviceOf(mounted), "visibility", ["alpha-skill", "global"])) as {
+		success: boolean;
+		message: string;
+	};
+	assert.equal(result.success, true, result.message);
+	assert.equal(mounted.promotedInvalidations(), 1, "the promoted catalog must be refreshed");
+	await mounted.dispose();
+});
+
+test("a refused visibility change does not invalidate the catalog", async () => {
+	const mounted = await mountSkills();
+	await writeSkill(mounted, "alpha-skill");
+	const result = (await dispatch(serviceOf(mounted), "visibility", ["alpha-skill", "not-a-tier"])) as {
+		success: boolean;
+	};
+	assert.equal(result.success, false);
+	assert.equal(mounted.promotedInvalidations(), 0);
+	await mounted.dispose();
+});
+
+test("a write that carries a visibility line also invalidates the promoted catalog", async () => {
+	// `skill_manage` has no `visibility` action, but `create` and `edit` take the
+	// **whole document**, so a write can carry a `visibility:` line and change
+	// what the promoted provider contributes without going through
+	// `setVisibility` at all. The listing is the evidence that this is a real
+	// path rather than a hypothetical one.
+	const mounted = await mountSkills();
+	const created = (await dispatch(serviceOf(mounted), "manage", [
+		FOREGROUND,
+		[
+			{
+				action: "create",
+				name: "alpha-skill",
+				content: '---\nname: alpha-skill\ndescription: Use when.\nvisibility: global\n---\n\nBody.\n',
+			},
+		],
+	])) as { success: boolean; message: string };
+	assert.equal(created.success, true, created.message);
+	const listed = (await dispatch(serviceOf(mounted), "listSkills", [])) as Record<string, unknown>[];
+	assert.equal(listed.find((entry) => entry["name"] === "alpha-skill")?.["visibility"], "global");
+	assert.equal(mounted.promotedInvalidations(), 1, "the promoted provider's contribution changed");
+	await mounted.dispose();
 });
 
 test("every endpoint names the service key that actually carries the typert binding", async () => {

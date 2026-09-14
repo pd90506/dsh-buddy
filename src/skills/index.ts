@@ -60,6 +60,7 @@ import {
 } from "./gateway.ts";
 import { backgroundWriteGuard, markRead, type WriteVerdict } from "./guards.ts";
 import { listEntries, rollbackEntry, type LedgerDeps } from "./ledger.ts";
+import { createPromotedProvider } from "./provider.ts";
 import { runOperations, type ManageDeps, type Operation, type SkillAction } from "./manage.ts";
 import { ReviewCoordinator, type ReviewCoordinatorDeps, type ReviewSpawnInput, type ReviewSpawnResult } from "./review.ts";
 import { activityCount, adopt, bumpUse, latestActivityAt, setPinned } from "./usage.ts";
@@ -107,6 +108,30 @@ interface StoreHandle {
 	reviewUsage(): KvTable<string, ReviewUsageRecord>;
 	/** Who the `buddy` preset directory belongs to, resolved per call. */
 	presetOwnership(): Promise<PresetOwnership>;
+}
+
+/** The lifecycle and invalidation control one provider registration borrows. */
+interface SkillProviderControl {
+	/** Aborts when the exact provider registration is disposed. */
+	readonly signal: AbortSignal;
+	/** Invalidate completed catalogs, while the registration remains active. */
+	invalidate(): void;
+}
+
+/**
+ * The `ctx.skills` slice this row registers the promoted provider against.
+ *
+ * Declared locally like every other soft-dependency shape here: `dsh-skill` is
+ * not in this package's dependency closure, so the row reads exactly the one
+ * method it calls rather than importing the registry.
+ */
+interface SkillRegistryHandle {
+	/**
+	 * Borrow one same-process provider into the **calling context's layer**.
+	 * @param create - the factory, handed this registration's control.
+	 * @returns the disposer that unregisters it.
+	 */
+	registerProvider(create: (control: SkillProviderControl) => { readonly name: string }): () => void;
 }
 
 /** The context members this row uses. */
@@ -247,6 +272,16 @@ export class BuddySkillsService extends Service {
 
 	/** The Agent the in-flight `spawn`/`refine` call belongs to. */
 	private pendingParent: ParentAgent | undefined;
+
+	/**
+	 * The promoted provider registration's control, handed over by `apply`.
+	 *
+	 * Held because a visibility change and a write both change exactly what that
+	 * provider contributes, the registry caches completed catalogs, and the
+	 * control is the only invalidation entry point there is (`ctx.skills` has no
+	 * public `invalidate()`).
+	 */
+	private promotedControl: SkillProviderControl | undefined;
 
 	/** Whether the agent row has reported that it mounted. */
 	private heartbeat = false;
@@ -491,6 +526,14 @@ export class BuddySkillsService extends Service {
 		// into a tool execution.
 		const clean = cleanOperations(Array.isArray(operations) ? operations : []);
 		const outcome = await runOperations(this.manageDeps(sessionId), clean);
+		// A `create` or `edit` carries the **whole document** and a `patch` can
+		// rewrite a single line, so a batch can change the frontmatter `visibility`
+		// the promoted provider filters on without ever going through
+		// {@link setVisibility}. Nothing in the outcome says whether it did, and a
+		// needless invalidation costs only the next reader one catalog rebuild,
+		// while a missed one leaves the promotion invisible to ordinary sessions —
+		// so every successful batch refreshes the catalog.
+		if (outcome.success) this.invalidatePromoted();
 		return await this.mutationView(
 			outcome.success,
 			outcome.success ? `applied ${clean.length} operation(s)` : (outcome.error ?? "the batch was refused"),
@@ -533,6 +576,9 @@ export class BuddySkillsService extends Service {
 		const outcome = await runOperations(this.manageDeps("", "user"), [
 			{ action: "patch", name: skill, old_string: document, new_string: patched },
 		]);
+		// The rewrite *is* what the promoted provider filters on, so its cached
+		// catalog is stale the instant this lands.
+		if (outcome.success) this.invalidatePromoted();
 		return await this.mutationView(
 			outcome.success,
 			outcome.success ? `'${skill}' is now visible to ${parsed}` : (outcome.error ?? "the promotion was refused"),
@@ -613,6 +659,10 @@ export class BuddySkillsService extends Service {
 	 */
 	async rollback(entryId: string): Promise<{ success: boolean; message: string }> {
 		const outcome = await rollbackEntry(this.ledgerDeps(), entryId);
+		// A rollback restores the SKILL.md bytes a prior write replaced — which may
+		// be the very `visibility` line a promotion wrote — so the promoted catalog
+		// is stale after it too.
+		if (outcome.ok) this.invalidatePromoted();
 		return { success: outcome.ok, message: outcome.message };
 	}
 
@@ -759,7 +809,32 @@ export class BuddySkillsService extends Service {
 		markRead(this.readSets, sessionId, skill);
 	}
 
+	/**
+	 * Take ownership of the promoted provider registration's control.
+	 *
+	 * Called by this row's own `apply` at the moment it registers the promoted
+	 * provider. The control cannot be captured by the service itself — it is
+	 * registration-scoped and only the registering effect is ever handed it —
+	 * while the two things that make the promoted catalog stale are both service
+	 * methods ({@link setVisibility}, {@link manage}), so the handle is handed
+	 * over here.
+	 * @param control - the lifecycle and invalidation control of that registration.
+	 */
+	notePromotedControl(control: SkillProviderControl): void {
+		this.promotedControl = control;
+	}
+
 	// ── internals ────────────────────────────────────────────────────────────
+
+	/**
+	 * Refresh the promoted provider's cached catalog, when one is registered.
+	 *
+	 * A missing control means no `skills` registry existed at mount, so there is
+	 * no catalog to refresh — a degraded plane, never an error.
+	 */
+	private invalidatePromoted(): void {
+		this.promotedControl?.invalidate();
+	}
 
 	/**
 	 * Build the coordinator's dependencies over this row's store and soft planes.
@@ -1042,10 +1117,44 @@ export function apply(ctx: PluginContext): void {
 		} else {
 			new BuddySkillsGateway(ctx, service as unknown as BuddySkillsRemote);
 		}
+		// The **global layer's** half of the two-tier contract (spec §4.3, and
+		// §3.1's host-row box). The promoted provider is what an *ordinary* coding
+		// session merges, and a registration files into the layer of its calling
+		// context's scope: this is a host row, so registering it here lands it in
+		// the global layer — while the same factory registered from the preset row
+		// would land in the buddy layer and make every panel promotion a silent
+		// no-op for the sessions it was meant to reach. The two tiers are
+		// registered from two rows for exactly that reason.
+		//
+		// Registered from *this* effect rather than a sibling one because the
+		// registration has to hand its control to `service`, and that instance is
+		// only in hand here. A sibling effect cannot substitute: a service a row
+		// publishes is not resolvable through `ctx.get` until the row's fiber
+		// finishes activating, so a second effect's body would find no
+		// `buddySkills` and silently register nothing. (Verified against cordis:
+		// inside `apply`, `ctx.get` answers `undefined` for a service the same
+		// `apply` just provided.)
+		//
+		// `skills` is soft, like every plane besides the store: a profile with no
+		// skill registry still gets `ctx.buddySkills` — the panel, the write path
+		// and the coordinator all read it — and simply contributes no provider.
+		const skills = ctx.get("skills") as SkillRegistryHandle | undefined;
+		const unregisterPromoted =
+			skills === undefined
+				? undefined
+				: skills.registerProvider((control) => {
+						// Handed over so a visibility change and a write can refresh the cache.
+						service.notePromotedControl(control);
+						return createPromotedProvider({ skillsRoot: ctx.buddyStore.paths.skills });
+					});
 		// The promise is *returned*, not discarded: cordis awaits a thenable
 		// disposer, and a dispose that resolves before the reviews have stopped
-		// would let the row's teardown race its own children.
-		return () => service.dispose();
+		// would let the row's teardown race its own children. The provider comes
+		// out first — it is a registration, not part of the service's own state.
+		return async () => {
+			unregisterPromoted?.();
+			await service.dispose();
+		};
 	}, "dsh-buddy: skills");
 
 	// The heartbeat bound (spec §5.2): if the agent row has not reported by now,
