@@ -144,12 +144,16 @@ export function emptyUsageRecord(now: string): SkillUsageRecord {
 /** The domain declaration: identity, version, and the record layout. */
 export const buddyDomainSpec = defineDomain({
 	name: BUDDY_DOMAIN_NAME,
-	// Version 2 added the three skill tables. Version 1 stored only the global
-	// slot, and `compatibleVersions` is what keeps an existing install's data
-	// readable after the upgrade instead of rejecting it at open — the global
-	// slot's shape did not change.
-	version: 2,
-	compatibleVersions: [1],
+	// The version stays 1 while a change is purely additive: this spec declares
+	// no `layout`, so the json backend opens it as a `single`-layout unit, and
+	// that reader compares the stored stamp against this number and rejects any
+	// mismatch at open with `version-mismatch`. `compatibleVersions` does NOT
+	// help here — the json backend honours it only for the `per-record` layout —
+	// and an absent declared table in a version 1 document already reads as an
+	// empty map. Bumping this field without a matching migration would
+	// therefore reject every existing install's `buddy.json` instead of adding
+	// the three tables to it, so bump only alongside a real migration.
+	version: 1,
 	global: { schema: globalSchema, initial: {} },
 	// Table names are storage-unit names, so they obey `UNIT_NAME_RE`
 	// (`/^[a-z][a-z0-9_]*$/`) — snake_case, not the camelCase of the TypeScript
