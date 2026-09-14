@@ -99,6 +99,42 @@ test("frontmatter carries inline and block lists, comments and quoted scalars", 
 	assert.equal(parsed.body, "body");
 });
 
+test("a nested mapping is refused instead of flattened into top-level keys", () => {
+	// `metadata` is a real object field in DSH skill frontmatter. Flattening it
+	// promoted its inner keys, so a nested `name` silently replaced the
+	// document's own — the document has to be reported as outside the flat
+	// subset, not reinterpreted.
+	const content =
+		"---\nname: a-b\ndescription: real description\nmetadata:\n  name: other\n  description: hijacked\n---\nbody\n";
+	const parsed = parseFrontmatter(content);
+	assert.ok("error" in parsed);
+	if ("error" in parsed) assert.match(parsed.error, /flat mapping/);
+
+	const result = validateSkillDocument({ name: "a-b", content, creating: true });
+	assert.equal(result.ok, false);
+	// Not a name-mismatch error: the nested `name` must never be read as the
+	// document's own.
+	if (!result.ok) assert.match(result.error, /flat mapping/);
+});
+
+test("a non-colliding nested mapping is refused too", () => {
+	const parsed = parseFrontmatter("---\nname: a-b\ndescription: x\nmetadata:\n  owner: me\n---\nbody\n");
+	assert.ok("error" in parsed);
+	if ("error" in parsed) assert.match(parsed.error, /flat mapping/);
+});
+
+test("a block list under a bare key is still a list, indented or flush", () => {
+	const indented = parseFrontmatter("---\nname: a-b\ndescription: x\ntags:\n  - one\n  - two\n---\nbody\n");
+	assert.ok(!("error" in indented));
+	if (!("error" in indented)) assert.deepEqual(indented.frontmatter["tags"], ["one", "two"]);
+
+	// `- item` at the key's own column is still that key's list, not a nested
+	// mapping and not the next top-level key.
+	const flush = parseFrontmatter("---\nname: a-b\ndescription: x\ntags:\n- one\n- two\n---\nbody\n");
+	assert.ok(!("error" in flush));
+	if (!("error" in flush)) assert.deepEqual(flush.frontmatter["tags"], ["one", "two"]);
+});
+
 test("parseFrontmatter reports a missing or unclosed fence instead of throwing", () => {
 	const missing = parseFrontmatter("# not frontmatter\n");
 	assert.ok("error" in missing);
