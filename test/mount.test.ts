@@ -25,6 +25,15 @@ import { DEFAULT_SOUL } from "../src/persona/soul.ts";
 import { FALLBACK_CONFIG } from "../src/config.ts";
 import type { BuddySessionSummary, PersonaView, PreferencesView } from "../src/persona/gateway.ts";
 import { tableStub } from "./support/domain-tables.ts";
+import { holdDshHome } from "./support/dsh-home-hold.ts";
+
+/**
+ * The file's `$DSH_HOME` hold.
+ *
+ * See `./support/dsh-home-hold.ts` for why the ambient home is held for the
+ * whole file rather than put back when a mount returns.
+ */
+const dshHomeHold = holdDshHome();
 
 /** A prompt-variable provider, as `systemPrompt.variable` receives it. */
 type VariableProvider = (context: unknown) => string | undefined;
@@ -162,9 +171,7 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 	// "kept" and the suite would look clean while still reaching outside
 	// itself; on a machine without that directory it would actually create
 	// files there. Every mount in this suite must be hermetic.
-	const previousDshHome = process.env["DSH_HOME"];
-	const dshHome = await mkdtemp(join(tmpdir(), "dsh-buddy-mount-dsh-home-"));
-	process.env["DSH_HOME"] = dshHome;
+	const dshHome = dshHomeHold.scratch();
 
 	try {
 		const root = new Context() as unknown as Host;
@@ -175,7 +182,10 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 		let global: Record<string, unknown> = {};
 
 		const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
-			root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) });
+			const fiber = root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) }) as {
+				dispose(): Promise<void>;
+			};
+			dshHomeHold.track(fiber);
 		};
 		const give = (ctx: unknown, key: string, value: unknown): void => {
 			(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
@@ -282,26 +292,30 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 		// Spread rather than passing the module namespace: namespace objects are
 		// sealed, and cordis annotates the plugin object it is handed.
 		const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): void => {
-			root.plugin({ name: row.name, inject: row.inject, apply: row.apply });
+			const fiber = root.plugin({ name: row.name, inject: row.inject, apply: row.apply }) as {
+				dispose(): Promise<void>;
+			};
+			dshHomeHold.track(fiber);
 		};
 		mountRow(storeRow as never);
 		mountRow(personaRow as never);
 
 		// `$DSH_HOME` must still be in effect at the moment the store row's boot
-		// reads `dshHomePath()` (`src/store/index.ts:226-227`), and that read
+		// reads `dshHomePath()` (`src/store/index.ts:308-309`), and that read
 		// happens strictly before `new BuddyStore(...)` publishes `buddyStore`
 		// (the preset install is `await`ed first). Waiting on the *publish*,
 		// rather than a fixed number of event-loop turns, is what makes this
 		// observation rather than a race: on a loaded machine a fixed `settle()`
-		// can resolve before the boot reaches that point, letting the restored
-		// env var below (in `finally`) leak the real `~/.dsh` into `dshHomePath()`
-		// instead. By the time `buddyStore` is observed, that read is already
-		// behind us, so `$DSH_HOME` is safe to restore.
+		// can resolve before the boot reaches that point. That is also why the
+		// home is not put back here at all: this `until` gives up after ~1s while
+		// the boot's settings barrier may still be counting down for 2s, and a
+		// boot that resumes afterwards would read whatever is ambient then. The
+		// hold keeps a throwaway home ambient until the file-scope teardown.
 		await until(() => root.get("buddyStore") !== undefined);
 		// The persona row depends on `buddyStore` but is not itself gated by
 		// `$DSH_HOME`, so the remaining settle — giving its own mount, the
 		// prompt-variable registration, and the typert contribution room to
-		// land — does not need the real env var held any longer.
+		// land — needs no observation of the harness home.
 		await settle();
 		return {
 			home,
@@ -314,8 +328,9 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 			provideSystemPrompt: systemPrompt,
 		};
 	} finally {
-		if (previousDshHome === undefined) delete process.env["DSH_HOME"];
-		else process.env["DSH_HOME"] = previousDshHome;
+		// Back to the file's own hold home, never the ambient `~/.dsh`: see
+		// `./support/dsh-home-hold.ts`.
+		dshHomeHold.release();
 	}
 }
 
