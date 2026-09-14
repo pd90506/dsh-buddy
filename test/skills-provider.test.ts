@@ -10,9 +10,18 @@
  * provider runs during first-boot discovery.
  *
  * Read-path tolerance is asserted directly: a document whose frontmatter cannot
- * be parsed still appears — as a buddy skill — rather than vanishing from the
- * catalog, and `get` still returns its body. Every filesystem test uses a real
- * temp directory and tears it down in `finally`; no test writes into `~/.dsh`.
+ * be parsed still appears — as a buddy skill, with its summary scalars salvaged
+ * — rather than vanishing from the catalog, and `get` still returns its body.
+ *
+ * The registry-precondition guard is asserted from the other side: a skill
+ * whose name is not kebab-case or that declares no usable description is
+ * **skipped**, and a valid sibling in the same root must still be listed. That
+ * proves the skip is scoped — `dsh-skill`'s candidate validation throws outside
+ * its own `try`, so passing one bad entry through would abort discovery for the
+ * whole layer.
+ *
+ * Every filesystem test uses a real temp directory and tears it down in
+ * `finally`; no test writes into `~/.dsh`.
  * @module test/skills-provider
  */
 import assert from "node:assert/strict";
@@ -164,20 +173,20 @@ test("a project skill needs a cwd inside its path, and cwd prefixes do not count
 	}
 });
 
-test("an unparsable document stays in the buddy catalog and still loads", async () => {
+test("an unparsable document is salvaged into the buddy catalog and still loads", async () => {
 	const { deps, writeRaw, cleanup } = await fixture();
 	try {
 		// A nested mapping is outside the flat subset `parseFrontmatter` accepts,
-		// which is exactly the hand-written quirk this tolerance is for.
+		// which is exactly the hand-written quirk this tolerance is for. The
+		// summary scalars are still readable, so the skill survives instead of
+		// breaking discovery or vanishing.
 		const raw =
 			"---\nname: hand-written\ndescription: written by hand\nmetadata:\n  tags: [a, b]\n---\n\nHand-written body.\n";
 		const path = await writeRaw("main/skills/hand-written/SKILL.md", raw);
 		const provider = createBuddyProvider(deps);
 		assert.deepEqual(await names(provider), ["hand-written"]);
 		const [candidate] = await provider.list({});
-		// Parsing failed, so there is no declaration to read: the description
-		// falls back to the directory name like the name does.
-		assert.equal(candidate?.description, "hand-written");
+		assert.equal(candidate?.description, "written by hand");
 		const loaded = await provider.get(candidate!, {});
 		assert.equal(loaded?.name, "hand-written");
 		// The documented fallback: with no parseable fence there is no body to
@@ -189,20 +198,103 @@ test("an unparsable document stays in the buddy catalog and still loads", async 
 	}
 });
 
-test("a plain markdown file with no frontmatter is addressable by its directory name", async () => {
+test("salvage never reads visibility, so a malformed file cannot promote itself", async () => {
+	const { deps, writeSkill, writeRaw, cleanup } = await fixture();
+	try {
+		// The nested `metadata:` breaks the parse; the `visibility: global` line
+		// is real frontmatter, but a declaration that could not be parsed must
+		// never widen exposure.
+		await writeRaw(
+			"main/skills/sneaky/SKILL.md",
+			"---\nname: sneaky\ndescription: tries to promote itself\nvisibility: global\nmetadata:\n  tags: [a]\n---\n\nbody\n",
+		);
+		await writeSkill("good-skill", "visibility: buddy");
+		assert.deepEqual(await names(createBuddyProvider(deps)), ["good-skill", "sneaky"]);
+		assert.deepEqual(await names(createPromotedProvider(deps)), []);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("a file that declares no description is skipped, and a valid sibling survives", async () => {
+	const { deps, writeSkill, writeRaw, cleanup } = await fixture();
+	try {
+		// No `description:` key at all.
+		await writeRaw("main/skills/bare-skill/SKILL.md", "---\nname: bare-skill\n---\n\nbody\n");
+		// An explicitly empty description, the shape the parser yields for a
+		// bare `description:` key.
+		await writeRaw("main/skills/empty-description/SKILL.md", "---\nname: empty-description\ndescription:\n---\n\nbody\n");
+		// An empty quoted description.
+		await writeRaw(
+			"main/skills/quoted-empty/SKILL.md",
+			'---\nname: quoted-empty\ndescription: ""\n---\n\nbody\n',
+		);
+		// Whitespace only: the registry accepts it, but it advertises nothing.
+		await writeRaw(
+			"main/skills/whitespace-only/SKILL.md",
+			'---\nname: whitespace-only\ndescription: "   "\n---\n\nbody\n',
+		);
+		// A whole document with no fence: nothing to read, so nothing to say.
+		await writeRaw("main/skills/plain-note/SKILL.md", "# Plain note\n\nJust prose, no fence at all.\n");
+		await writeSkill("good-skill", "visibility: buddy");
+		const provider = createBuddyProvider(deps);
+		// The bad entries are absent; the good one is untouched, proving the skip
+		// is scoped rather than fatal.
+		assert.deepEqual(await names(provider), ["good-skill"]);
+		const [candidate] = await provider.list({});
+		assert.equal((await provider.get(candidate!, {}))?.name, "good-skill");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("a directory whose name is not kebab-case is skipped, and a valid sibling survives", async () => {
+	const { deps, writeSkill, writeRaw, cleanup } = await fixture();
+	try {
+		// The directory name is the name handed to the registry here, because the
+		// frontmatter name fails the same grammar and falls back to the directory.
+		await writeRaw(
+			"main/skills/Not-Kebab/SKILL.md",
+			"---\nname: Not-Kebab\ndescription: has a capital and another capital\n---\n\nbody\n",
+		);
+		await writeSkill("good-skill", "visibility: buddy");
+		assert.deepEqual(await names(createBuddyProvider(deps)), ["good-skill"]);
+		assert.deepEqual(await names(createPromotedProvider(deps)), []);
+	} finally {
+		await cleanup();
+	}
+});
+
+test("an invalid frontmatter name falls back to the directory name", async () => {
 	const { deps, writeRaw, cleanup } = await fixture();
 	try {
-		const raw = "# Plain note\n\nJust prose, no fence at all.\n";
-		await writeRaw("main/skills/plain-note/SKILL.md", raw);
+		// The documented decision: the candidate name is whatever the registry
+		// will actually check. An unusable declaration falls back to the
+		// directory, which is valid here, so the skill stays addressable.
+		await writeRaw(
+			"main/skills/fine-name/SKILL.md",
+			"---\nname: Not Kebab\ndescription: declares an unusable name\n---\n\nbody\n",
+		);
 		const provider = createBuddyProvider(deps);
-		assert.deepEqual(await names(provider), ["plain-note"]);
+		assert.deepEqual(await names(provider), ["fine-name"]);
 		const [candidate] = await provider.list({});
-		// No usable name or description to read, so both fall back to the
-		// directory name rather than dropping the entry.
-		assert.equal(candidate?.name, "plain-note");
-		assert.equal(candidate?.description, "plain-note");
-		const loaded = await provider.get(candidate!, {});
-		assert.equal(loaded?.content, raw);
+		assert.equal(candidate?.name, "fine-name");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("get refuses a candidate whose description disappeared after listing", async () => {
+	const { deps, writeSkill, writeRaw, cleanup } = await fixture();
+	try {
+		await writeSkill("loses-its-description", "visibility: buddy");
+		const provider = createBuddyProvider(deps);
+		const [candidate] = await provider.list({});
+		assert.ok(candidate !== undefined);
+		await writeRaw("main/skills/loses-its-description/SKILL.md", "---\nname: loses-its-description\n---\n\nbody\n");
+		// Returning a definition here would make the registry throw; `undefined`
+		// is the contract's "no longer loadable".
+		assert.equal(await provider.get(candidate, {}), undefined);
 	} finally {
 		await cleanup();
 	}
