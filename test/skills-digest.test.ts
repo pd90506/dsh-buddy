@@ -17,17 +17,34 @@
  * message shape: the reference reads `tool_calls[].function.name` off a raw
  * transcript dict, while {@link DigestMessage} carries an already-extracted
  * `toolNames` array, so no live harness object is ever serialized.
+ *
+ * The prompt literals are pinned **twice**: by the semantic assertions at the
+ * bottom, and by a sha256 of the exact string. The hash exists so that editing a
+ * model-facing prompt is a deliberate act; when it fails, read the diff of the
+ * literal and decide whether the change is wanted before updating the hash.
  * @module test/skills-digest
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { digestHistory, type DigestMessage } from "../src/skills/digest.ts";
+import { ASSISTANT_CHARS, digestHistory, TAIL, USER_CHARS, type DigestMessage } from "../src/skills/digest.ts";
 import { REFINE_FOCUS_SUFFIX, REVIEW_TOOL_CLAUSE, SKILL_REVIEW_PROMPT } from "../src/skills/prompt.ts";
 
 /** Build a message without ever setting `toolNames` to `undefined` (`exactOptionalPropertyTypes`). */
 function message(role: DigestMessage["role"], text: string, toolNames?: readonly string[]): DigestMessage {
 	return toolNames === undefined ? { role, text } : { role, text, toolNames };
 }
+
+/** The content hash a prompt pin compares against. */
+function sha256(text: string): string {
+	return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+test("the digest constants are the reference implementation's numbers", () => {
+	assert.equal(TAIL, 24);
+	assert.equal(USER_CHARS, 300);
+	assert.equal(ASSISTANT_CHARS, 200);
+});
 
 test("a short history is returned unchanged", () => {
 	const short = Array.from({ length: 24 }, (_, i) => message("user", `m${i}`));
@@ -155,6 +172,25 @@ test("the digest is one synthetic message followed by the verbatim tail", () => 
 	}
 });
 
+test("the kept tail is copied, never re-processed by the digest rules", () => {
+	// A long tail turn with a newline: if the tail were run through the digest's
+	// flatten/truncate rules it would lose the newline or the 400th character.
+	const longTail = `keep this verbatim\n${"x".repeat(400)}`;
+	const messages = [
+		...Array.from({ length: 6 }, (_, i) => message("user", `old${i}`)),
+		message("user", longTail),
+		...Array.from({ length: 23 }, (_, i) => message("assistant", `recent${i}`)),
+	];
+	assert.equal(messages.length, 30);
+	const out = digestHistory(messages);
+	assert.equal(out.length, 25);
+	assert.equal(out[1], messages[6]); // same object, not a rebuilt message
+	assert.ok(out[1]!.text.startsWith("keep this verbatim\n"));
+	assert.ok(out[1]!.text.includes("\n"));
+	assert.ok(out[1]!.text.includes("x".repeat(400)));
+	assert.ok(!out[0]!.text.includes("keep this verbatim"));
+});
+
 test("the tool clause is the exact mandated sentence", () => {
 	assert.equal(
 		REVIEW_TOOL_CLAUSE,
@@ -184,4 +220,23 @@ test("the review prompt speaks DSH's vocabulary, not the reference implementatio
 	assert.doesNotMatch(SKILL_REVIEW_PROMPT, /skill_view|skills_list/);
 	assert.doesNotMatch(SKILL_REVIEW_PROMPT, /[Hh]ermes/);
 	assert.match(SKILL_REVIEW_PROMPT, /skill_manage/);
+});
+
+/**
+ * Content-hash pins for the model-facing literals.
+ *
+ * These hashes exist so that editing a model-facing prompt is a deliberate act:
+ * a silent one-character change to 4KB of instructions is invisible by
+ * construction, and the reference snapshot these were ported from lives in
+ * `/tmp`, which is ephemeral. **If one of these fails, read the diff of the
+ * literal and decide whether the change is wanted — then update the hash. Do not
+ * update it reflexively.**
+ */
+test("the prompt literals are pinned by content hash", () => {
+	assert.equal(sha256(SKILL_REVIEW_PROMPT), "4ccd432de844470b63df4d08bd052371d19b65d2de849d8a7d84dc990e7dc314");
+	assert.equal(sha256(REVIEW_TOOL_CLAUSE), "1e9af5d5104bc896545dc51acbfb6e185dd8961a89ab2409c0de67ffbfc709c8");
+	assert.equal(
+		sha256(REFINE_FOCUS_SUFFIX("tighten the review loop")),
+		"e2f80572b6abdea67124381475a7aeaaccf5e85f52e4a394d2fb4c78b646bc79",
+	);
 });

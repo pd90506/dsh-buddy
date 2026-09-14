@@ -165,8 +165,8 @@ export const SKILL_REVIEW_PROMPT =
 	"the user is and what the current situation and state of your operations are'; skills capture " +
 	"'how to do this class of task for this user'. When they complain about how you handled a " +
 	"task, the skill that governs that task needs to carry the lesson.\n\n" +
-	"If you notice two existing skills that overlap, note it in your reply — consolidation at " +
-	"scale is a later concern.\n\n" +
+	"If you notice two existing skills that overlap, note it in your reply — the background " +
+	"curator handles consolidation at scale.\n\n" +
 	"Protected skills (DO NOT edit these):\n" +
 	"  • PINNED skills (marked as pinned in the skills panel). You are an autonomous " +
 	"no-user-present actor, so a pin blocks your writes too — content updates included. Only the " +
