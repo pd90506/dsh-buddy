@@ -183,8 +183,12 @@ buddy preset 的 @deepseek-ai/dsh-persona 行：prefix: '{{buddy_soul}}'
 | 浏览器半边（按钮 + 主面板 + 设置页） | 包的 `dsh.client` bundle（不是 patch 行） |
 | `buddy` agent preset（`agent.cordis.yml` + `preset.yml`） | `<dshHome>/.agent-presets/buddy/` |
 
-preset 的安装由 `buddy-store` 在首次加载时完成：目录不存在则写入，**已存在则一律不覆盖**
-（用户可能已经手改过自己的 preset）。
+preset 的同步由 `buddy-store` 在每次加载时完成：目录不存在（或为空）则写入模板并落下生成物标记
+`.dsh-buddy-generated`；有标记（= 插件的产物）就按模板逐个文件比对，内容不同即覆盖同步（升级路径
+自动打通），而磁盘上那份内容与标记里记的「上次写出哈希」不同的文件先备份成 `<file>.bak`；**无标记
+则认作用户自己的 `buddy` 预设，一字不动**。标记里存着插件版本与每个模板文件上次写出的内容哈希——
+没有它就无法把「有人手改过」和「只是模板前进了」分开。（第 3a 期把这条规则从「永不写入」改写为
+「生成物 + 标记 + 备份」，完整决策表见 `2026-09-13-buddy-skills-design.md` §5。）
 
 内置的 `agent.cordis.yml` **模板不是手写的**：先把官方 `standard` 拷成 `buddy`、加上人格行、
 用 `agentPresets.standingKeyFor('buddy')` mount-validate 通过，再把验证过的成品收进仓库当模板。
@@ -292,7 +296,9 @@ domain 名须小写（`UNIT_NAME_RE`）。
 | `buddy_soul` provider 返回 `undefined` | 不允许发生。渲染器对「被引用但本次装配无取值」的变量直接抛错，会打挂每一个 buddy 会话 |
 | dsh-buddy 未安装但 `buddy` preset 仍在 | 装配以 `unknown prompt variable "{{buddy_soul}}"` 响亮失败。**这是期望行为**：静默回落会得到一个自称 Buddy 却没有 Buddy 身份的会话 |
 | 面板注册失败 | 按钮同时不注册 —— 二者同生同死 |
-| `buddy` preset 目录已存在 | **一律不覆盖**，只记一条日志（用户可能已手改） |
+| `buddy` preset 目录已存在但无标记 | 认作**用户自己的 preset，一字不动**，只记一条日志（面板提示 id 被占用） |
+| `buddy` preset 有标记、模板内容已前进 | 逐个文件覆盖同步；磁盘内容与标记中「上次写出哈希」不同的文件先备份成 `<file>.bak`，同步完重写标记基线 |
+| 标记存在但无法解读（空 / 坏 JSON / 未知版本 / 缺该文件的基线） | 仍按插件产物同步（标记本身就声明了归属），但每个即将覆盖的文件一律先备份——无法证明它未被手改；同步后重写标记 |
 | 技能写入前快照失败 | 拒绝写入（快照是写入的前置条件，不是尽力而为） |
 
 ## 10. 测试策略

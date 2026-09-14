@@ -18,7 +18,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../config.ts";
 import { resolveBuddyPaths, type BuddyPaths } from "../paths.ts";
 import { openStore, type BuddyDomainHandle } from "./domain.ts";
-import { installPreset, presetTargetDir, resolveTemplateDir } from "./preset.ts";
+import { presetTargetDir, resolveTemplateDir, syncPreset } from "./preset.ts";
 
 declare module "@deepseek-ai/cordis" {
 	interface Context {
@@ -292,7 +292,7 @@ export function apply(ctx: PluginContext): void {
 			// shallower from the built `lib/store.js` than it does from
 			// `src/store/index.ts`, which every test imports directly.
 			const templateDir = resolveTemplateDir(import.meta.url);
-			await installPreset(presetTargetDir(dshHomePath()), templateDir).catch((error: unknown) => {
+			await syncPreset(presetTargetDir(dshHomePath()), templateDir).catch((error: unknown) => {
 				// A missing preset degrades the product but must not stop the store:
 				// the panel, the settings tab and the endpoints all still work.
 				console.error(`dsh-buddy-store: preset install skipped: ${(error as Error).message}`);
