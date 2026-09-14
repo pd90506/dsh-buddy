@@ -18,6 +18,10 @@
  * - **Names are validated before any path is built.** A skill name is joined
  *   onto {@link ManageDeps.skillsRoot}, so an invalid one must be refused before
  *   a snapshot or a write can act on the traversal.
+ * - **Jurisdiction is injected, not inferred.** Whether the caller is the
+ *   automatic review, and what that review has read, is host-row state this
+ *   module must not know about; {@link ManageDeps.guard} answers it and is the
+ *   first thing {@link applyOne} asks (Task 8).
  *
  * Dependencies are a small plain object of real handles and two closures — no
  * cordis context, no live harness object — so a test builds one from temp
@@ -79,6 +83,16 @@ export interface ManageDeps extends LedgerDeps {
 	actor(): SkillLedgerRecord["actor"];
 	/** The current ISO-8601 instant, read once per mutation. */
 	now(): string;
+	/**
+	 * Jurisdiction and read-before-write, judged by the caller's identity.
+	 *
+	 * Injected rather than decided here because both inputs are host-row state
+	 * this module must not know about: whether the call comes from a review
+	 * sub-session the row started, and the set of skills that review has read
+	 * (Task 14's observation). The row closes over that state and delegates to
+	 * `backgroundWriteGuard`; a foreground caller's guard allows everything.
+	 */
+	guard(action: Operation["action"], skill: string): { allow: true } | { allow: false; reason: string };
 }
 
 /** What a batch reports to its caller. */
@@ -217,16 +231,27 @@ export async function runOperations(deps: ManageDeps, operations: readonly Opera
 }
 
 /**
- * Apply one operation, refusing a bad name before it builds a path.
+ * Apply one operation, asking the injected guard first and refusing a bad name
+ * before it builds a path.
  *
- * Filesystem failures are answered as refusals rather than thrown, so a batch
- * sees them as the failing operation and rolls back — an exception escaping here
- * would leave the earlier operations applied with no restore.
- * @param deps - paths, tables, actor and clock.
+ * The guard is consulted before anything else, so a skill out of the caller's
+ * jurisdiction — the automatic review touching a pinned or human-created skill,
+ * or one it never read — is refused without a path being built or a file
+ * touched. Filesystem failures are answered as refusals rather than thrown, so a
+ * batch sees them as the failing operation and rolls back — an exception
+ * escaping here would leave the earlier operations applied with no restore.
+ * @param deps - paths, tables, actor, clock and the jurisdiction guard.
  * @param operation - the requested mutation.
  * @returns the applied value, or the refusal.
  */
 export async function applyOne(deps: ManageDeps, operation: Operation): Promise<ApplyOutcome> {
+	// The first thing an operation asks: may this caller write this skill at
+	// all? Jurisdiction (pinned / curator-managed) and read-before-write are all
+	// judged here, before a path is built or a file is read, so a refusal cannot
+	// have touched anything.
+	const verdict = deps.guard(operation.action, operation.name);
+	if (!verdict.allow) return { success: false, error: verdict.reason };
+
 	const nameError = validateSkillName(operation.name);
 	if (nameError !== undefined) return { success: false, error: nameError };
 	try {
