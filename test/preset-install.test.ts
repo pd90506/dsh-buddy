@@ -126,11 +126,22 @@ test("installing twice with the same template is idempotent", async () => {
 test("a marked install is synced when the template moves on", async () => {
 	const f = await fixture();
 	try {
-		// The installed version's template wrote `old`; the marker records it.
+		// `old` is written into the TEMPLATE before the install, never over the
+		// installed file afterwards. The marker's per-file hash baseline is the
+		// only thing that separates "the plugin's own previous output" from "a
+		// hand-edit", so the only way to express "the template moved on and
+		// nobody hand-edited anything" is for the previous content to be what
+		// the plugin actually wrote. Writing `old` over the installed file
+		// instead would leave bytes hashing to neither the baseline nor the new
+		// template — a hand-edit by definition, which is the NEXT test — and
+		// this one would stop exercising the silent upgrade path at all.
 		await writeFile(f.templateFile("agent.cordis.yml"), "old\n", "utf8");
 		assert.equal(await syncPreset(f.target, f.template), "installed");
-		// The next version moves that file on. Nobody touched the install, so the
-		// on-disk bytes still hash to the baseline and the overwrite is silent.
+		// Now the next version moves that file on and nobody touches the
+		// install, so the on-disk bytes still hash to the baseline and the
+		// overwrite must be silent: no `.bak`, no `backed-up-synced`. A sync
+		// that backed up here would be the rejected "differs from the current
+		// template" rule — it cannot tell an upgrade from a hand-edit.
 		await writeFile(f.templateFile("agent.cordis.yml"), "new\n", "utf8");
 		assert.equal(await syncPreset(f.target, f.template), "synced");
 		assert.equal(await readFile(join(f.target, "agent.cordis.yml"), "utf8"), "new\n");
