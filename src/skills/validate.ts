@@ -189,18 +189,32 @@ function parseFlatFrontmatter(content: string): FrontmatterParse {
 		const rawValue = line.slice(separator + 1).trim();
 		if (rawValue === "" || rawValue.startsWith("- ")) {
 			// A block list: the value line is bare, or carries the first item.
+			const keyIndent = line.length - line.trimStart().length;
 			const items = rawValue === "" ? [] : [unquote(rawValue.slice(2).trim())];
 			let cursor = index + 1;
 			while (cursor < header.length) {
-				const candidate = (header[cursor] ?? "").trim();
+				const rawCandidate = header[cursor] ?? "";
+				const candidate = rawCandidate.trim();
+				if (candidate === "" || candidate.startsWith("#")) {
+					cursor += 1;
+					continue;
+				}
 				if (candidate.startsWith("- ")) {
+					// A list item, at any indentation: `- item` at the key's own
+					// column is still that key's block list, not the next key.
 					items.push(unquote(candidate.slice(2).trim()));
 					cursor += 1;
 					continue;
 				}
-				if (candidate === "" || candidate.startsWith("#")) {
-					cursor += 1;
-					continue;
+				if (rawCandidate.length - rawCandidate.trimStart().length > keyIndent) {
+					// Indented `key: value` under a bare key is a nested mapping.
+					// Promoting its inner keys to the top level would invent
+					// frontmatter the document does not have — and could override
+					// real top-level keys — so it is outside the documented flat
+					// subset and refused instead of flattened.
+					return {
+						error: `frontmatter must be a flat mapping of key: value pairs; '${key}' has nested content`,
+					};
 				}
 				break;
 			}
