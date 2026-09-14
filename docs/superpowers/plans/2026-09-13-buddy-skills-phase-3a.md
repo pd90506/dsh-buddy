@@ -1593,9 +1593,11 @@ export const name = "dsh-buddy-skills-agent";
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `node --test test/skills-agent.test.ts test/skills-mount.test.ts && npm run typecheck && npm run build`
-Expected: PASS。`npm run build` 不是可选项：`defineTool` 的 external 与否只有在构建产物里才看得出来
-（订正 3），提交前以 `npm run check` 为准。
+Run: `node --test test/skills-agent.test.ts test/skills-mount.test.ts && npm run typecheck && npm run check`
+Expected: PASS。注意：**本任务还看不到构建产物证据** —— `build.mjs` 的 `hostEntries` 由 Task 18 才加上
+`src/skills-agent/index.ts`，所以在 Task 14 的提交里根本没有 `lib/skills-agent.js`，`defineTool` 是否真的
+external 只能到 Task 18 再验。本任务只需把依赖声明写对（订正 3），**不要**在报告里声称"已在构建产物里
+验证过"。
 
 - [ ] **Step 5: 提交**
 
