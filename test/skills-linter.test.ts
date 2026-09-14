@@ -14,9 +14,9 @@ type SkillOverrides = {
 /**
  * Assemble the input `lintSkill` receives, with valid defaults.
  *
- * `content` is built from the same body the caller overrides, so rules that
- * read the document text and rules that read the parsed frontmatter always see
- * one consistent skill.
+ * `content` is built from the same frontmatter and body the caller overrides,
+ * so rules that read the document text and rules that read the parsed
+ * frontmatter always see one consistent skill.
  * @param overrides - body, frontmatter, directory name, raw content, or probe.
  * @returns the input for one linter call.
  */
@@ -32,10 +32,22 @@ function skill(overrides: SkillOverrides = {}): LintInput {
 		license: "MIT",
 		...overrides.frontmatter,
 	};
-	const content = overrides.content ?? `---\nname: ${skillName}\n---\n${body}`;
+	const content = overrides.content ?? `---\n${renderFrontmatter(frontmatter)}\n---\n${body}`;
 	const input: LintInput = { content, skillDir: `/skills/${skillName}`, skillName, frontmatter };
 	if (overrides.dirExists !== undefined) input.dirExists = overrides.dirExists;
 	return input;
+}
+
+/**
+ * Render frontmatter into the document text, the way a skill file carries it.
+ * @param frontmatter - the parsed mapping.
+ * @returns one `key: value` line per declared field.
+ */
+function renderFrontmatter(frontmatter: Record<string, unknown>): string {
+	return Object.entries(frontmatter)
+		.filter(([, value]) => value !== undefined)
+		.map(([key, value]) => `${key}: ${Array.isArray(value) ? `[${value.join(", ")}]` : String(value)}`)
+		.join("\n");
 }
 
 test("a well-formed skill produces no findings at all", () => {
@@ -93,6 +105,18 @@ test("incident-log-shape fires only at >=4 refs AND >=0.5 per 1k chars", () => {
 	assert.ok(!lintSkill(skill({ body: one })).some((f) => f.rule === "incident-log-shape"));
 });
 
+test("incident-log-shape ignores references inside fenced code blocks", () => {
+	const insideFence = "## When to Use\n```\n" + "see #1234 #1235 #1236 #1237 for why.\n".repeat(20) + "```\n";
+	assert.equal(lintSkill(skill({ body: insideFence })).some((f) => f.rule === "incident-log-shape"), false);
+});
+
+test("incident-log-shape needs the density too, not just the reference count", () => {
+	// Five references pass the count but sit in a very long body: the rule is
+	// an AND, so a history that is mostly prose stays quiet.
+	const long = "## When to Use\nsee #1 #2 #3 #4 #5 for why.\n" + "prose ".repeat(4000);
+	assert.equal(lintSkill(skill({ body: long })).some((f) => f.rule === "incident-log-shape"), false);
+});
+
 test("dangling-reference probes the injected predicate and never the real filesystem", () => {
 	const body = "## When to Use\nSee `references/present.md` and `references/missing.md`.\n";
 	const probed = lintSkill(skill({ body, dirExists: (rel) => rel === "references/present.md" }));
@@ -104,6 +128,12 @@ test("dangling-reference probes the injected predicate and never the real filesy
 	assert.match(rule.message, /references\/missing\.md/);
 	// Without a probe there is nothing to know, so the rule stays silent.
 	assert.equal(lintSkill(skill({ body })).some((f) => f.rule === "dangling-reference"), false);
+});
+
+test("dangling-reference leaves paths inside absolute URLs alone", () => {
+	const body = "## When to Use\nSee https://x.com/references/foo.md and `references/bar.md`.\n";
+	const findings = lintSkill(skill({ body, dirExists: (rel) => rel === "references/bar.md" }));
+	assert.equal(findings.some((f) => f.rule === "dangling-reference"), false);
 });
 
 test("platforms-value rejects values outside the allowed set", () => {
@@ -128,6 +158,10 @@ test("platforms-gating wants platforms: when a POSIX-only primitive is used", ()
 	assert.match(rule.message, /osascript/);
 	const gated = lintSkill(skill({ body, frontmatter: { platforms: "darwin" } }));
 	assert.equal(gated.some((f) => f.rule === "platforms-gating"), false);
+	// Frontmatter prose is not evidence: a description naming a primitive does
+	// not mean a script runs one.
+	const proseOnly = lintSkill(skill({ body: "## When to Use\nPlain prose.\n", frontmatter: { description: "Wraps systemctl." } }));
+	assert.equal(proseOnly.some((f) => f.rule === "platforms-gating"), false);
 });
 
 test("forbidden-file reports each stray file the probe finds", () => {
@@ -161,6 +195,31 @@ test("shell-utility-reference names the DSH tool, not hermes'", () => {
 	assert.doesNotMatch(rule.message, /read_file|patch/);
 });
 
+test("shell-utility-reference reads a span's command word and fenced commands", () => {
+	const span = lintSkill(skill({ body: "## When to Use\nRun `cat file.md` first.\n" }));
+	const spanRule = span.find((f) => f.rule === "shell-utility-reference");
+	assert.ok(spanRule);
+	assert.match(spanRule.message, /`read`/);
+	const fenced = lintSkill(skill({ body: "## When to Use\n```bash\nsed -i 's/a/b/' f.md | cat\nfind . -name '*.md'\n```\n" }));
+	const fencedRule = fenced.find((f) => f.rule === "shell-utility-reference");
+	assert.ok(fencedRule);
+	assert.match(fencedRule.message, /`edit`/);
+	assert.match(fencedRule.message, /`read`/);
+	assert.match(fencedRule.message, /`glob`/);
+	// Ordinary prose is still not code context.
+	const prose = lintSkill(skill({ body: "## When to Use\nThe cat sat on the mat and we find it there.\n" }));
+	assert.equal(prose.some((f) => f.rule === "shell-utility-reference"), false);
+});
+
+test("shell-utility-reference stays quiet when DSH's tool has the same name", () => {
+	const grep = lintSkill(skill({ body: "## When to Use\nUse `grep` to search.\n" }));
+	assert.equal(grep.some((f) => f.rule === "shell-utility-reference"), false);
+	const rg = lintSkill(skill({ body: "## When to Use\nUse `rg` to search.\n" }));
+	const rule = rg.find((f) => f.rule === "shell-utility-reference");
+	assert.ok(rule);
+	assert.match(rule.message, /`grep`/);
+});
+
 test("missing-metadata wants visibility, version, author and license", () => {
 	const bare = { visibility: undefined, version: undefined, author: undefined, license: undefined };
 	const findings = lintSkill(skill({ frontmatter: bare }));
@@ -170,6 +229,16 @@ test("missing-metadata wants visibility, version, author and license", () => {
 	assert.match(rule.message, /visibility/);
 	assert.match(rule.message, /license/);
 	assert.equal(lintSkill(skill()).some((f) => f.rule === "missing-metadata"), false);
+});
+
+test("missing-metadata counts a list of authors as present", () => {
+	const frontmatter = { visibility: "buddy", version: "1", author: ["Ann", "Bob"], license: "MIT" };
+	assert.equal(lintSkill(skill({ frontmatter })).some((f) => f.rule === "missing-metadata"), false);
+	// An empty list is still missing metadata.
+	const empty = lintSkill(skill({ frontmatter: { ...frontmatter, author: [] } }));
+	const rule = empty.find((f) => f.rule === "missing-metadata");
+	assert.ok(rule);
+	assert.match(rule.message, /author/);
 });
 
 test("every finding is advisory and the caller is told so", () => {
