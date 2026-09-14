@@ -117,6 +117,33 @@ export class BuddyStore extends Service {
 	}
 
 	/**
+	 * Per-skill usage telemetry, keyed by skill name.
+	 *
+	 * Read through the handle rather than re-resolved per call: the table handle
+	 * is stable for the life of the opened domain.
+	 * @returns the usage table.
+	 */
+	skillUsage(): BuddyDomainHandle["skillUsage"] {
+		return this.handle.skillUsage;
+	}
+
+	/**
+	 * The skill mutation ledger, keyed by entry id.
+	 * @returns the ledger table.
+	 */
+	skillLedger(): BuddyDomainHandle["skillLedger"] {
+		return this.handle.skillLedger;
+	}
+
+	/**
+	 * Per-review token usage, keyed by usage-record id.
+	 * @returns the review-usage table.
+	 */
+	reviewUsage(): BuddyDomainHandle["reviewUsage"] {
+		return this.handle.reviewUsage;
+	}
+
+	/**
 	 * The `buddy` settings section as it reads now.
 	 * @returns the resolved configuration.
 	 */
