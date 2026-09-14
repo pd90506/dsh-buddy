@@ -1613,7 +1613,7 @@ git commit -m "feat: wire the skills rows into the host composition and the budd
 
 ## Self-Review
 
-**Spec coverage：** §3 两个行 → Task 13/14/18；§4 三层隔离 → Task 9/14/15 + Task 1 的路径断言；§5 preset 归属 → Task 10；§6 触发 → Task 12/14；§7 输入与预算 → Task 11/12；§8 写路径（校验/linter/快照账本回滚/管辖权/adopt/审批）→ Task 3-8（`writeApproval` 在 Task 7 的 `applyOne` 入口判定，按 §8.6 走暂存而非落盘）；§9 遥测与面板 → Task 2/6/12/17；§10 失败处理 → Task 5/7/12；§11 偏差 → 由 Task 3（名字语法）、Task 5（两种快照）、Task 12（不排队/不抢断）落实；§12 3b → 本期不做，仅 Task 2 已建字段；§13 测试 → Task 15 + Task 18 Step 5。
+**Spec coverage：** §3 两个行 → Task 13/14/18；§4 三层隔离 → Task 9/14/15 + Task 1 的路径断言；§5 preset 归属 → Task 10；§6 触发 → Task 12/14；§7 输入与预算 → Task 11/12；§8 写路径（校验/linter/快照账本回滚/管辖权/adopt）→ Task 3-8。**订正（2026-09-14）：`writeApproval` 并未实现**——原文声称它「在 Task 7 的 `applyOne` 入口判定，按 §8.6 走暂存而非落盘」，那是错的：`src/` 里没有任何地方读这个设置。§8.6 自己标了「（可选）」，§13.2 的真机验收也不含它，而只做暂存半边（没有待批队列与批准落盘的面板）比不做更糟——写入会被永久挂起。因此本期**明确不做**，并把 `src/config.ts` 里那条 description 改成如实说明「保留、尚未生效」，避免设置页对用户说谎；§9 遥测与面板 → Task 2/6/12/17；§10 失败处理 → Task 5/7/12；§11 偏差 → 由 Task 3（名字语法）、Task 5（两种快照）、Task 12（不排队/不抢断）落实；§12 3b → 本期不做，仅 Task 2 已建字段；§13 测试 → Task 15 + Task 18 Step 5。
 
 **Placeholder scan：** 无 TBD/TODO/占位断言；每个代码步骤都给了可直接落地的代码，或给出明确的移植源（`$H` 行号 + 规则名/常量值）。自检中发现并已修掉的两处：(1) Task 2 的测试原先引用 Task 6 才定义的 `emptyUsageRecord`（顺序倒置）→ 已把该构造函数移到 Task 2 的 `domain.ts`，Task 6 改为 import；(2) Task 3 曾留一条示意断言 → 已删除，只保留真实断言。
 

@@ -132,7 +132,12 @@ export const Config: z<Partial<BuddyConfig>, BuddyConfig> = z.object({
 				.description("Model for the review pass; empty follows the conversation's own route"),
 			maxReviewSteps: z.number().default(16).description("Model-round ceiling for one review pass"),
 			maxInputTokens: z.number().default(600000).description("Cumulative input-token ceiling for one review pass"),
-			writeApproval: z.boolean().default(false).description("Stage skill writes for approval instead of applying them"),
+			writeApproval: z
+				.boolean()
+				.default(false)
+				.description(
+					"Reserved and not yet honoured: staging writes for approval needs a pending queue plus an approval surface, so every write is applied today whatever this is set to",
+				),
 			ledger: z.boolean().default(true).description("Record the skill mutation ledger"),
 		})
 		.default({ ...FALLBACK_CONFIG.skills })
