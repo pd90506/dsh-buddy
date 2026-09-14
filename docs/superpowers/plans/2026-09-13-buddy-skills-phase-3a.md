@@ -1477,7 +1477,7 @@ git commit -m "feat: the buddy-skills host row and its panel endpoints"
 **Files:**
 - Create: `src/skills-agent/index.ts`
 - Test: `test/skills-agent.test.ts`
-- Modify: `src/skills/index.ts`（`noteSkillRead` → `noteSkillUsed`，`BuddySkillsService` 加 `skillsRoot()`）
+- Modify: `src/skills/index.ts`（`noteSkillRead` → `noteSkillUsed`，加 `skillsRoot()`，并注册 global 层的 promoted provider）
 - Modify: `package.json`（peer + dev 加 `@deepseek-ai/dsh-tools`）
 
 > **订正（2026-09-14，session 3 控制者）——原文的三处接口缺口，都是对着已装的 harness 逐个核出来的。**
@@ -1496,14 +1496,35 @@ git commit -m "feat: the buddy-skills host row and its panel endpoints"
 **Interfaces:**
 - Consumes: Task 8、9、13 的 `ctx.buddySkills`
 - Produces:
-  - preset 行 `dsh-buddy-skills-agent`：注册 provider（buddy 层）、`skill_manage` 工具、
+  - preset 行 `dsh-buddy-skills-agent`：注册 **buddy 层**的 provider（`createBuddyProvider`，
+    provider 名 `"buddy-skills"`）、`skill_manage` 工具、
     `session/event` 与 `tools/post-execute` 监听器、`refine` 命令，并调 `ctx.buddySkills.noteAgentRowMounted()`
+  - **host 行 `dsh-buddy/skills` 注册 global 层的 promoted provider**（`createPromotedProvider`，
+    provider 名 `"buddy-promoted"`）——见下面的订正 4
   - `BuddySkillsService.skillsRoot(): string`（返回 `this.host.buddyStore.paths.skills`）
   - `BuddySkillsService.noteSkillUsed(sessionId: string, skill: string): Promise<void>`
     （`bumpUse(skillUsage(), skill, now)` + `markRead(readSets, sessionId, skill)`；两者都不抛）
   - **五个软依赖一律 `ctx.get(name)` + 本地最小接口声明**，因为 `dsh-skill` / `dsh-commands` 根本不在本包的
     依赖闭包里，且 `dsh-tools` 只借它的 `defineTool`：
     `skills` / `tools` / `commands` / `buddySkills` / （若需要）`agentRegistry`
+
+> **订正 4（2026-09-14，session 3 控制者，实现者报告后追加）——两个 provider 分属两层，不能都塞进 preset 行。**
+> 本条的第一个版本（我的订正 1–3 里那句「两个 provider」）让 preset 行把两个 provider 都注册了。那是错的，
+> 而且与 spec §4.1/§4.3/§3.1 直接冲突：`dsh-skill` 的实现文档写得很清楚——*"A registration files into the layer
+> of its **calling context's scope** … host rows and repository plugins land in the global layer, while a plugin
+> mounted by an agent preset's standing composition lands in that preset's layer"*（`dsh-skill/lib/index.js:113-118`，
+> `registerProvider` 的 doc 同义；实现是 `this.layers.effect(this.ctx, …)`，cordis 用 shadow receiver 让
+> `this.ctx` 解析成**调用者**的 ctx）。所以：
+> - **buddy 层** → `createBuddyProvider` **只能**由 preset 行注册（这就是 §4.1 的隔离保证）。
+> - **global 层** → `createPromotedProvider` **必须**由 host 行注册（spec §4.3：*「`global` / `project: <path>`
+>   的技能由**宿主行的 global 层 provider**贡献」*，§3.1 的 host 行方框里也列着这一条）。
+>
+> 两个都从 preset 行注册的后果是**静默的功能失效**：人从面板把技能提升到 global 之后，普通编码会话依然看不到
+> 它（提升在界面上"成功"了，实际什么都没发生）——正是 §5.1 要消灭的那类失败。plan 的 Task 13 漏了这一条
+> （它的 Produces 里没有 provider），所以补在本条。host 行的 `apply` 已经有硬注入的 `ctx.buddyStore`，
+> 技能根就是 `ctx.buddyStore.paths.skills`。
+> 另：`setVisibility` 会改变 promoted provider 贡献的内容，所以 host 行必须**捕获 promoted 那个 control**，
+> 在可见性变更后调 `control.invalidate()`（注册表的目录缓存不自己失效）。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1557,8 +1578,8 @@ export const name = "dsh-buddy-skills-agent";
   挂载）。注册用 `ctx.get("skills")`（软依赖，本地声明最小接口）
   `registerProvider(create: (control: SkillProviderControl) => SkillProvider): () => void`，
   其中 `SkillProviderControl = { signal: AbortSignal; invalidate: () => void }`
-  （`dsh-skill/lib/types/index.d.ts:190-195,249`）。两个 provider 用 Task 9 已有的
-  `createBuddyProvider({ skillsRoot: plane.skillsRoot() })` 与 `createPromotedProvider(...)`。
+  （`dsh-skill/lib/types/index.d.ts:190-195,249`）。preset 行**只注册 buddy 层那一个**：
+  `createBuddyProvider({ skillsRoot: plane.skillsRoot() })`。
   **`control.invalidate()` 必须由 `skill_manage` 成功写入后调用**——注册表缓存目录，不 invalidate 的话新建
   的技能永远不可见，而**没有**公开的 `ctx.skills.invalidate()`，唯一的失效入口就是工厂拿到的这个 control。
   把 control 存进闭包，工具与监听器共用。
@@ -1588,13 +1609,22 @@ export const name = "dsh-buddy-skills-agent";
   返回 `{ kind: "success" | "error", text }`（`dsh-commands/lib/types/types.d.ts:33-41`）。
   处理函数转 `plane.refine(invocation.agent, focus)`。
 - 挂载时调 `plane.noteAgentRowMounted()`。
+- **host 行（`src/skills/index.ts` 的 `apply`）另外注册 promoted provider**：`ctx.get("skills")` 为软依赖，
+  缺席就不注册；`ctx.effect(() => skills.registerProvider(() => createPromotedProvider({
+  skillsRoot: ctx.buddyStore.paths.skills })))`。把工厂拿到的 control 存到服务上，
+  `setVisibility`（以及任何改变 frontmatter `visibility` 的写入）成功后调 `control.invalidate()`。
+  **不要在 preset 行注册它**（订正 4）。
 - **所有注册都走 `ctx.effect(...)`**（`registerProvider` / `tools.register` / `commands.register` 返回的
   disposer 就是 effect 的返回值；`ctx.on` 本身即 effect）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `node --test test/skills-agent.test.ts test/skills-mount.test.ts && npm run typecheck && npm run check`
-Expected: PASS。注意：**本任务还看不到构建产物证据** —— `build.mjs` 的 `hostEntries` 由 Task 18 才加上
+Expected: PASS。测试要**同时**钉住分层（订正 4）：preset 行那一侧断言
+`providerNames(scope)` 恰好是 `["buddy-skills"]`（**不含** `"buddy-promoted"`）；host 行那一侧
+（`test/skills-mount.test.ts` 已经挂了真 host 行 + 记录型 `skills` fake）断言它注册的正是
+`["buddy-promoted"]`。只测"注册发生了"而不测"注册在哪一行"等于没测这一层。
+注意：**本任务还看不到构建产物证据** —— `build.mjs` 的 `hostEntries` 由 Task 18 才加上
 `src/skills-agent/index.ts`，所以在 Task 14 的提交里根本没有 `lib/skills-agent.js`，`defineTool` 是否真的
 external 只能到 Task 18 再验。本任务只需把依赖声明写对（订正 3），**不要**在报告里声称"已在构建产物里
 验证过"。
