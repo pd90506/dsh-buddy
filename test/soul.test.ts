@@ -11,7 +11,17 @@ async function paths(): Promise<BuddyPaths> {
 	const home = await mkdtemp(join(tmpdir(), "dsh-buddy-"));
 	// This suite exercises only the soul/agents IO, so `main` is the temp home
 	// itself (already created by mkdtemp) — soul.ts never touches `main`/`workspace`.
-	return { home, main: home, soul: join(home, "SOUL.md"), agents: join(home, "AGENTS.md"), workspace: join(home, "workspace") };
+	return {
+		home,
+		main: home,
+		soul: join(home, "SOUL.md"),
+		agents: join(home, "AGENTS.md"),
+		workspace: join(home, "workspace"),
+		// Present only to satisfy the full `BuddyPaths` shape: soul.ts never
+		// touches the skills layer.
+		skills: join(home, "skills"),
+		skillSnapshots: join(home, "skills", ".snapshots"),
+	};
 }
 
 test("an absent SOUL.md reads as the default persona, never empty", async () => {

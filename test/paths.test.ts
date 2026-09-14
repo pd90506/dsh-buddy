@@ -43,3 +43,12 @@ test("an absolute configured home is kept verbatim", () => {
 	const paths = resolveBuddyPaths("/tmp/buddy-abs");
 	assert.equal(paths.home, "/tmp/buddy-abs");
 });
+
+test("the skills root is a sibling of SOUL.md under main/", () => {
+	const paths = resolveBuddyPaths("/tmp/buddy-home");
+	assert.equal(paths.skills, join("/tmp/buddy-home", "main", "skills"));
+	assert.equal(paths.skillSnapshots, join("/tmp/buddy-home", "main", "skills", ".snapshots"));
+	// 技能目录绝不能落在 workspace 里：workspace 是会话 cwd，落在里面的目录会被
+	// 任何以它为 cwd 的会话当成项目根扫到（见 spec §4 的文件层隔离）。
+	assert.ok(!paths.skills.startsWith(paths.workspace));
+});

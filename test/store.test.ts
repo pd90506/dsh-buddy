@@ -89,6 +89,8 @@ async function storeFixture(): Promise<{ ctx: Context; paths: BuddyPaths; handle
 		soul: "/tmp/x/main/SOUL.md",
 		agents: "/tmp/x/main/AGENTS.md",
 		workspace: "/tmp/x/main/workspace",
+		skills: "/tmp/x/main/skills",
+		skillSnapshots: "/tmp/x/main/skills/.snapshots",
 	};
 	return { ctx, paths, handle };
 }
@@ -147,6 +149,8 @@ test("marking a persona write leaves the rest of the global alone", async () => 
 			soul: "/tmp/x/main/SOUL.md",
 			agents: "/tmp/x/main/AGENTS.md",
 			workspace: "/tmp/x/main/workspace",
+			skills: "/tmp/x/main/skills",
+			skillSnapshots: "/tmp/x/main/skills/.snapshots",
 		},
 		handle,
 	);

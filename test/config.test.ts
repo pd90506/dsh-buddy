@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Config, FALLBACK_CONFIG, PANEL_SECTION_IDS } from "../src/config.ts";
+import { Config, FALLBACK_CONFIG, PANEL_SECTION_IDS, type BuddyConfig } from "../src/config.ts";
 
 test("a silent document produces the documented defaults", () => {
 	const resolved = Config({});
@@ -25,4 +25,16 @@ test("a partial model and a partial panel are completed from defaults", () => {
 
 test("the panel section ids are the four modules, in display order", () => {
 	assert.deepEqual([...PANEL_SECTION_IDS], ["soul", "agents", "model", "telegram"]);
+});
+
+test("skills settings carry the reference defaults", () => {
+	const resolved = Config({} as never) as BuddyConfig;
+	assert.equal(resolved.skills.enabled, true);
+	assert.equal(resolved.skills.creationNudgeInterval, 10);
+	assert.equal(resolved.skills.maxReviewSteps, 16);
+	assert.equal(resolved.skills.maxInputTokens, 600000);
+	assert.equal(resolved.skills.writeApproval, false);
+	assert.equal(resolved.skills.ledger, true);
+	assert.equal(resolved.skills.reviewProvider, "");
+	assert.equal(resolved.skills.reviewModel, "");
 });

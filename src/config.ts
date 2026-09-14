@@ -25,6 +25,26 @@ export interface BuddyModelDefault {
 	reasoningEffort: string;
 }
 
+/** Skill auto-evolution: the post-turn review that writes skills. */
+export interface BuddySkillsConfig {
+	/** Master switch for the automatic post-turn review. */
+	enabled: boolean;
+	/** Steps between two automatic reviews of the same conversation. */
+	creationNudgeInterval: number;
+	/** Provider for the review pass; empty follows the conversation's own route. */
+	reviewProvider: string;
+	/** Model for the review pass; empty follows the conversation's own route. */
+	reviewModel: string;
+	/** Model-round ceiling for one review pass. */
+	maxReviewSteps: number;
+	/** Cumulative input-token ceiling for one review pass. */
+	maxInputTokens: number;
+	/** Stage skill writes for approval instead of applying them. */
+	writeApproval: boolean;
+	/** Record the skill mutation ledger. */
+	ledger: boolean;
+}
+
 /** Shape of the `buddy` settings section. */
 export interface BuddyConfig {
 	/**
@@ -36,6 +56,8 @@ export interface BuddyConfig {
 	model: BuddyModelDefault;
 	/** Which main-panel modules are shown. */
 	panel: { sections: Record<PanelSectionId, boolean> };
+	/** Automatic skill curation. */
+	skills: BuddySkillsConfig;
 }
 
 /** Defaults used before the settings section resolves. */
@@ -43,6 +65,16 @@ export const FALLBACK_CONFIG: BuddyConfig = {
 	home: "",
 	model: { provider: "", model: "", reasoningEffort: "" },
 	panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
+	skills: {
+		enabled: true,
+		creationNudgeInterval: 10,
+		reviewProvider: "",
+		reviewModel: "",
+		maxReviewSteps: 16,
+		maxInputTokens: 600000,
+		writeApproval: false,
+		ledger: true,
+	},
 };
 
 /**
@@ -83,4 +115,26 @@ export const Config: z<Partial<BuddyConfig>, BuddyConfig> = z.object({
 		})
 		.default({ sections: { ...FALLBACK_CONFIG.panel.sections } })
 		.description("Which modules the Buddy main panel shows"),
+	skills: z
+		.object({
+			enabled: z.boolean().default(true).description("Master switch for the automatic post-turn skill review"),
+			creationNudgeInterval: z
+				.number()
+				.default(10)
+				.description("Steps between two automatic reviews of the same conversation"),
+			reviewProvider: z
+				.string()
+				.default("")
+				.description("Provider for the review pass; empty follows the conversation's own route"),
+			reviewModel: z
+				.string()
+				.default("")
+				.description("Model for the review pass; empty follows the conversation's own route"),
+			maxReviewSteps: z.number().default(16).description("Model-round ceiling for one review pass"),
+			maxInputTokens: z.number().default(600000).description("Cumulative input-token ceiling for one review pass"),
+			writeApproval: z.boolean().default(false).description("Stage skill writes for approval instead of applying them"),
+			ledger: z.boolean().default(true).description("Record the skill mutation ledger"),
+		})
+		.default({ ...FALLBACK_CONFIG.skills })
+		.description("Automatic skill curation"),
 }) as never;

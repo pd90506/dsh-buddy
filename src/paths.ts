@@ -32,6 +32,23 @@ export interface BuddyPaths {
 	 * decision.
 	 */
 	readonly workspace: string;
+	/**
+	 * Skill directories Buddy's auto-evolution writes.
+	 *
+	 * A sibling of the authored files under `main/`, and deliberately NOT under
+	 * {@link workspace}: a skills directory inside the session cwd would be
+	 * discovered as a project skill root by any session whose cwd is the
+	 * workspace, which would defeat the isolation contract.
+	 */
+	readonly skills: string;
+	/**
+	 * Content-addressed pre-write snapshots.
+	 *
+	 * Under `skills/` rather than the home so it belongs to the same layer, and
+	 * dot-prefixed so it can never collide with a skill directory — the skill
+	 * name grammar forbids a leading dot.
+	 */
+	readonly skillSnapshots: string;
 }
 
 /**
@@ -45,12 +62,15 @@ export function resolveBuddyPaths(configuredHome: string): BuddyPaths {
 	const raw = configuredHome.trim();
 	const home = raw === "" ? dshHomePath("buddy") : absolute(expandHomePath(raw));
 	const main = join(home, "main");
+	const skills = join(main, "skills");
 	return {
 		home,
 		main,
 		soul: join(main, "SOUL.md"),
 		agents: join(main, "AGENTS.md"),
 		workspace: join(main, "workspace"),
+		skills,
+		skillSnapshots: join(skills, ".snapshots"),
 	};
 }
 
