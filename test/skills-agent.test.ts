@@ -45,6 +45,7 @@
  */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
+import { build } from "esbuild";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -134,8 +135,14 @@ interface Mounted {
 	callCommand(name: string, invocation: { agent: TestAgent; rawInput: string }): Promise<unknown>;
 	/** Emit one `session/event` to the graph, as a committed append does. */
 	emitSessionEvent(sessionId: string, event: RecordedEvent): void;
-	/** Emit one `tools/post-execute` and wait for every listener. */
-	emitPostExecute(exec: { name: string; arguments: unknown; agent?: TestAgent }): Promise<void>;
+	/**
+	 * Emit one `tools/post-execute` and answer what the waterfall settled on.
+	 *
+	 * The value is returned rather than discarded because that is the whole
+	 * contract: a waterfall listener that forgets `next()` swallows the dispatch,
+	 * and a helper typed `Promise<void>` cannot tell the two apart.
+	 */
+	emitPostExecute(exec: { name: string; arguments: unknown; agent?: TestAgent }): Promise<unknown>;
 	/** Every `BuddySkillsService` call this mount made, in order. */
 	readonly calls: readonly ServiceCall[];
 	/** The `skill_usage` table this mount's host row writes through. */
@@ -158,6 +165,7 @@ interface Harness {
 	readonly root: {
 		plugin(plugin: unknown): { dispose(): Promise<void> };
 		emit(name: string, ...args: unknown[]): unknown;
+		waterfall(name: string, ...args: unknown[]): unknown;
 		get(name: string): unknown;
 	};
 	/** The `skill_usage` table this harness's host row writes through. */
@@ -435,6 +443,7 @@ async function independentScope(
 	root: {
 		plugin(plugin: unknown): { dispose(): Promise<void> };
 		emit(name: string, ...args: unknown[]): unknown;
+		waterfall(name: string, ...args: unknown[]): unknown;
 		get(name: string): unknown;
 	};
 	records: RegistryRecords;
@@ -464,6 +473,7 @@ async function independentScope(
 	const root = new Context() as unknown as {
 		plugin(plugin: unknown): { dispose(): Promise<void> };
 		emit(name: string, ...args: unknown[]): unknown;
+		waterfall(name: string, ...args: unknown[]): unknown;
 		get(name: string): unknown;
 	};
 	const fibers: { dispose(): Promise<void> }[] = [];
@@ -560,9 +570,13 @@ async function mountAgentRow(options: MountOptions = {}): Promise<Mounted> {
 		emitSessionEvent: (sessionId, event) => {
 			harness.root.emit("session/event", { header: { id: sessionId } }, event);
 		},
-		emitPostExecute: async (exec) => {
-			await harness.root.emit("tools/post-execute", exec, {}, async () => "accepted");
-		},
+		// `waterfall`, not `emit`: `tools/post-execute` is a waterfall event, and the
+		// waterfall dispatcher is what returns the outermost listener's value. An
+		// `emit` here would invoke the listener just the same and answer `void`,
+		// which is precisely the shape that cannot tell a passed-through dispatch
+		// from a swallowed one.
+		emitPostExecute: async (exec) =>
+			await harness.root.waterfall("tools/post-execute", exec, {}, async () => "accepted"),
 		calls,
 		usage: harness.usage,
 		ledger: harness.ledger,
@@ -617,6 +631,68 @@ after(async () => {
 		await rm(harness.home, { recursive: true, force: true });
 	}
 	dshHomeHold.release();
+});
+
+/** The host row's module graph, which the preset row's artifact must not carry. */
+const HOST_ROW_GRAPH = [
+	"src/skills/index.ts",
+	"src/skills/prompt.ts",
+	"src/skills/review.ts",
+	"src/skills/ledger.ts",
+	"src/skills/snapshot.ts",
+	"src/skills/manage.ts",
+	"src/skills/linter.ts",
+	"src/skills/gateway.ts",
+	"src/skills/usage.ts",
+	"src/skills/guards.ts",
+	"src/skills/digest.ts",
+	"src/store/domain.ts",
+	"src/index.ts",
+	"src/config.ts",
+	"src/paths.ts",
+];
+
+test("the preset row's artifact does not drag the host row's module graph in", async () => {
+	// Task 18 will add this row to `build.mjs`'s `hostEntries`, and the artifact
+	// then has to stand on its own: the two rows are separate bundles precisely so
+	// a profile can load one without the other, and the brief's correction 2 draws
+	// that line explicitly — host logic must not be copied into
+	// `lib/skills-agent.js`. Importing *any* symbol from `src/skills/index.ts`
+	// crosses it, because the bundler follows the module edge and pulls the host
+	// row's whole graph in behind the one constant.
+	//
+	// The check is `build.mjs`'s own configuration (bundle, ESM, node22, every
+	// `@deepseek-ai/*` external) run to memory, so what it reports is the artifact
+	// Task 18 would emit — available now even though the build entry is not.
+	const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+		dependencies?: Record<string, string>;
+		peerDependencies?: Record<string, string>;
+	};
+	const result = await build({
+		entryPoints: [new URL("../src/skills-agent/index.ts", import.meta.url).pathname],
+		bundle: true,
+		write: false,
+		metafile: true,
+		format: "esm",
+		platform: "node",
+		target: "node22",
+		external: [
+			...Object.keys(manifest.dependencies ?? {}),
+			...Object.keys(manifest.peerDependencies ?? {}),
+			"node:*",
+		],
+		logLevel: "silent",
+	});
+	const inputs = Object.keys(result.metafile?.inputs ?? {}).map((id) => id.replace(/\\/gu, "/"));
+	// esbuild reports ids relative to the working directory here and absolute
+	// elsewhere, so a module is matched by path suffix rather than by equality.
+	const carries = (module: string): boolean =>
+		inputs.some((id) => id === module || id.endsWith(`/${module}`));
+	for (const module of HOST_ROW_GRAPH) {
+		assert.equal(carries(module), false, `the preset row's bundle must not carry ${module}`);
+	}
+	// And the vocabulary it does need arrives from the leaf, not from the host row.
+	assert.equal(carries("src/skills/actions.ts"), true, "the action vocabulary must come from the leaf module");
 });
 
 test("the agent row names itself and declares no hard dependency", () => {
@@ -692,8 +768,13 @@ test("a session event that is neither a step nor a turn end is left alone", asyn
 
 test("observing the skill loader bumps use and records a read mark", async () => {
 	const scope = await mountAgentRow();
-	await scope.emitPostExecute({ name: "skill", arguments: { name: "a-b" }, agent: AGENT });
+	const settled = await scope.emitPostExecute({ name: "skill", arguments: { name: "a-b" }, agent: AGENT });
 	await settle();
+	// The listener is a **waterfall**: it did its own work and still returned
+	// `next()`, which is what the settled value proves. A listener that stopped to
+	// do the observation and forgot `next()` would swallow the dispatch while
+	// every other assertion in this test still passed.
+	assert.equal(settled, "accepted", "the owned path must still return next()");
 	// One method does both halves of the observation (the brief's correction 2):
 	// the usage bump and the read mark that read-before-write is judged against.
 	const used = scope.calls.filter((call) => call.method === "noteSkillUsed");
@@ -706,9 +787,10 @@ test("observing the skill loader bumps use and records a read mark", async () =>
 
 test("a post-execute the listener does not own is passed straight through", async () => {
 	const scope = await mountAgentRow();
-	await scope.emitPostExecute({ name: "read", arguments: { path: "/x" }, agent: AGENT });
+	const settled = await scope.emitPostExecute({ name: "read", arguments: { path: "/x" }, agent: AGENT });
 	await settle();
 	assert.deepEqual(scope.calls.filter((call) => call.method === "noteSkillUsed"), []);
+	assert.equal(settled, "accepted", "an unowned dispatch must reach the rest of the pipeline untouched");
 	await scope.dispose();
 });
 
