@@ -10,13 +10,25 @@
  * through {@link createPromotedProvider}, and a buddy skill never reaches them
  * at all, because this directory is not any default scan root.
  *
+ * - **Registry preconditions are enforced here, by skipping.** `dsh-skill`
+ *   validates every candidate and every loaded definition with **throws**, and
+ *   its candidate check sits *outside* the `try`/`catch` that wraps
+ *   `provider.list()` (`lib/index.js`: the `try` covers only the awaited call,
+ *   `validateCandidate` runs after it at `:360`). One malformed hand-written
+ *   file would therefore abort discovery for the whole layer and take every
+ *   other skill down with it. A skill whose summary cannot satisfy those
+ *   preconditions is skipped here — a scoped loss instead of a fatal one — and
+ *   the same guard makes `get` return `undefined` for a stale candidate.
  * - **Read-path tolerance.** `visibility` is parsed with Task 3's
- *   {@link parseFrontmatter}, which never throws. A document whose frontmatter
- *   cannot be parsed is treated as `visibility: buddy` — the least-exposed tier
- *   — so a hand-written skill cannot vanish from the catalog because of a parse
- *   quirk. An absent, empty, malformed (`project:` with no path, a relative
- *   path) or unknown value also resolves to buddy: an unreadable declaration
- *   never *widens* exposure.
+ *   {@link parseFrontmatter}, which never throws. An absent, empty, malformed
+ *   (`project:` with no path, a relative path) or unknown value resolves to
+ *   `buddy`, the least-exposed tier: an unreadable declaration never *widens*
+ *   exposure. A document whose frontmatter cannot be parsed is also treated as
+ *   `visibility: buddy`, and its name/description are read by a last-resort
+ *   scalar scan ({@link salvageFrontmatter}) so that a hand-written skill with
+ *   an otherwise unreadable declaration does not vanish from the catalog for a
+ *   parse quirk. `visibility` is never salvaged — a failed parse stays private
+ *   by rule.
  * - **Discovery is one level.** `list` reads `<skillsRoot>/*\/SKILL.md`, skips
  *   anything that is not a directory, skips a directory without a readable
  *   `SKILL.md`, and never recurses. A missing or unreadable root is an empty
@@ -24,8 +36,9 @@
  * - **`get` returns the body, not the document.** Frontmatter is removed by
  *   `parseFrontmatter`; when parsing failed the raw text is returned instead
  *   (there is deliberately no second, lenient parser here). The visibility rule
- *   is re-applied at load time, so a file rewritten between `list` and `get`
- *   cannot leak through a stale candidate. A file that is gone resolves to
+ *   and the registry preconditions are re-applied at load time, so a file
+ *   rewritten between `list` and `get` cannot leak through — nor crash the
+ *   registry through — a stale candidate. A file that is gone resolves to
  *   `undefined`.
  * - **No cordis context.** Dependencies are one plain object so a test can build
  *   them from a temp directory; this module registers nothing (Task 14 does).
@@ -41,7 +54,7 @@
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { parseFrontmatter, SKILL_NAME_RE } from "./validate.ts";
+import { parseFrontmatter, validateSkillName } from "./validate.ts";
 
 /** The provider name of the buddy-private tier. */
 export const BUDDY_SKILL_PROVIDER_NAME = "buddy-skills";
@@ -217,8 +230,8 @@ interface SkillLocator {
 interface DiscoveredSkill {
 	/** Where the text came from. */
 	readonly locator: SkillLocator;
-	/** The parsed mapping, or `undefined` when the frontmatter did not parse. */
-	readonly frontmatter: Readonly<Record<string, unknown>> | undefined;
+	/** The parsed mapping, or the salvaged scalars when the frontmatter did not parse. */
+	readonly frontmatter: Readonly<Record<string, unknown>>;
 	/** The body with frontmatter removed; the raw text when parsing failed. */
 	readonly body: string;
 	/** This skill's resolved tier. */
@@ -273,17 +286,25 @@ function createProvider(
 			// consulted: every read is one local file read with nothing remote to
 			// await, so there is no long operation an abort could shorten.
 			const skills = await discover(deps.skillsRoot);
-			return skills
-				.filter((skill) => visible(skill.visibility, options.cwd))
-				.map((skill) => toCandidate(name, skill));
+			const candidates: SkillCandidate[] = [];
+			for (const skill of skills) {
+				if (!visible(skill.visibility, options.cwd)) continue;
+				// Skip rather than hand the registry something it would throw on:
+				// that throw is outside the registry's own catch (see the module
+				// header), so a malformed file here costs one entry, not the layer.
+				const candidate = toCandidate(name, skill);
+				if (candidate !== undefined) candidates.push(candidate);
+			}
+			return candidates;
 		},
 		async get(candidate, options) {
 			const locator = readLocator(candidate);
 			if (locator === undefined) return undefined;
 			const skill = await readSkill(locator);
 			if (skill === undefined) return undefined;
-			// Re-apply the rule at load time: a file rewritten between `list` and
-			// `get` must not leak through the stale candidate that was merged.
+			// Re-apply both rules at load time: a file rewritten between `list`
+			// and `get` must neither leak through the stale candidate that was
+			// merged nor be returned as a definition the registry would reject.
 			if (!visible(skill.visibility, options.cwd)) return undefined;
 			return toDefinition(name, skill);
 		},
@@ -333,10 +354,12 @@ async function readSkill(locator: SkillLocator): Promise<DiscoveredSkill | undef
 	}
 	const parsed = parseFrontmatter(raw);
 	if ("error" in parsed) {
-		// Read-path tolerance: an unparsable declaration is treated as buddy, and
-		// the raw text is the content because there is no second, lenient parser
-		// to guess where the frontmatter ended.
-		return { locator, frontmatter: undefined, body: raw, visibility: { kind: "buddy" } };
+		// Read-path tolerance: an unparsable declaration is treated as buddy —
+		// never salvaged, because a failed parse must not *widen* exposure — and
+		// the raw text is the content, since there is no body to separate
+		// without knowing where the fence closed. The name and description are
+		// salvaged so the entry can still satisfy the registry's preconditions.
+		return { locator, frontmatter: salvageFrontmatter(raw), body: raw, visibility: { kind: "buddy" } };
 	}
 	return {
 		locator,
@@ -347,12 +370,75 @@ async function readSkill(locator: SkillLocator): Promise<DiscoveredSkill | undef
 }
 
 /**
+ * Read the summary scalars out of a document whose frontmatter did not parse.
+ *
+ * This is a last resort, not a second parser: it scans the first fenced block
+ * for exactly the keys a summary needs, at column zero, and stops at the closing
+ * fence. It exists so that a hand-written skill carrying something the flat
+ * subset refuses — a nested `metadata:` mapping, say — stays addressable instead
+ * of vanishing from the catalog. `visibility` is deliberately **not** readable
+ * this way: an unparsable declaration stays in the private tier by rule, so a
+ * malformed file can never promote itself.
+ * @param raw - the complete document text.
+ * @returns the salvageable scalars, possibly empty.
+ */
+function salvageFrontmatter(raw: string): Readonly<Record<string, unknown>> {
+	const frontmatter: Record<string, unknown> = {};
+	for (const key of ["name", "description", "whenToUse"]) {
+		const value = salvageScalar(raw, key);
+		if (value !== undefined) frontmatter[key] = value;
+	}
+	return frontmatter;
+}
+
+/**
+ * Read one top-level scalar from the first fenced block of a document.
+ * @param raw - the complete document text.
+ * @param key - the exact frontmatter key to look for.
+ * @returns the unquoted value, or `undefined` when it is absent or unusable.
+ */
+function salvageScalar(raw: string, key: string): string | undefined {
+	const text = raw.startsWith("\uFEFF") ? raw.slice(1) : raw;
+	const lines = text.split("\n");
+	if ((lines[0] ?? "").trim() !== "---") return undefined;
+	for (let index = 1; index < lines.length; index += 1) {
+		const line = lines[index] ?? "";
+		const trimmed = line.trim();
+		if (trimmed === "---") return undefined;
+		// Column zero only: an indented `name:` belongs to a nested mapping, not
+		// to the skill, and reading it would invent a name the document lacks.
+		if (line.length !== line.trimStart().length) continue;
+		const separator = trimmed.indexOf(":");
+		if (separator === -1) continue;
+		if (trimmed.slice(0, separator).trim() !== key) continue;
+		const value = stripQuotes(trimmed.slice(separator + 1).trim());
+		// A block scalar's text lives on the following lines, which this scan
+		// does not read; the indicator itself is not a value.
+		if (value === "" || value.startsWith("|") || value.startsWith(">")) continue;
+		return value;
+	}
+	return undefined;
+}
+
+/**
+ * Strip one matching pair of surrounding quotes.
+ * @param value - a trimmed scalar.
+ * @returns the scalar without its quotes.
+ */
+function stripQuotes(value: string): string {
+	if (value.length < 2) return value;
+	const first = value[0];
+	const last = value[value.length - 1];
+	if ((first === '"' && last === '"') || (first === "'" && last === "'")) return value.slice(1, -1);
+	return value;
+}
+
+/**
  * Resolve a parsed frontmatter's `visibility` declaration.
- * @param frontmatter - the parsed mapping; `undefined` when parsing failed.
+ * @param frontmatter - the parsed mapping.
  * @returns the declared tier, defaulting to buddy for every unreadable value.
  */
-function resolveVisibility(frontmatter: Readonly<Record<string, unknown>> | undefined): SkillVisibility {
-	if (frontmatter === undefined) return { kind: "buddy" };
+function resolveVisibility(frontmatter: Readonly<Record<string, unknown>>): SkillVisibility {
 	const raw = frontmatter["visibility"];
 	// Absent, or not a scalar: buddy.
 	if (typeof raw !== "string") return { kind: "buddy" };
@@ -387,26 +473,28 @@ function isInside(root: string, cwd: string): boolean {
  *
  * The frontmatter name wins when it is a valid DSH kebab-case name, matching
  * the filesystem provider; otherwise the directory name is used, so a
- * hand-written file with no `name:` is still addressable by its directory.
+ * hand-written file with no usable `name:` is still addressable by its
+ * directory. The name handed to the registry is the one checked, not the
+ * directory name, so a directory that is itself not kebab-case is skipped by
+ * {@link toSummary} rather than advertised as an unaddressable skill.
  * @param skill - the discovered skill.
  * @returns the candidate name.
  */
 function skillName(skill: DiscoveredSkill): string {
-	const declared = skill.frontmatter?.["name"];
-	if (typeof declared === "string" && SKILL_NAME_RE.test(declared)) return declared;
+	const declared = skill.frontmatter["name"];
+	if (typeof declared === "string" && validateSkillName(declared) === undefined) return declared;
 	return skill.locator.name;
 }
 
 /**
  * The description shown by discovery consumers.
  * @param skill - the discovered skill.
- * @param name - the resolved skill name.
- * @returns the declared description, or the name when nothing usable is declared.
+ * @returns the declared description, or `undefined` when nothing usable is declared.
  */
-function skillDescription(skill: DiscoveredSkill, name: string): string {
-	const declared = skill.frontmatter?.["description"];
-	if (typeof declared === "string" && declared.trim() !== "") return declared;
-	return name;
+function skillDescription(skill: DiscoveredSkill): string | undefined {
+	const declared = skill.frontmatter["description"];
+	if (typeof declared !== "string" || declared.trim() === "") return undefined;
+	return declared;
 }
 
 /**
@@ -416,23 +504,50 @@ function skillDescription(skill: DiscoveredSkill, name: string): string {
  * @returns the hint, or `undefined` when absent.
  */
 function skillWhenToUse(skill: DiscoveredSkill): string | undefined {
-	const declared = skill.frontmatter?.["whenToUse"];
+	const declared = skill.frontmatter["whenToUse"];
 	if (typeof declared !== "string" || declared.trim() === "") return undefined;
 	return declared;
 }
 
 /**
- * Build the invocation-neutral half of a summary.
+ * Build the invocation-neutral half of a summary, or refuse the entry.
+ *
+ * `dsh-skill` throws on a candidate that fails its own grammar for `name`
+ * (`SKILL_NAME`), that has a non-string or empty `description`, or that carries
+ * a malformed `invocation`, `rank`, `source`, `whenToUse`, `path` or `provider`
+ * field. The last four groups cannot fail here **by construction**, which is
+ * why they are not re-checked at runtime:
+ *
+ * - `invocation` is always {@link DEFAULT_INVOCATION}, typed
+ *   `SkillInvocationPolicy` with both booleans present, and frozen;
+ * - `rank` is always the numeric {@link USER_DSH_RANK};
+ * - `source` is always the string {@link BUDDY_SKILL_SOURCE};
+ * - `provider` is the factory's own `name` parameter, threaded in here, so it
+ *   equals the registered provider name by construction rather than by trust;
+ * - `path` is always a string (the joined `SKILL.md` path) and `whenToUse` is
+ *   only ever set from a non-empty string.
+ *
+ * Only the two values that come from the file can fail, and a failure returns
+ * `undefined` so the caller can **skip** the entry. That matters because the
+ * registry's candidate check runs outside the `try` that wraps
+ * `provider.list()`: passing a malformed entry through would abort discovery
+ * for the whole layer instead of costing one skill.
  * @param provider - this provider's name.
  * @param skill - the discovered skill.
- * @returns the summary fields both a candidate and a definition carry.
+ * @returns the summary fields a candidate and a definition share, or
+ *   `undefined` when the registry would reject the entry.
  */
-function toSummary(provider: string, skill: DiscoveredSkill): SkillSummary {
+function toSummary(provider: string, skill: DiscoveredSkill): SkillSummary | undefined {
 	const name = skillName(skill);
+	if (validateSkillName(name) !== undefined) return undefined;
+	// Never looser than the registry: it rejects only `length === 0`, while a
+	// whitespace-only description advertises nothing either.
+	const description = skillDescription(skill);
+	if (description === undefined) return undefined;
 	const whenToUse = skillWhenToUse(skill);
 	return {
 		name,
-		description: skillDescription(skill, name),
+		description,
 		// `exactOptionalPropertyTypes`: omit rather than pass `undefined`.
 		...(whenToUse === undefined ? {} : { whenToUse }),
 		invocation: DEFAULT_INVOCATION,
@@ -446,11 +561,13 @@ function toSummary(provider: string, skill: DiscoveredSkill): SkillSummary {
  * Build a candidate for one discovered skill.
  * @param provider - this provider's name.
  * @param skill - the discovered skill.
- * @returns the catalog entry.
+ * @returns the catalog entry, or `undefined` when the registry would reject it.
  */
-function toCandidate(provider: string, skill: DiscoveredSkill): SkillCandidate {
+function toCandidate(provider: string, skill: DiscoveredSkill): SkillCandidate | undefined {
+	const summary = toSummary(provider, skill);
+	if (summary === undefined) return undefined;
 	return {
-		...toSummary(provider, skill),
+		...summary,
 		rank: USER_DSH_RANK,
 		locator: skill.locator,
 		path: skill.locator.path,
@@ -461,11 +578,14 @@ function toCandidate(provider: string, skill: DiscoveredSkill): SkillCandidate {
  * Build a loadable definition for one discovered skill.
  * @param provider - this provider's name.
  * @param skill - the discovered skill.
- * @returns the definition, with the body's frontmatter removed.
+ * @returns the definition with the body's frontmatter removed, or `undefined`
+ *   when the registry would reject it.
  */
-function toDefinition(provider: string, skill: DiscoveredSkill): SkillDefinition {
+function toDefinition(provider: string, skill: DiscoveredSkill): SkillDefinition | undefined {
+	const summary = toSummary(provider, skill);
+	if (summary === undefined) return undefined;
 	return {
-		...toSummary(provider, skill),
+		...summary,
 		content: skill.body,
 		path: skill.locator.path,
 	};
