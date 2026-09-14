@@ -356,7 +356,9 @@ Expected: FAIL — 模块不存在
  * throws on a mismatch, so a name hermes would accept could not be loaded here.
  * @module dsh-buddy/skills/validate
  */
-import { parse as parseYaml } from "yaml";
+// 没有 YAML 依赖：本包的 `hostExternal` 等于 `dependencies ∪ peerDependencies`（build.mjs:23），
+// 而 `yaml` 不在其中，裸 import 既解析不到也打不进产物；为一个扁平的 frontmatter 引入新依赖
+// 不值得（且本机不能联网装包）。所以这里自带一个小解析器，并明确它接受的子集。
 
 export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const ALLOWED_SUBDIRS = ["references", "templates", "scripts", "assets"] as const;
@@ -405,7 +407,12 @@ export function validateSkillDocument(input: {
 }
 ```
 
-`splitFrontmatter` 用 `yaml` 的 `parse`，要求首行是 `---` 且有闭合 `---`，解析结果必须是普通对象（数组/标量都拒绝）。`validateSupportPath` 检查首段在 `ALLOWED_SUBDIRS` 内且路径不含 `..`；`validateSupportBytes` 检查字节上限。
+`splitFrontmatter` **不用 YAML 库**（理由见上）：首行必须是 `---`、必须找到闭合 `---`，中间按行解析成**扁平映射**——`key: value`，值支持裸标量、单/双引号字符串、行内列表 `[a, b]` 与块列表（`- item` 续行）；空行与 `#` 注释跳过。解析结果必须是映射（数组/标量都拒绝）。**两条路径的严格度不同**：
+
+- **写路径（`validateSkillDocument`）严格**：只接受这个子集，遇到无法解析的行返回 `{ ok: false, error }`，错误文案要告诉模型"frontmatter 必须是扁平的 key: value"。这是我们自己写出去的格式，收紧是有意的。
+- **读路径必须容忍、永不抛**：provider 读 `visibility` 时若 frontmatter 解析失败或字段缺失，一律回落成默认 `visibility: "buddy"`，绝不让一个手写技能因为解析问题从技能列表里消失（`$H` 的加载器用真 YAML，比我们宽；读宽写严是这个差异的正确处理方式）。
+
+`validateSupportPath` 检查首段在 `ALLOWED_SUBDIRS` 内且路径不含 `..`；`validateSupportBytes` 检查字节上限。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -897,7 +904,7 @@ Expected: FAIL — 模块不存在
 
 - [ ] **Step 3: 实现**
 
-`list` 读 `<skillsRoot>/*/SKILL.md`（一层，不递归），解析 frontmatter 取 `visibility` 缺省为 `"buddy"`；`rank` 用 `BUNDLED_SKILL_RANK` 之下的值（例如 `400`，与用户级一致）；`locator` 放绝对路径与目录名；`get` 重新读文件并返回 `content` 为**去掉 frontmatter 的正文**、`resourceBase: { kind: "directory", path: dirname }`。两个 provider 的差别只有可见性过滤与 `cwd` 判断。
+`list` 读 `<skillsRoot>/*/SKILL.md`（一层，不递归），**用 Task 3 的 `parseFrontmatter`**（不要引入 YAML 依赖——本包没有它）取 `visibility`，缺省为 `"buddy"`；**解析失败一律当作 `"buddy"` 且不抛**（读路径容忍，理由见 Task 3）。`rank` 用 `BUNDLED_SKILL_RANK` 之下的值（例如 `400`，与用户级一致）；`locator` 放绝对路径与目录名；`get` 重新读文件并返回 `content` 为**去掉 frontmatter 的正文**、`resourceBase: { kind: "directory", path: dirname }`。两个 provider 的差别只有可见性过滤与 `cwd` 判断。
 
 - [ ] **Step 4: 跑测试确认通过**
 
