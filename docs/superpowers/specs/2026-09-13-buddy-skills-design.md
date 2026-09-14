@@ -301,8 +301,10 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 每次 review 跑完，把用量写进领域的 `reviewUsage` 表：父会话 id、子会话 id、provider、model、step 数、`inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、结果、时间。
 
 - `$H` 的对应机制就是**它自己的旁表**（SQLite 的 `session_model_usage`，`record_auxiliary_usage(session_id, task="background_review")`），**不动 transcript**（fork 的 `_session_db = None`）。
-- **明确偏差**：DSH 的 stock token 投影只折**会话自己日志里 provider 上报的用量**（§2.2），所以父会话自带的成本视图**不会**包含这笔。要进那个视图只能伪造模型消息，**不做**。可见位置是：Buddy 面板上每条对话的"自我改进花费"+ 本领域表。
-- 备选（已评估并否决）：往父会话日志追加一条自有事件。DSH 允许，但**必须带 `ignorable` 标记**且没有注册 API（§2.2），而 `$H` 自己也没动 transcript——用更重、更险的机制换不到任何东西，故不采用。
+- **明确偏差（可见性）**：DSH 的 stock token 投影只折**会话自己日志里 provider 上报的用量**（§2.2），所以 **DSH 原生会话页的成本视图不会包含这笔**。要进那个视图只能伪造模型消息，**不做**。可见位置是：Buddy 面板上每条对话的"自我改进花费" + `reviewUsage` 表。
+- **`sessionTelemetry` 不是可用路径**（已核实，订正先前说法）：它是 **backend 契约**（`SessionTelemetryBackend`），`emit()` **由 coordinator 调用、不是插件接口**；coordinator 的采集只有三条路——会话 firehose（每个规范事件一条 ledger 记录）、`agent/error` 转发的 `agent-error` ops 记录、按需 `captureSession()` 重放规范日志（`dsh-session-telemetry/lib/types/coordinator.d.ts:29-100`）。**没有"插件自报一条 ops 记录"的 API**。即便有，它也是**出站遥测**（给分析后端用）而不是本地成本视图，并且受 `sharing: SessionTelemetrySharingStatus` 约束——分享关掉就发进空气。
+- 备选（已评估并否决）：往父会话日志追加一条自有事件。DSH 允许，但**必须带 `ignorable` 标记**且没有事件名注册 API（§2.2），而 `$H` 自己也没动 transcript——用更重、更险的机制换不到任何东西，故不采用。
+- **两条实现约束**：(1) **review 跑完时父会话可能已经结束或被销毁**，所以记录写领域表（不依赖活会话）——这也是不选日志路径的第二个理由；(2) **归属必须放在 `finally` 里**：`$H` 专门保证"一个烧了 token 然后才抛异常的 fork 也要归属"（其 issue #87250），取消与失败路径同样要记。
 
 ### 9.3 面板 Skills 模块
 
@@ -344,7 +346,7 @@ curator 的 **pause / run-now** 属于 3b（`$H` 有 `PUT /api/curator/paused`�
 | 2 | 工具白名单是"不可见 + 拒绝"，`$H` 是"可见 + dispatch 拒绝" | `toolFilter` 是 DSH 唯一的限制手段（§7.3） |
 | 3 | 用 `skill` 加载器替代 `skills_list`/`skill_view` | DSH 的技能目录是 context 消息，不是工具（§1） |
 | 4 | `created_by` 判定用"宿主行记录的 review 子会话 id"，`$H` 用 ContextVar | DSH 的 review 是真正的独立会话（§8.4） |
-| 5 | 遥测放 storage domain，`$H` 放 `.usage.json` 文件 | 仓库三平面铁律；后果见 §9.1 |
+| 5 | 遥测放 storage domain，`$H` 放 `.usage.json` 文件 | 仓库三平面铁律；后果见 §9.1。另外 review 用量只在 Buddy 面板可见，**DSH 原生会话页看不到**（§9.2） |
 
 ### 11.2 实现手段不同、语义相同
 
