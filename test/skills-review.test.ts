@@ -9,30 +9,58 @@
  * paths (same-model `fork` vs cheap-model `spawn` carrying the digest), and the
  * two budgets enforced by observing the child session's own events.
  *
- * Two assertions carry the most weight. The single-flight test reproduces the
- * double fire a real `turn/end` boundary can produce: two `onTurnEnd` calls for
- * one session with the first review still starting, where the second must be
- * silently dropped rather than queued. The failure test spawns a `done` that
- * rejects immediately and still requires exactly one attributed usage row —
- * a review that burned tokens and then threw is the case the reference
- * implementation added a side table for, and the `finally` is where that lives.
+ * Two decisions carry the most weight, and each has a test that can only fail
+ * for its own reason. **Path selection** is measured against the route the
+ * conversation really ran on (`onTurnEnd`'s `route`), not against Buddy's
+ * default model — so the tests deliberately make the config's `model` and the
+ * session route disagree, and one covers the documented degraded fallback when
+ * the host row omits the route. **The single-flight guard** is pinned by the
+ * test where a whole new interval elapses while the first review is still
+ * flying and the second trigger is dropped; the back-to-back double call is
+ * kept as a second angle on the same claim.
+ *
+ * The failure test holds `done`'s rejection until after the child's message has
+ * been observed — a review that spent tokens and *then* threw is the case the
+ * reference implementation added a side table for, and the `finally` is where
+ * that lives.
  * @module test/skills-review
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
+import { FALLBACK_CONFIG, type BuddyConfig } from "../src/config.ts";
 import { digestHistory, type DigestMessage } from "../src/skills/digest.ts";
 import { REVIEW_TOOL_CLAUSE, SKILL_REVIEW_PROMPT } from "../src/skills/prompt.ts";
-import { ReviewCoordinator, type ReviewCoordinatorDeps } from "../src/skills/review.ts";
-import type { BuddyConfig } from "../src/config.ts";
+import {
+	REVIEW_TOOL_FILTER,
+	ReviewCoordinator,
+	type ReviewCoordinatorDeps,
+	type ReviewSpawnInput,
+} from "../src/skills/review.ts";
 import type { ReviewUsageRecord } from "../src/store/domain.ts";
 import { tableStub } from "./support/domain-tables.ts";
+
+/**
+ * The shipped nudge interval, read from the defaults rather than copied, so a
+ * change to `creationNudgeInterval` fails the fixture rather than three tests
+ * that are not about it.
+ */
+const NUDGE = FALLBACK_CONFIG.skills.creationNudgeInterval;
+
+/** The shipped step ceiling, for the same reason. */
+const STEP_BUDGET = FALLBACK_CONFIG.skills.maxReviewSteps;
+
+/** A model route: the pair the fork decision compares against. */
+interface Route {
+	readonly provider: string;
+	readonly model: string;
+}
 
 /** One recorded `spawn` call, reduced to the fields a test asserts. */
 interface SpawnCall {
 	readonly provider: "fork" | "spawn";
 	readonly prompt: string;
-	readonly toolFilter: readonly string[];
+	readonly toolFilter: ReviewSpawnInput["toolFilter"];
 	readonly childSessionId: string;
 }
 
@@ -80,8 +108,17 @@ interface Shared {
 	lastChild: string | undefined;
 }
 
+/** A fresh bundle of cross-coordinator state. */
+function freshShared(): Shared {
+	return { interrupted: [], logged: [], children: 0, lastChild: undefined };
+}
+
 /** An unsettled promise plus its two settlers. */
-function deferred(): { readonly promise: Promise<unknown>; readonly resolve: (value: unknown) => void; readonly reject: (error: unknown) => void } {
+function deferred(): {
+	readonly promise: Promise<unknown>;
+	readonly resolve: (value: unknown) => void;
+	readonly reject: (error: unknown) => void;
+} {
 	let resolve!: (value: unknown) => void;
 	let reject!: (error: unknown) => void;
 	const promise = new Promise<unknown>((res, rej) => {
@@ -98,34 +135,31 @@ function immediateGate(): Gate {
 	return { mode: "resolve", settle: { resolve: () => {}, reject: () => {} } };
 }
 
+/** The settings one coordinator runs with; `FALLBACK_CONFIG.skills` plus overrides. */
+function skills(override: Partial<BuddyConfig["skills"]>): BuddyConfig["skills"] {
+	return { ...FALLBACK_CONFIG.skills, ...override };
+}
+
 /**
  * Build a fake host row: a settings config, a fake clock, and a `spawn` that
  * records its input and settles according to {@link Harness.gate}.
- * @param override - settings overrides on top of `FALLBACK_CONFIG`.
+ *
+ * The config starts from the shipped {@link FALLBACK_CONFIG} rather than a
+ * hand-copied literal, so a new settings field lands here for free and the
+ * trigger tests run at the real nudge interval. `model` is Buddy's *default*
+ * model and deliberately left all-empty (the shipped value) — the tests that
+ * care about the parent route pass `route` to {@link startReview}, which is
+ * what a host row does.
+ * @param skillsOverride - settings overrides on top of the shipped defaults.
  * @param shared - mutable cross-coordinator state; a fresh one by default.
- * @returns the harness, the shared state, and the `spawn` input log.
+ * @returns the harness, whose `spawned` log is the assertion surface.
  */
 function makeCoordinator(
-	override: Partial<BuddyConfig["skills"]> = {},
-	shared: Shared = { interrupted: [], logged: [], children: 0, lastChild: undefined },
-): Harness & { shared: Shared } {
+	skillsOverride: Partial<BuddyConfig["skills"]> = {},
+	shared: Shared = freshShared(),
+): Harness {
 	const spawned: SpawnCall[] = [];
-	const config: BuddyConfig = {
-		home: "",
-		model: { provider: "", model: "", reasoningEffort: "" },
-		panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
-		skills: {
-			enabled: true,
-			creationNudgeInterval: 10,
-			reviewProvider: "",
-			reviewModel: "",
-			maxReviewSteps: 16,
-			maxInputTokens: 600000,
-			writeApproval: false,
-			ledger: true,
-			...override,
-		},
-	};
+	const config: BuddyConfig = { ...FALLBACK_CONFIG, skills: skills(skillsOverride) };
 	const reviewUsage = tableStub<ReviewUsageRecord>();
 	const harness: Harness = {
 		coordinator: undefined as unknown as ReviewCoordinator,
@@ -169,22 +203,32 @@ function makeCoordinator(
 	return harness;
 }
 
+/** What a test may vary about the triggering turn. */
+interface TurnOptions {
+	/** The route the conversation actually ran on; omitted exercises the fallback. */
+	readonly route?: Route | undefined;
+	/** The transcript, needed only by the cheap-model path. */
+	readonly surface?: readonly DigestMessage[] | undefined;
+}
+
 /**
- * Enough steps to satisfy the nudge, plus the triggering turn.
+ * Count a full interval and fire the triggering turn.
  *
- * Deliberately synchronous, like the host row's own trigger: it hands back the
- * spawn's `done` so a test can settle the review *after* delivering its child
- * events, which is the order a real review is observed in.
+ * Deliberately does not await `onTurnEnd`: the caller holds the returned
+ * promise so it can deliver the review's child events *while it is alive* and
+ * settle it afterwards, which is the order a real review is observed in.
+ * @param harness - the harness under test.
+ * @param options - the turn's route and transcript, when the test cares.
+ * @returns the in-flight `onTurnEnd` promise.
  */
-function startReview(harness: Harness): void {
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
-	void harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
+function startReview(harness: Harness, options: TurnOptions = {}): Promise<void> {
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
+	return harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" }, ...options });
 }
 
 /** Start a review and wait for it to finish. */
-async function fire(harness: Harness, extra: { surface?: readonly DigestMessage[] } = {}): Promise<void> {
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
-	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" }, ...extra });
+async function fire(harness: Harness, options: TurnOptions = {}): Promise<void> {
+	await startReview(harness, options);
 }
 
 /** A surface long enough that `digestHistory` synthesizes a digest message. */
@@ -197,9 +241,15 @@ function manyMessages(): DigestMessage[] {
 	return messages;
 }
 
+/** The single usage row a finished review must leave behind. */
+function soleUsageRow(harness: Harness): ReviewUsageRecord {
+	assert.equal(harness.reviewUsage.size, 1);
+	return [...harness.reviewUsage.entries()][0]![1];
+}
+
 test("the nudge counts steps and fires only on a completed turn", async () => {
 	const harness = makeCoordinator();
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
 	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	assert.equal(harness.spawned.length, 1);
 	assert.equal(harness.spawned[0]!.provider, "fork");
@@ -207,53 +257,55 @@ test("the nudge counts steps and fires only on a completed turn", async () => {
 	assert.equal(harness.spawned[0]!.prompt.includes("You can only call skill management tools"), true);
 });
 
-test("an aborted turn never fires, and 9 steps is not enough", async () => {
+test("an aborted turn never fires, and one step short is not enough", async () => {
 	const harness = makeCoordinator();
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
 	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "aborted" } });
 	assert.equal(harness.spawned.length, 0);
 
 	const other = makeCoordinator();
-	for (let i = 0; i < 9; i += 1) other.coordinator.noteStep("s2");
+	for (let i = 0; i < NUDGE - 1; i += 1) other.coordinator.noteStep("s2");
 	await other.coordinator.onTurnEnd({ sessionId: "s2", reason: { kind: "completed" } });
 	assert.equal(other.spawned.length, 0);
 });
 
 test("calling skill_manage resets the counter", async () => {
 	const harness = makeCoordinator();
-	for (let i = 0; i < 9; i += 1) harness.coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE - 1; i += 1) harness.coordinator.noteStep("s1");
 	harness.coordinator.noteSkillManageCalled("s1");
 	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	assert.equal(harness.spawned.length, 0);
 });
 
-test("a delegated session never triggers, and a session with a review in flight is dropped", async () => {
-	const shared: Shared = { interrupted: [], logged: [], children: 0, lastChild: undefined };
-	const harness = makeCoordinator({}, shared);
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("sub");
+test("a delegated session never triggers", async () => {
+	const harness = makeCoordinator();
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("sub");
 	await harness.coordinator.onTurnEnd({ sessionId: "sub", reason: { kind: "completed" }, origin: "subagent" });
 	assert.equal(harness.spawned.length, 0);
+});
 
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
+test("a non-zero delegation depth also skips the review", async () => {
+	const harness = makeCoordinator();
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
+	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" }, delegationDepth: 1 });
+	assert.equal(harness.spawned.length, 0);
+});
+
+test("two triggers for one session in the same instant start one review", async () => {
+	const harness = makeCoordinator();
 	harness.gate.mode = "pending";
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
 	void harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	assert.equal(harness.spawned.length, 1);
 	harness.gate.settle.resolve("ok");
 });
 
-test("a non-zero delegation depth also skips the review", async () => {
-	const harness = makeCoordinator();
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
-	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" }, delegationDepth: 1 });
-	assert.equal(harness.spawned.length, 0);
-});
-
 test("a cheap-model review spawns instead of forking and carries the digest", async () => {
 	const harness = makeCoordinator({ reviewProvider: "cliproxyapi", reviewModel: "cheap" });
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
-	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" }, surface: manyMessages() });
+	await fire(harness, { surface: manyMessages() });
 	assert.equal(harness.spawned[0]!.provider, "spawn");
+	assert.deepEqual(harness.spawned[0]!.toolFilter, REVIEW_TOOL_FILTER);
 	assert.match(harness.spawned[0]!.prompt, /Earlier conversation digest/);
 	// The digest's own synthesized prefix reaches the prompt, so the review is
 	// handed the older turns and not only the verbatim tail.
@@ -264,46 +316,88 @@ test("a cheap-model review spawns instead of forking and carries the digest", as
 	assert.ok(harness.spawned[0]!.prompt.includes(REVIEW_TOOL_CLAUSE));
 });
 
-test("the review stops at the step budget and at the token budget", async () => {
-	const shared: Shared = { interrupted: [], logged: [], children: 0, lastChild: undefined };
+test("the fork path never carries the digest, even when a surface is passed", async () => {
+	const harness = makeCoordinator();
+	await fire(harness, { surface: manyMessages() });
+	assert.equal(harness.spawned[0]!.provider, "fork");
+	assert.deepEqual(harness.spawned[0]!.toolFilter, REVIEW_TOOL_FILTER);
+	assert.ok(!harness.spawned[0]!.prompt.includes("Earlier conversation digest"));
+	assert.ok(harness.spawned[0]!.prompt.includes(SKILL_REVIEW_PROMPT));
+});
+
+test("a pinned session route decides the path, not the default model", async () => {
+	// `config().model` and the session's real route disagree — the conversation
+	// was pinned to the review model by chat `/model` or the global default, so
+	// the review must FORK (same model), even though Buddy's default is empty.
+	const harness = makeCoordinator({ reviewProvider: "cliproxyapi", reviewModel: "cheap" });
+	await fire(harness, {
+		route: { provider: "cliproxyapi", model: "cheap" },
+		surface: manyMessages(),
+	});
+	assert.equal(harness.spawned.length, 1);
+	assert.equal(harness.spawned[0]!.provider, "fork");
+	assert.ok(!harness.spawned[0]!.prompt.includes("Earlier conversation digest"));
+});
+
+test("a route that genuinely differs from the review model spawns with the digest", async () => {
+	// The session ran on `deepseek` while the review is configured for the cheap
+	// aux model, so the paths really do differ: SPAWN, with the digest.
+	const harness = makeCoordinator({ reviewProvider: "cliproxyapi", reviewModel: "cheap" });
+	await fire(harness, {
+		route: { provider: "deepseek", model: "deepseek-chat" },
+		surface: manyMessages(),
+	});
+	assert.equal(harness.spawned.length, 1);
+	assert.equal(harness.spawned[0]!.provider, "spawn");
+	assert.match(harness.spawned[0]!.prompt, /Earlier conversation digest/);
+});
+
+test("without a route the decision falls back to the default model", async () => {
+	// The documented degraded path: no route, so Buddy's default model is the
+	// only comparable route. The shipped default is empty, so a configured
+	// review model looks different and the review spawns with a digest.
+	const harness = makeCoordinator({ reviewProvider: "cliproxyapi", reviewModel: "cheap" });
+	await fire(harness, { surface: manyMessages() });
+	assert.equal(harness.spawned[0]!.provider, "spawn");
+	assert.match(harness.spawned[0]!.prompt, /Earlier conversation digest/);
+});
+
+test("the review stops at the step budget", async () => {
+	const shared = freshShared();
 	const harness = makeCoordinator({}, shared);
-	harness.gate.mode = "pending";
-	startReview(harness);
-	for (let i = 0; i < 16; i += 1) harness.coordinator.noteChildEvent("child", { type: "step/end" });
+	const running = startReview(harness);
+	assert.equal(shared.interrupted.length, 0);
+	for (let i = 0; i < STEP_BUDGET; i += 1) harness.coordinator.noteChildEvent("child", { type: "step/end" });
 	assert.equal(shared.interrupted[0], "child");
 	harness.gate.settle.resolve("ok");
-	await harness.done;
+	await running;
+});
 
-	const tokensShared: Shared = { interrupted: [], logged: [], children: 0, lastChild: undefined };
-	const tokens = makeCoordinator({ maxInputTokens: 1000 }, tokensShared);
-	tokens.gate.mode = "pending";
-	startReview(tokens);
-	tokens.coordinator.noteChildEvent("child", {
+test("the input-token budget is cumulative, not per message", async () => {
+	const shared = freshShared();
+	// Two messages that each fit under the budget alone and only together exceed
+	// it, so `interrupt` can only fire on the second and the recorded total can
+	// only be the sum (spec §7.4 budgets 600000 cumulatively).
+	const harness = makeCoordinator({ maxInputTokens: 1000 }, shared);
+	const running = startReview(harness);
+	harness.coordinator.noteChildEvent("child", {
 		type: "assistant/message",
-		usage: { inputTokens: 1001, cacheReadTokens: 900 },
+		usage: { inputTokens: 600, cacheReadTokens: 100 },
 	});
-	assert.equal(tokensShared.interrupted[0], "child");
-	tokens.gate.settle.resolve("ok");
-	await tokens.done;
+	assert.deepEqual(shared.interrupted, [], "one message alone is under the budget");
+	harness.coordinator.noteChildEvent("child", {
+		type: "assistant/message",
+		usage: { inputTokens: 600, cacheReadTokens: 800 },
+	});
+	assert.equal(shared.interrupted[0], "child");
+	harness.gate.settle.resolve("ok");
+	await running;
+	assert.equal(soleUsageRow(harness).inputTokens, 1200);
 });
 
 test("usage is attributed to the parent session in a finally, even on failure", async () => {
 	const reviewUsage = tableStub<ReviewUsageRecord>();
-	const config: BuddyConfig = {
-		home: "",
-		model: { provider: "", model: "", reasoningEffort: "" },
-		panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
-		skills: {
-			enabled: true,
-			creationNudgeInterval: 10,
-			reviewProvider: "",
-			reviewModel: "",
-			maxReviewSteps: 16,
-			maxInputTokens: 600000,
-			writeApproval: false,
-			ledger: true,
-		},
-	};
+	const config: BuddyConfig = { ...FALLBACK_CONFIG };
 	// A review that burns tokens and *then* throws is the case the reference
 	// implementation added a side table for, so the rejection is held until the
 	// child's message has actually been observed.
@@ -319,7 +413,7 @@ test("usage is attributed to the parent session in a finally, even on failure", 
 		log: () => {},
 		reviewUsage,
 	});
-	for (let i = 0; i < 10; i += 1) coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) coordinator.noteStep("s1");
 	const ending = coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	coordinator.noteChildEvent("child", {
 		type: "assistant/message",
@@ -350,21 +444,7 @@ test("a failing usage write is logged, not thrown at the caller", async () => {
 	};
 	const logged: string[] = [];
 	const coordinator = new ReviewCoordinator({
-		config: () => ({
-			home: "",
-			model: { provider: "", model: "", reasoningEffort: "" },
-			panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
-			skills: {
-				enabled: true,
-				creationNudgeInterval: 10,
-				reviewProvider: "",
-				reviewModel: "",
-				maxReviewSteps: 16,
-				maxInputTokens: 600000,
-				writeApproval: false,
-				ledger: true,
-			},
-		}),
+		config: () => ({ ...FALLBACK_CONFIG }),
 		spawn: () => ({ childSessionId: "child", done: Promise.resolve("ok") }),
 		interrupt: () => {},
 		now: () => "2026-09-14T00:00:00.000Z",
@@ -373,7 +453,7 @@ test("a failing usage write is logged, not thrown at the caller", async () => {
 		},
 		reviewUsage,
 	});
-	for (let i = 0; i < 10; i += 1) coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) coordinator.noteStep("s1");
 	// Telemetry is not a gate: a storage failure must not become an unhandled
 	// rejection on the turn path (the `skills/usage.ts` discipline).
 	await coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
@@ -410,15 +490,14 @@ test("no step is counted while skills are disabled", async () => {
 
 test("the completion log line carries the calls and cache facts", async () => {
 	const harness = makeCoordinator();
-	harness.gate.mode = "pending";
-	startReview(harness);
+	const running = startReview(harness);
 	harness.coordinator.noteChildEvent("child", { type: "step/end" });
 	harness.coordinator.noteChildEvent("child", {
 		type: "assistant/message",
 		usage: { inputTokens: 1200, outputTokens: 34, cacheReadTokens: 900 },
 	});
 	harness.gate.settle.resolve("ok");
-	await harness.done;
+	await running;
 	assert.deepEqual(harness.shared.logged, [
 		"Background review complete: calls=1 in=1200 out=34 cache_read=900 result=completed",
 	]);
@@ -427,13 +506,13 @@ test("the completion log line carries the calls and cache facts", async () => {
 test("a review still running across a whole new interval drops the new trigger", async () => {
 	const harness = makeCoordinator();
 	harness.gate.mode = "pending";
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
 	const first = harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	assert.equal(harness.spawned.length, 1);
 	// Another full interval elapses while the first review is still flying, so
 	// the second completed turn passes the counter check and is dropped there —
 	// no queue, no second spawn (spec §6: drops silently, never reorders).
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
 	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	assert.equal(harness.spawned.length, 1);
 	harness.gate.settle.resolve("ok");
@@ -442,7 +521,7 @@ test("a review still running across a whole new interval drops the new trigger",
 	await first;
 	// The release is what allows the next interval to fire again.
 	harness.gate = immediateGate();
-	for (let i = 0; i < 10; i += 1) harness.coordinator.noteStep("s1");
+	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
 	await harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
 	assert.equal(harness.spawned.length, 2);
 });

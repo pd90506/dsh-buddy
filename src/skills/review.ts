@@ -162,7 +162,7 @@ export class ReviewCoordinator {
 	/** Reviews currently flying, keyed by parent session id. */
 	private readonly active = new Map<string, ActiveReview>();
 	/** Which child ids belong to a live review, for budget enforcement. */
-	private readonly children = new Map<string, { readonly parentSessionId: string; readonly review: ActiveReview }>();
+	private readonly children = new Map<string, ActiveReview>();
 
 	/**
 	 * @param deps - the host row's seam: settings, spawn, interrupt, clock, log.
@@ -190,6 +190,12 @@ export class ReviewCoordinator {
 	 * A `skill_manage` call is the nudge being satisfied by the foreground
 	 * agent, so the next review is another interval away — and this clears the
 	 * counter whether or not the review itself ran.
+	 *
+	 * The reset is deliberately **unconditional**, unlike {@link noteStep}: a
+	 * curation that happened is a fact about the conversation regardless of the
+	 * setting's value at the instant it happened, so it must still zero a
+	 * counter that {@link noteStep} accumulated while the feature was on. Not
+	 * counting and not clearing are different decisions.
 	 * @param sessionId - the conversation whose tool call this was.
 	 */
 	noteSkillManageCalled(sessionId: string): void {
@@ -208,15 +214,30 @@ export class ReviewCoordinator {
 	 * The trigger is claimed synchronously, before the first `await`, so two
 	 * `turn/end` boundaries dispatched back to back cannot both see an idle
 	 * session and start two reviews.
-	 * @param input - the ended turn: its session, its reason, and the transport
-	 *   facts the host row knows; `surface` is the conversation's transcript,
-	 *   read only on the cheap-model path.
+	 * @param input - the ended turn: its session, its reason, the transport facts
+	 *   the host row knows, the route the conversation actually ran on, and its
+	 *   transcript (`surface`, read only on the cheap-model path).
 	 */
 	async onTurnEnd(input: {
 		sessionId: string;
 		reason: { kind: string };
 		origin?: string | undefined;
 		delegationDepth?: number | undefined;
+		/**
+		 * The provider/model the triggering conversation actually ran on — the
+		 * *parent route* §7.1 compares the configured review model against. The
+		 * host row reads it off the session, so a route pinned by chat `/model`
+		 * or by the global default is what the fork decision sees.
+		 *
+		 * **Omit it and the decision degrades** to measuring against
+		 * `config().model`, which is only the route of a conversation that never
+		 * overrode it. With the shipped all-empty default that makes every
+		 * non-empty `reviewModel` look different and spawn on the aux model with
+		 * a digest; and on a session `buddy.model` happens to match, a genuinely
+		 * different review model can compare equal and fork onto the parent
+		 * instead. Task 13 must pass this.
+		 */
+		route?: { provider: string; model: string } | undefined;
 		surface?: readonly DigestMessage[] | undefined;
 	}): Promise<void> {
 		const { sessionId } = input;
@@ -233,7 +254,7 @@ export class ReviewCoordinator {
 		this.inFlight.add(sessionId);
 		this.steps.set(sessionId, 0);
 		try {
-			await this.start(sessionId, settings, input.surface);
+			await this.start(sessionId, settings, input);
 		} finally {
 			this.inFlight.delete(sessionId);
 		}
@@ -296,21 +317,28 @@ export class ReviewCoordinator {
 	 * interrupted by a budget — must still be attributed (spec §9.2).
 	 * @param parentSessionId - the conversation whose turn triggered this.
 	 * @param settings - the settings snapshot the decision was made against.
-	 * @param surface - the transcript, when the host row supplied one.
+	 * @param turn - the ended turn, for its route and its transcript.
 	 */
 	private async start(
 		parentSessionId: string,
 		settings: BuddyConfig["skills"],
-		surface: readonly DigestMessage[] | undefined,
+		turn: {
+			readonly route?: { provider: string; model: string } | undefined;
+			readonly surface?: readonly DigestMessage[] | undefined;
+		},
 	): Promise<void> {
-		const parent = this.deps.config().model;
+		// The parent route §7.1 compares against: what the conversation really
+		// ran on when the host row knows it, and only otherwise Buddy's default
+		// model (the degraded fallback `onTurnEnd`'s `route` documents).
+		const parent = turn.route ?? this.deps.config().model;
 		const routed = settings.reviewProvider !== "" && settings.reviewModel !== "";
 		const differsFromParent =
 			settings.reviewProvider !== parent.provider || settings.reviewModel !== parent.model;
 		const provider: "fork" | "spawn" = routed && differsFromParent ? "spawn" : "fork";
 		const model = provider === "spawn" ? settings.reviewModel : parent.model;
 		const body = `${SKILL_REVIEW_PROMPT}${REVIEW_TOOL_CLAUSE}`;
-		const prompt = provider === "spawn" ? `${renderDigest(digestHistory(surface ?? []))}\n\n${body}` : body;
+		const prompt =
+			provider === "spawn" ? `${renderDigest(digestHistory(turn.surface ?? []))}\n\n${body}` : body;
 
 		const review: ActiveReview = {
 			parentSessionId,
@@ -330,7 +358,7 @@ export class ReviewCoordinator {
 		try {
 			const child = this.deps.spawn({ provider, prompt, toolFilter: REVIEW_TOOL_FILTER });
 			review.childSessionId = child.childSessionId;
-			this.children.set(child.childSessionId, { parentSessionId, review });
+			this.children.set(child.childSessionId, review);
 			await child.done;
 		} catch (error) {
 			outcome = OUTCOME_FAILED;
@@ -394,7 +422,7 @@ export class ReviewCoordinator {
 	 */
 	private resolveReview(childSessionId: string): ActiveReview | undefined {
 		const known = this.children.get(childSessionId);
-		if (known !== undefined) return known.review;
+		if (known !== undefined) return known;
 		if (this.active.size === 1) return this.active.values().next().value;
 		return undefined;
 	}
