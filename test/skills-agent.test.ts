@@ -118,10 +118,12 @@ interface Mounted {
 	skills(): unknown;
 	/** Every provider registered into the shared `skills` registry, in order. */
 	providerNames(): string[];
+	/** The provider names one row registered, in registration order. */
+	providerNamesBy(owner: string): string[];
 	/** The control the registry handed one provider factory, by provider name. */
 	controlFor(provider: string): ProviderControl | undefined;
-	/** How many times any provider's `control.invalidate()` has been called. */
-	invalidations(): number;
+	/** How many times one provider registration's `control.invalidate()` was called. */
+	invalidationsFor(provider: string): number;
 	/** Every tool name registered into the shared `tools` registry, in order. */
 	toolNames(): string[];
 	/** Drive one registered tool the way the registry's dispatch would. */
@@ -163,10 +165,14 @@ interface Harness {
 	/** The `skill_ledger` table this harness's host row records into. */
 	readonly ledger: Map<string, SkillLedgerRecord>;
 	/** The registry records, shared across mounts so a leak is observable. */
+	readonly records: RegistryRecords;
+	/** The registry records, shared across mounts so a leak is observable. */
 	readonly providerNames: string[];
+	/** The provider names one row registered, in registration order. */
+	readonly byOwner: Map<string, string[]>;
 	readonly controls: Map<string, ProviderControl>;
-	/** Mutable so the counter can be read after a write. */
-	readonly counters: { invalidations: number };
+	/** How many times each provider registration's `control.invalidate()` was called. */
+	readonly invalidations: Map<string, number>;
 	readonly toolNames: string[];
 	readonly tools: Map<string, RegisteredTool>;
 	readonly commandNames: string[];
@@ -215,9 +221,23 @@ async function settle(): Promise<void> {
  * fields.
  */
 interface RegistryRecords {
+	/**
+	 * The row currently being mounted, so a registration can be attributed to the
+	 * row that made it.
+	 *
+	 * The fake registry cannot model cordis layers — a real `SkillRegistry` files
+	 * a registration into the calling context's scope and `dsh-skill` is not
+	 * installable here — so "which layer did this land in" is asserted as "which
+	 * row made the call". In production the two questions have the same answer:
+	 * the host row is the global layer and the preset row is its own.
+	 */
+	owner: string;
 	readonly providerNames: string[];
+	/** The provider names one row registered, in registration order. */
+	readonly byOwner: Map<string, string[]>;
 	readonly controls: Map<string, ProviderControl>;
-	readonly counters: { invalidations: number };
+	/** How many times each provider registration's `control.invalidate()` was called. */
+	readonly invalidations: Map<string, number>;
 	readonly toolNames: string[];
 	readonly tools: Map<string, RegisteredTool>;
 	readonly commandNames: string[];
@@ -240,27 +260,42 @@ function provideRegistries(
 	give: (ctx: unknown, key: string, value: unknown) => void,
 	records: RegistryRecords,
 ): void {
-	const { providerNames, controls, counters, toolNames, tools, commandNames, commands } = records;
+	const { providerNames, byOwner, controls, invalidations, toolNames, tools, commandNames, commands } = records;
 	sibling("fake-skills", (ctx) =>
 		give(ctx, "skills", {
 			registerProvider: (create: (control: ProviderControl) => { readonly name: string }) => {
+				// The name is only known once the factory returns, while `invalidate`
+				// has to attribute the call to this registration — so the holder is
+				// filled in immediately after and read at call time.
+				let name = "";
 				const control: ProviderControl = {
 					signal: new AbortController().signal,
 					invalidate: (): void => {
-						counters.invalidations += 1;
+						const key = name === "" ? "unknown" : name;
+						invalidations.set(key, (invalidations.get(key) ?? 0) + 1);
 					},
 				};
 				const provider = create(control);
+				name = provider.name;
 				// A duplicate in one layer throws in the real registry, and that is
 				// what makes a leaked registration from an earlier mount visible.
 				if (providerNames.includes(provider.name)) {
 					throw new Error(`a provider named '${provider.name}' is already registered in this layer`);
 				}
 				providerNames.push(provider.name);
+				const owner = records.owner === "" ? "unknown" : records.owner;
+				const mine = byOwner.get(owner) ?? [];
+				mine.push(provider.name);
+				byOwner.set(owner, mine);
 				controls.set(provider.name, control);
 				return () => {
 					const at = providerNames.indexOf(provider.name);
 					if (at !== -1) providerNames.splice(at, 1);
+					const list = byOwner.get(owner);
+					if (list !== undefined) {
+						const where = list.indexOf(provider.name);
+						if (where !== -1) list.splice(where, 1);
+					}
 					controls.delete(provider.name);
 				};
 			},
@@ -317,13 +352,18 @@ async function createHarness(options: { withHostRow?: boolean } = {}): Promise<H
 	const reviewTable = tableStub<ReviewUsageRecord>();
 	const config: BuddyConfig = { ...FALLBACK_CONFIG, home };
 
-	const providerNames: string[] = [];
-	const controls = new Map<string, ProviderControl>();
-	const counters = { invalidations: 0 };
-	const toolNames: string[] = [];
-	const tools = new Map<string, RegisteredTool>();
-	const commandNames: string[] = [];
-	const commands = new Map<string, RegisteredCommand>();
+	const records: RegistryRecords = {
+		owner: "",
+		providerNames: [],
+		byOwner: new Map<string, string[]>(),
+		controls: new Map<string, ProviderControl>(),
+		invalidations: new Map<string, number>(),
+		toolNames: [],
+		tools: new Map<string, RegisteredTool>(),
+		commandNames: [],
+		commands: new Map<string, RegisteredCommand>(),
+	};
+	const { providerNames, controls, invalidations, byOwner, toolNames, tools, commandNames, commands } = records;
 
 	/** The exactly-shaped slice of `ctx.buddyStore` the host row reads. */
 	const store = {
@@ -344,27 +384,26 @@ async function createHarness(options: { withHostRow?: boolean } = {}): Promise<H
 		(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
 	};
 	sibling("fake-store", (ctx) => give(ctx, "buddyStore", store));
-	provideRegistries(
-		sibling,
-		give,
-		{ providerNames, controls, counters, toolNames, tools, commandNames, commands },
-	);
+	provideRegistries(sibling, give, records);
 
 	// The **real** host row over the in-memory store: this is what makes
 	// `manage`, `noteStep`, `onTurnEnd` and `noteSkillUsed` real calls rather
 	// than stubs. Only the tables and the paths are faked.
 	if (options.withHostRow !== false) {
+		records.owner = skillsRow.name;
 		fibers.push(root.plugin({ name: skillsRow.name, inject: skillsRow.inject, apply: skillsRow.apply }));
 		await until(() => root.get(BUDDY_SKILLS_SERVICE) !== undefined);
 	}
 
 	const harness: Harness = {
 		root,
+		records,
 		usage: usageTable.rows,
 		ledger: ledgerTable.rows,
 		providerNames,
+		byOwner,
 		controls,
-		counters,
+		invalidations,
 		toolNames,
 		tools,
 		commandNames,
@@ -401,6 +440,8 @@ async function independentScope(
 	records: RegistryRecords;
 	calls: ServiceCall[];
 	mount(row: { name: string; inject?: string[]; apply: (ctx: never) => void }): void;
+	/** The provider names one row registered, in registration order. */
+	providerNamesBy(owner: string): string[];
 	/** The mounted fibers, oldest first, so a test can unmount the newest alone. */
 	fibers(): { dispose(): Promise<void> }[];
 	dispose(): Promise<void>;
@@ -434,9 +475,11 @@ async function independentScope(
 	};
 	sibling("fake-store", (ctx) => give(ctx, "buddyStore", store));
 	const records: RegistryRecords = {
+		owner: "",
 		providerNames: [],
+		byOwner: new Map<string, string[]>(),
 		controls: new Map<string, ProviderControl>(),
-		counters: { invalidations: 0 },
+		invalidations: new Map<string, number>(),
 		toolNames: [],
 		tools: new Map<string, RegisteredTool>(),
 		commandNames: [],
@@ -448,8 +491,10 @@ async function independentScope(
 		records,
 		calls: [],
 		mount: (row) => {
+			records.owner = row.name;
 			fibers.push(root.plugin({ name: row.name, inject: row.inject ?? [], apply: row.apply }));
 		},
+		providerNamesBy: (owner) => [...(records.byOwner.get(owner) ?? [])],
 		fibers: () => fibers,
 		dispose: async () => {
 			for (const fiber of [...fibers].reverse()) await fiber.dispose();
@@ -475,6 +520,7 @@ async function mountAgentRow(options: MountOptions = {}): Promise<Mounted> {
 	// The row under test. No `inject` is passed because the row exports none:
 	// that absence is the point, and cordis mounting a row whose service is
 	// missing is exactly the no-op case exercised below.
+	harness.records.owner = agentRow.name;
 	harness.fibers.push(
 		harness.root.plugin({
 			name: agentRow.name,
@@ -488,8 +534,9 @@ async function mountAgentRow(options: MountOptions = {}): Promise<Mounted> {
 		skillsRoot: harness.paths.skills,
 		skills: () => harness.root.get(BUDDY_SKILLS_SERVICE),
 		providerNames: () => [...harness.providerNames],
+		providerNamesBy: (owner) => [...(harness.byOwner.get(owner) ?? [])],
 		controlFor: (provider) => harness.controls.get(provider),
-		invalidations: () => harness.counters.invalidations,
+		invalidationsFor: (provider) => harness.invalidations.get(provider) ?? 0,
 		toolNames: () => [...harness.toolNames],
 		commandNames: () => [...harness.commandNames],
 		callTool: async (name, args, agent) => {
@@ -582,7 +629,15 @@ test("the agent row names itself and declares no hard dependency", () => {
 
 test("the agent row registers a buddy-layer provider, the tool and the command", async () => {
 	const scope = await mountAgentRow();
-	assert.deepEqual(scope.providerNames(), ["buddy-skills", "buddy-promoted"]);
+	// The split by layer, asserted per registering row: the preset row owns the
+	// buddy tier and only the buddy tier, while the promoted tier — which must
+	// reach *ordinary* sessions — is the host row's global registration (spec
+	// §4.3/§3.1). Registering the promoted tier from inside the preset would file
+	// it into the buddy layer, and a panel promotion would then be a silent no-op
+	// for every ordinary coding session: the failure this split exists to prevent.
+	assert.deepEqual(scope.providerNamesBy(agentRow.name), ["buddy-skills"]);
+	assert.deepEqual(scope.providerNamesBy(skillsRow.name), ["buddy-promoted"]);
+	assert.equal(scope.providerNamesBy(agentRow.name).includes("buddy-promoted"), false);
 	assert.ok(scope.toolNames().includes("skill_manage"));
 	assert.deepEqual(scope.commandNames(), ["refine"]);
 	await scope.dispose();
@@ -719,14 +774,20 @@ test("a successful write invalidates the registry's cached catalog", async () =>
 	// only invalidation entry point — there is no public `ctx.skills.invalidate`.
 	// A row that skips this leaves every newly created skill invisible.
 	const scope = await mountAgentRow();
-	assert.equal(scope.invalidations(), 0, "nothing has been written yet");
+	assert.equal(scope.invalidationsFor("buddy-skills"), 0, "nothing has been written yet");
 	const result = (await scope.callTool(
 		"skill_manage",
 		{ operations: [{ action: "create", name: "x-y", content: skillDocument("x-y") }] },
 		AGENT,
 	)) as { success: boolean };
 	assert.equal(result.success, true);
-	assert.equal(scope.invalidations(), 1, "the written skill must become visible to the next catalog read");
+	// Two registrations, both stale after one write: the preset row's own buddy
+	// catalog (the tool's `control.invalidate()`) and the host row's promoted one
+	// (the service's own invalidation, since a document can carry a visibility
+	// line). Neither may be missed — a stale catalog reads as a write that
+	// silently did not happen.
+	assert.equal(scope.invalidationsFor("buddy-skills"), 1, "the preset row's own catalog must refresh");
+	assert.equal(scope.invalidationsFor("buddy-promoted"), 1, "and so must the host row's promoted catalog");
 	await scope.dispose();
 });
 
@@ -737,7 +798,8 @@ test("a refused write does not invalidate the catalog", async () => {
 	const scope = await mountAgentRow();
 	const result = (await scope.callTool("skill_manage", { operations: [] }, AGENT)) as { success: boolean };
 	assert.equal(result.success, false);
-	assert.equal(scope.invalidations(), 0);
+	assert.equal(scope.invalidationsFor("buddy-skills"), 0);
+	assert.equal(scope.invalidationsFor("buddy-promoted"), 0);
 	await scope.dispose();
 });
 
@@ -776,7 +838,7 @@ test("unmounting the agent row releases every registration it made", async () =>
 
 	scope.mount(agentRow as never);
 	await settle();
-	assert.deepEqual(scope.records.providerNames, ["buddy-skills", "buddy-promoted"]);
+	assert.deepEqual(scope.providerNamesBy(agentRow.name), ["buddy-skills"]);
 	assert.deepEqual(scope.records.toolNames, ["skill_manage"]);
 	assert.deepEqual(scope.records.commandNames, ["refine"]);
 
@@ -786,15 +848,17 @@ test("unmounting the agent row releases every registration it made", async () =>
 	if (fiber === undefined) assert.fail("the agent row's fiber must be the most recent mount");
 	await fiber.dispose();
 
-	assert.deepEqual(scope.records.providerNames, [], "a disposed registration must be gone from the registry");
+	assert.deepEqual(scope.providerNamesBy(agentRow.name), [], "a disposed registration must be gone");
 	assert.deepEqual(scope.records.toolNames, []);
 	assert.deepEqual(scope.records.commandNames, []);
+	// The host row's own registration is untouched by the preset row unloading.
+	assert.deepEqual(scope.providerNamesBy(skillsRow.name), ["buddy-promoted"]);
 
 	// And the same layer accepts the row again, which a leaked provider name
 	// would have made throw.
 	scope.mount(agentRow as never);
 	await settle();
-	assert.deepEqual(scope.records.providerNames, ["buddy-skills", "buddy-promoted"]);
+	assert.deepEqual(scope.providerNamesBy(agentRow.name), ["buddy-skills"]);
 	assert.deepEqual(scope.records.toolNames, ["skill_manage"]);
 	assert.deepEqual(scope.records.commandNames, ["refine"]);
 
@@ -822,7 +886,12 @@ test("every registration is bound to the registries and service the row's own co
 	scope.mount(agentRow as never);
 	await settle();
 
-	assert.deepEqual(scope.records.providerNames, ["buddy-skills", "buddy-promoted"], "both tiers belong here");
+	assert.deepEqual(scope.providerNamesBy(agentRow.name), ["buddy-skills"], "the preset row owns the buddy tier only");
+	assert.equal(
+		scope.providerNamesBy(agentRow.name).includes("buddy-promoted"),
+		false,
+		"the promoted tier is the host row's global registration, not the preset's",
+	);
 	assert.deepEqual(scope.records.toolNames, ["skill_manage"], "so does the tool");
 	assert.deepEqual(scope.records.commandNames, ["refine"], "and the command");
 	assert.deepEqual(outside.records.providerNames, [], "nothing may reach a registry the row was not handed");

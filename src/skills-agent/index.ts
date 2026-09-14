@@ -45,7 +45,7 @@
  * @module dsh-buddy/skills-agent
  */
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { createBuddyProvider, createPromotedProvider } from "../skills/provider.ts";
+import { createBuddyProvider } from "../skills/provider.ts";
 import { SKILL_MANAGE_ACTIONS } from "../skills/index.ts";
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -207,28 +207,27 @@ export function apply(ctx: AgentContext): void {
 	// are unaffected by that. See the module header for why this is silent.
 	if (plane === undefined) return;
 
-	// The registrar, read once and hoisted above the effects so both provider
-	// registrations close over the same narrowed value. The registry is the
-	// *only* way a provider reaches a session; without one there is nothing to
-	// register against, and a skill discovered by neither provider is simply not
-	// there. The panel and the write path are unaffected, so this degrades rather
-	// than failing the row.
+	// The registrar, read once. The registry is the *only* way a provider reaches
+	// a session; without one there is nothing to register against, and a skill
+	// discovered by neither provider is simply not there. The panel and the write
+	// path are unaffected, so this degrades rather than failing the row.
 	const skills = ctx.get("skills") as SkillRegistry | undefined;
 
-	// Both tiers, always. They are two halves of one isolation contract — the
-	// private tier Buddy writes into, and the promoted tier a human hands to
-	// ordinary sessions — and a preset that mounted only the first would leave
-	// every promoted skill invisible to the very assistant that owns it. They are
-	// two registrations because the registry keys providers by name, and each is
-	// its own effect so the disposer the registry answered really is the one
-	// cordis runs at unload.
+	// This row registers the **buddy tier only**, and that is a scope decision,
+	// not an omission: a registration files into the layer of its calling
+	// context's scope, this row is mounted by the preset's standing composition,
+	// so `createBuddyProvider` here lands in the buddy layer — which is exactly
+	// §4.1's isolation guarantee. The promoted (`global` / `project:`) tier must
+	// reach *ordinary* sessions, so it belongs to the host row's global layer and
+	// is registered there (`src/skills/index.ts`, spec §4.3/§3.1). Registering it
+	// here too would put it in the buddy layer and make a panel promotion a
+	// silent no-op everywhere else — the failure §5.1 exists to remove.
 	//
-	// The buddy registration's factory is where the **control** is captured: it
-	// is registration-scoped, it is the only invalidation entry point there is
+	// The factory is also where the **control** is captured: it is
+	// registration-scoped, it is the only invalidation entry point there is
 	// (there is no public `ctx.skills.invalidate()`), and the registry caches
 	// completed catalogs — so without it a skill the model just wrote stays
-	// invisible to the next `skill` call. The promoted registration does not need
-	// a second handle: both providers answer the same catalog.
+	// invisible to the next `skill` call.
 	let invalidate: () => void = () => undefined;
 	if (skills !== undefined) {
 		ctx.effect(
@@ -238,10 +237,6 @@ export function apply(ctx: AgentContext): void {
 					return createBuddyProvider({ skillsRoot: plane.skillsRoot() });
 				}),
 			"dsh-buddy-skills-agent: buddy provider",
-		);
-		ctx.effect(
-			() => skills.registerProvider(() => createPromotedProvider({ skillsRoot: plane.skillsRoot() })),
-			"dsh-buddy-skills-agent: promoted provider",
 		);
 	}
 
