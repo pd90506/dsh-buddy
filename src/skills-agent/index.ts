@@ -46,7 +46,10 @@
  */
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { createBuddyProvider } from "../skills/provider.ts";
-import { SKILL_MANAGE_ACTIONS } from "../skills/index.ts";
+// From the leaf, never from `../skills/index.ts`: that module is the host row,
+// and importing any symbol from it would pull the host row's whole module graph
+// into this row's separate artifact.
+import { SKILL_MANAGE_ACTIONS } from "../skills/actions.ts";
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = "dsh-buddy-skills-agent";

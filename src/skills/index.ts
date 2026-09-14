@@ -58,6 +58,12 @@ import {
 	type SkillView,
 	type SkillsStatusView,
 } from "./gateway.ts";
+// Re-exported from the leaf module rather than declared here: the tool that reads
+// this list lives in the preset row, which is a **separate artifact**, and an
+// import from this module would drag this row's whole graph into that bundle.
+// Re-exporting keeps `skillsRow.SKILL_MANAGE_ACTIONS` working for every existing
+// reader while giving the preset row a leaf to import instead.
+export { SKILL_MANAGE_ACTIONS } from "./actions.ts";
 import { backgroundWriteGuard, markRead, type WriteVerdict } from "./guards.ts";
 import { listEntries, rollbackEntry, type LedgerDeps } from "./ledger.ts";
 import { createPromotedProvider } from "./provider.ts";
@@ -88,16 +94,6 @@ export const inject = ["buddyStore"];
  * rather than a stale "nothing is wrong".
  */
 const PRESET_HEARTBEAT_TIMEOUT_MS = 10_000;
-
-/**
- * The six actions `skill_manage` accepts — and the complete set.
- *
- * Exported because the negative space is what matters: `visibility` is **not**
- * in it, so no tool argument can raise a skill's scope (spec §4.3, §7.1). The
- * guarantee is enforced twice — here, and by `applyOne`'s switch, which refuses
- * an action it does not know.
- */
-export const SKILL_MANAGE_ACTIONS = ["create", "patch", "edit", "delete", "write_file", "remove_file"] as const;
 
 /** The `buddyStore` members this row uses. */
 interface StoreHandle {
