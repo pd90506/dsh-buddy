@@ -1010,6 +1010,86 @@ git commit -m "feat: the buddy preset becomes a generated artifact with a guarde
 
 ---
 
+### Task 10b: 迁移「插件自己装的、但没有标记的」preset（Task 10 的补课）
+
+> **为什么有这一条（2026-09-14，用户在真机上验出，已由用户拍板「迁移 + 提示」）：**
+> Task 10 把判定改成「无标记 = 用户自己的」，但**旧版 `installPreset` 从来不写标记**。于是**插件自己
+> 以前装的**那份 preset 在新规则下被当成用户手写的：`syncPreset` 返回 `kept`，永远不再同步。本机实测：
+> `~/.dsh/.agent-presets/buddy/` 里 `agent.cordis.yml` 与 `preset.yml` 与 `7bc9bb8` 时**这个插件自己
+> 发布的模板逐字节相同**（sha256 比对过），却没有标记 —— 所以第 3a 期的 `buddy-skills-agent` 行**永远
+> 到不了本机**，功能静默失效。这正是 §5.1 要消灭的那个失败模式，只是换了个入口。用户已选定：**对能确认
+> 是插件旧产物的目录做迁移，对真正手写的目录走提示。**
+
+**Files:**
+- Modify: `src/store/preset.ts`
+- Test: `test/preset-install.test.ts`
+
+**Interfaces:**
+- Consumes: Task 10 的 `GENERATED_MARKER` / `syncPreset` / marker 格式（`{generator, version, files:{name:sha256}}`）
+- Produces: 无新导出；`syncPreset` 在「无标记」分支前多一步**认领（adopt）**判定，以及一个供面板读取的
+  「无标记且非纯净 → 归用户所有」状态
+
+- [ ] **Step 1: 写失败的测试**
+
+```ts
+test("a pristine legacy install is adopted and upgraded, not left alone", async () => {
+	// 目录里是插件以前写出的内容（legacy 模板逐字节相同），但没有标记
+	await mkdir(target, { recursive: true });
+	await copyFile(legacyTemplate("agent.cordis.yml"), join(target, "agent.cordis.yml"));
+	await copyFile(legacyTemplate("preset.yml"), join(target, "preset.yml"));
+	assert.equal(await syncPreset(target, await template()), "synced");
+	// 认领之后必须已经打上标记，且下一次同步按正常路径走
+	assert.equal(existsSync(join(target, GENERATED_MARKER)), true);
+	assert.equal(await readFile(join(target, "agent.cordis.yml"), "utf8"), await readFile(await templateFile("agent.cordis.yml"), "utf8"));
+});
+
+test("one hand-edited file makes the legacy directory the user's, and it is reported", async () => {
+	await mkdir(target, { recursive: true });
+	await copyFile(legacyTemplate("agent.cordis.yml"), join(target, "agent.cordis.yml"));
+	await writeFile(join(target, "preset.yml"), "mine\n"); // 不是任何我们发布过的字节
+	assert.equal(await syncPreset(target, await template()), "kept");
+	assert.equal(existsSync(join(target, GENERATED_MARKER)), false); // 绝不认领
+	assert.equal(await readFile(join(target, "preset.yml"), "utf8"), "mine\n");
+	// 且这个「归用户所有」的状态必须能被面板读到（不是只写日志）
+	assert.equal(await presetOwnership(), "user");
+});
+```
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `node --test test/preset-install.test.ts`
+Expected: FAIL — 未认领的纯净 legacy 目录现在返回 `kept`
+
+- [ ] **Step 3: 实现**
+
+1. **记录「我们发布过的旧模板哈希」**：把本插件历史上发布过的 `assets/preset/{agent.cordis.yml,
+   preset.yml}` 的 sha256 写成一个**显式小表**（至少含 `7bc9bb8` 那一版），放在 `src/store/preset.ts`，
+   带注释说明「每发布一次模板就把旧哈希追加进来，凭它认领没有标记的历史安装」。不要扫描、不要联网。
+2. **认领规则（严格，宁可不认领）**：目标目录无标记、**且其中每一个文件都与表中某个历史哈希逐字节
+   相同**（不允许多出、缺少或不同的文件）→ 认定这是插件自己的旧产物 → 写一个 marker，`files` 记为
+   **这些 legacy 哈希**（= 插件上次写出的基线）→ 然后**照常走 Task 10 的同步路径**：文件与基线相同，
+   于是被静默覆盖为新模板，返回 `synced`。任一文件不匹配 → **不认领**、一字不动、返回 `kept`。
+3. **提示**：`kept` 且目录非空时，把「这个 id 被用户自己的 preset 占着」这一状态暴露给面板（与 Task 13
+   的 `buddySkills/status` 同一形状，或加到它上面），由 Task 17 渲染。**不要只写日志** —— 日志在 web
+   profile 下到不了任何地方，这正是本条存在的理由。
+4. **本机的一次性动作（不由代码做）**：本机那份会被上面的规则认领；但**不要**在实现时手写
+   `~/.dsh/.agent-presets/buddy/`。认领由用户下次启动插件时自然发生。若用户想立刻生效，删掉该目录即可
+   （它逐字节等于我们发布过的模板，删掉不丢任何用户内容）。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `node --test test/preset-install.test.ts test/preset.test.ts test/mount.test.ts && npm run typecheck`
+Expected: PASS（`mount.test.ts` 的「恰好三个条目」断言可能需要跟着改，属强制连带）
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add src/store/preset.ts test/preset-install.test.ts
+git commit -m "feat: adopt a legacy preset this plugin installed before it wrote markers"
+```
+
+---
+
 ### Task 11: digest 与提示词
 
 **Files:**
