@@ -13,6 +13,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { after, test } from "node:test";
 import { ApprovalBridge } from "../../src/telegram/approvals.ts";
 import { ModelMenu } from "../../src/telegram/model.ts";
+import { QuestionBridge } from "../../src/telegram/questions.ts";
 import { TelegramRuntime } from "../../src/telegram/runtime.ts";
 import { TelegramApi } from "../../src/telegram/telegram/api.ts";
 import type { TelegramConfig } from "../../src/telegram/config.ts";
@@ -287,6 +288,7 @@ test("a message travels the whole path and its reply reaches the Bot API", async
 			chatFor: () => undefined,
 			log: () => undefined,
 		}),
+		questions: new QuestionBridge({ api: () => undefined, isOurs: () => false, chatFor: () => undefined, log: () => undefined }),
 		menu: new ModelMenu(),
 		config,
 		log: () => undefined,

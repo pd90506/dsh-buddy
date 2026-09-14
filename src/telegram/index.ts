@@ -28,6 +28,7 @@ import {
 import { describeToken, readToken, TELEGRAM_TOKEN_REF } from "./credentials.ts";
 import { TelegramGateway } from "./gateway.ts";
 import { ApprovalBridge } from "./approvals.ts";
+import { QuestionBridge } from "./questions.ts";
 import { migrateLegacySettings, type MigrationSettings } from "./migrate.ts";
 import { ModelMenu } from "./model.ts";
 import { legacyBotActive, OCCUPIED_DETAIL } from "./occupancy.ts";
@@ -114,6 +115,12 @@ export function apply(ctx: PluginContext): void {
 		chatFor: (sessionId) => runtime?.chatFor(sessionId),
 		log,
 	});
+	const questions = new QuestionBridge({
+		api: () => runtime?.api(),
+		isOurs: (sessionId) => runtime?.isOurs(sessionId) ?? false,
+		chatFor: (sessionId) => runtime?.chatFor(sessionId),
+		log,
+	});
 	const menu = new ModelMenu();
 
 	/**
@@ -173,6 +180,7 @@ export function apply(ctx: PluginContext): void {
 			store,
 			manager,
 			approvals,
+			questions,
 			menu,
 			config: () => readConfig(),
 			log,
@@ -244,6 +252,15 @@ export function apply(ctx: PluginContext): void {
 	ctx.on("approval/request", ((request: unknown, next: () => Promise<never>) =>
 		approvals.handler(request as never, next as never)) as never);
 
+	// The same waterfall pattern for user questions (`ask_user_question`, plan
+	// review): render an inline keyboard for our sessions, defer the rest. Without
+	// it a question posed to a Telegram session would block the turn with no card
+	// on the phone to answer it. Dispatched agent-scoped by the seam, but a root
+	// listener receives it — proven by the approval answerer above, which the
+	// harness dispatches the same way and which answers from the phone in production.
+	ctx.on("user-questions/request", ((request: unknown, next: () => Promise<never>) =>
+		questions.handler(request as never, next as never)) as never);
+
 	// The bot needs both halves of its configuration — the enable switch *and* a
 	// token — so whichever the user saves second has to re-judge the pair. Settings
 	// changes already re-sync through `onChange`; without this, pasting the token
@@ -294,6 +311,7 @@ export function apply(ctx: PluginContext): void {
 				stopped = true;
 				runtime?.dispose();
 				approvals.dispose();
+				questions.dispose();
 				manager?.dispose();
 				void store?.close().catch(() => undefined);
 			};

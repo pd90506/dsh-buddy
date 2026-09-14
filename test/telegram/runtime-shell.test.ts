@@ -14,6 +14,7 @@ import { rm } from "node:fs/promises";
 import { after, test } from "node:test";
 import { ApprovalBridge } from "../../src/telegram/approvals.ts";
 import { ModelMenu } from "../../src/telegram/model.ts";
+import { QuestionBridge } from "../../src/telegram/questions.ts";
 import { TelegramRuntime } from "../../src/telegram/runtime.ts";
 import type { TurnPart } from "../../src/telegram/session.ts";
 import type { TelegramConfig } from "../../src/telegram/config.ts";
@@ -298,6 +299,7 @@ function harness(
 			chatFor: () => undefined,
 			log: (line) => logs.push(line),
 		}),
+		questions: new QuestionBridge({ api: () => undefined, isOurs: () => false, chatFor: () => undefined, log: () => undefined }),
 		menu: new ModelMenu(),
 		config: () => config(ownerUserId, options.configOverrides),
 		log: (line) => logs.push(line),
@@ -402,6 +404,7 @@ test("a rejected token surfaces as an error status instead of throwing", async (
 			chatFor: () => undefined,
 			log: () => undefined,
 		}),
+		questions: new QuestionBridge({ api: () => undefined, isOurs: () => false, chatFor: () => undefined, log: () => undefined }),
 		menu: new ModelMenu(),
 		config: () => config("42"),
 		log: () => undefined,

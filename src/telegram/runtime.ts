@@ -28,6 +28,7 @@ import type { TelegramConfig } from "./config.ts";
 import { isMediaDeliveryMode, isPermissionPreset, resolveDefaultCwd } from "./config.ts";
 import type { TelegramStatus } from "./gateway.ts";
 import { ApprovalBridge } from "./approvals.ts";
+import { QuestionBridge } from "./questions.ts";
 import { attachmentOf, receiveInboundFile } from "./files.ts";
 import { defaultEffortOf, loadCatalog, parseModelCallback, validateSelection, type ModelMenu } from "./model.ts";
 import { SessionManager, type ResolvedChat, type SessionLike, type TurnPart } from "./session.ts";
@@ -76,6 +77,8 @@ export interface RuntimeDeps {
 	readonly manager: SessionManager;
 	/** Approval prompts. */
 	readonly approvals: ApprovalBridge;
+	/** Question prompts (`ask_user_question`, plan review). */
+	readonly questions: QuestionBridge;
 	/** The `/model` menu's per-chat state. */
 	readonly menu: ModelMenu;
 	/** The live settings section. */
@@ -394,6 +397,10 @@ export class TelegramRuntime {
 			await this.#handleCommand(chatId, message, command.name, command.args);
 			return;
 		}
+		// A question posed to this chat is awaiting a reply while its turn is still
+		// open: a typed answer resolves the question rather than steering the agent.
+		// Commands stay above this, so `/stop` still escapes a pending question.
+		if (text !== "" && this.#deps.questions.handleText(chatId, text)) return;
 		const composed = await this.#composeInbound(message, text);
 		if (composed === undefined) return;
 		// Fragments are keyed by chat so a paste becomes one turn.
@@ -876,6 +883,7 @@ export class TelegramRuntime {
 			return;
 		}
 		if (await this.#deps.approvals.handleCallback(data, query.id)) return;
+		if (await this.#deps.questions.handleCallback(data, query.id)) return;
 		const action = parseModelCallback(data);
 		if (action === undefined) return;
 		const api = this.#api;
