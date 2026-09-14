@@ -43,14 +43,61 @@ function freshTable(): KvTable<string, SkillUsageRecord> {
 	return tableStub<SkillUsageRecord>();
 }
 
+/**
+ * A table whose storage is broken in the one direction named.
+ *
+ * The optional seed is written straight through the backing map, so a test can
+ * set up a row the broken `put` could never have created — otherwise a
+ * write-failing table could only ever be tested against a skill with no row.
+ * @param where - `"read"` throws from `get`; `"write"` keeps `get` working and
+ * throws from `put`.
+ * @param seed - `[name, record]` pre-inserted without going through `put`.
+ * @returns a table that fails every access it is asked to serve.
+ */
+function failingTable(
+	where: "read" | "write",
+	seed?: readonly [string, SkillUsageRecord] | undefined,
+): KvTable<string, SkillUsageRecord> {
+	const stored = tableStub<SkillUsageRecord>();
+	if (seed !== undefined) {
+		const [name, record] = seed;
+		void stored.put(name, record);
+	}
+	return {
+		...stored,
+		get: (key) => {
+			if (where === "read") throw new Error("storage read failed");
+			return stored.get(key);
+		},
+		put: async (key, value) => {
+			if (where === "write") throw new Error("storage write failed");
+			await stored.put(key, value);
+		},
+	};
+}
+
 test("recordCreated resets the whole record and stamps provenance", async () => {
 	const table = freshTable();
-	await table.put("a-b", { ...emptyUsageRecord(now), use_count: 5, pinned: true });
+	// Seed every field away from its default, so a partial reset — or a
+	// same-value rewrite — fails this instead of passing by coincidence.
+	const seeded: SkillUsageRecord = {
+		created_by: null,
+		use_count: 5,
+		view_count: 7,
+		last_used_at: "2026-01-01T00:00:00.000Z",
+		last_viewed_at: "2026-01-02T00:00:00.000Z",
+		patch_count: 3,
+		patch_generation: 3,
+		last_reused_patch_generation: 2,
+		last_patched_at: "2026-01-03T00:00:00.000Z",
+		created_at: "2025-12-31T00:00:00.000Z",
+		state: "archived",
+		pinned: true,
+		archived_at: "2026-01-04T00:00:00.000Z",
+	};
+	await table.put("a-b", seeded);
 	await recordCreated(table, "a-b", { agentCreated: true, now });
-	const record = table.get("a-b")!;
-	assert.equal(record.created_by, "agent");
-	assert.equal(record.use_count, 0); // whole record reset
-	assert.equal(record.pinned, false);
+	assert.deepEqual(table.get("a-b"), { ...emptyUsageRecord(now), created_by: "agent" });
 });
 
 test("recordCreated stamps created_at and a null creator for a human", async () => {
@@ -108,13 +155,15 @@ test("bumpUse and bumpView count, stamp, and keep the patch generation", async (
 	assert.equal(record.patch_count, 0);
 });
 
-test("bumpUse records the generation a skill was reused at, but not on its own first use", async () => {
+test("bumpUse records the generation a skill was reused at, but only once the record has been used before", async () => {
 	const table = freshTable();
 	await recordCreated(table, "a-b", { agentCreated: true, now });
 
 	await bumpPatch(table, "a-b", "patch", now);
 	await bumpUse(table, "a-b", now);
-	// The first load is the patch's own authoring use, not a reuse of it.
+	// The guard is `use_count > 0`, i.e. "this record has never been used":
+	// the very first load after a patch is a patch's own authoring use, not a
+	// reuse of it.
 	assert.equal(table.get("a-b")!.last_reused_patch_generation, 0);
 
 	await bumpPatch(table, "a-b", "edit", now);
@@ -124,6 +173,16 @@ test("bumpUse records the generation a skill was reused at, but not on its own f
 
 	await bumpUse(table, "a-b", now);
 	assert.equal(table.get("a-b")!.last_reused_patch_generation, 2);
+});
+
+test("a use -> patch -> use sequence credits the generation a single patch advanced to", async () => {
+	const table = freshTable();
+	await recordCreated(table, "a-b", { agentCreated: true, now });
+	// The record has been used before, so the guard does not suppress this.
+	await bumpUse(table, "a-b", now);
+	await bumpPatch(table, "a-b", "patch", now);
+	await bumpUse(table, "a-b", now);
+	assert.equal(table.get("a-b")!.last_reused_patch_generation, 1);
 });
 
 test("latest activity excludes created_at so a never-used skill stays distinguishable", async () => {
@@ -165,11 +224,15 @@ test("activityCount sums the three counters, not the number of stamps", async ()
 
 test("setPinned and adopt touch neither state nor archived_at", async () => {
 	const table = freshTable();
-	await recordCreated(table, "a-b", { agentCreated: false, now });
+	// Seed non-default lifecycle values: asserting against the defaults would
+	// pass even if the write rewrote the whole record.
+	const lifecycle = { state: "archived", archived_at: "2026-09-01T00:00:00.000Z" } as const;
+	await table.put("a-b", { ...emptyUsageRecord(now), ...lifecycle });
+
 	assert.equal(await setPinned(table, "a-b", true), true);
 	assert.equal(table.get("a-b")!.pinned, true);
-	assert.equal(table.get("a-b")!.state, "active");
-	assert.equal(table.get("a-b")!.archived_at, null);
+	assert.equal(table.get("a-b")!.state, lifecycle.state);
+	assert.equal(table.get("a-b")!.archived_at, lifecycle.archived_at);
 
 	// Adoption declares provenance and leaves the inactivity clock alone.
 	await bumpUse(table, "a-b", now);
@@ -178,8 +241,34 @@ test("setPinned and adopt touch neither state nor archived_at", async () => {
 	assert.equal(record.created_by, "agent");
 	assert.equal(record.use_count, 1);
 	assert.equal(record.last_used_at, now);
-	assert.equal(record.state, "active");
-	assert.equal(record.archived_at, null);
+	assert.equal(record.state, lifecycle.state);
+	assert.equal(record.archived_at, lifecycle.archived_at);
+});
+
+test("a bump on a skill with no row seeds one with null provenance", async () => {
+	const table = freshTable();
+	// Bundled, project and hand-authored skills are loaded without ever having
+	// been created, so their telemetry has to land on a fresh row.
+	assert.equal(table.get("never-created"), undefined);
+	await bumpUse(table, "never-created", now);
+	assert.deepEqual(table.get("never-created"), {
+		...emptyUsageRecord(now),
+		use_count: 1,
+		last_used_at: now,
+		created_by: null,
+	});
+
+	await bumpView(table, "never-created", now);
+	assert.equal(table.get("never-created")!.view_count, 1);
+	assert.equal(table.get("never-created")!.last_viewed_at, now);
+
+	await bumpPatch(table, "never-created", "write_file", now);
+	const seeded = table.get("never-created")!;
+	assert.equal(seeded.patch_count, 1);
+	assert.equal(seeded.patch_generation, 1);
+	assert.equal(seeded.last_patched_at, now);
+	// Null provenance is what keeps a row out of curator management.
+	assert.equal(seeded.created_by, null);
 });
 
 test("adopt is idempotent and refuses an absent record", async () => {
@@ -196,10 +285,43 @@ test("setPinned refuses an absent record instead of inventing one", async () => 
 	assert.equal(table.get("missing"), undefined);
 });
 
-test("a bump on an absent record rejects rather than fabricating one", async () => {
-	const table = freshTable();
-	await assert.rejects(() => bumpUse(table, "missing", now));
-	await assert.rejects(() => bumpView(table, "missing", now));
-	await assert.rejects(() => bumpPatch(table, "missing", "patch", now));
-	assert.equal(table.get("missing"), undefined);
+test("a failing table is logged, never thrown, and never rejects", async () => {
+	const failures: string[] = [];
+	const logged = console.error;
+	console.error = (...parts: unknown[]) => {
+		failures.push(parts.map(String).join(" "));
+	};
+	try {
+		// A table that throws on every read: the row cannot even be loaded, so
+		// every writer must still resolve.
+		const unreadable = failingTable("read");
+		await assert.doesNotReject(() => bumpUse(unreadable, "a-b", now));
+		await assert.doesNotReject(() => bumpView(unreadable, "a-b", now));
+		await assert.doesNotReject(() => bumpPatch(unreadable, "a-b", "patch", now));
+		await assert.doesNotReject(() => adopt(unreadable, "a-b"));
+
+		// A table whose read works and whose write fails: the row loads, the
+		// bump is applied, and only the store rejects. This is the path a
+		// fire-and-forget listener would otherwise turn into an unhandled
+		// rejection, so it must be logged and answered, not thrown.
+		const unwritable = failingTable("write", ["a-b", emptyUsageRecord(now)]);
+		await assert.doesNotReject(() => bumpUse(unwritable, "a-b", now));
+		await assert.doesNotReject(() => bumpView(unwritable, "a-b", now));
+		await assert.doesNotReject(() => bumpPatch(unwritable, "a-b", "patch", now));
+		assert.equal(await setPinned(unwritable, "a-b", true), false);
+		assert.equal(await adopt(unwritable, "a-b"), false);
+	} finally {
+		console.error = logged;
+	}
+	// One log line per failure, on the ledger's own prefix convention, each
+	// saying what was left unaffected. Only the branches that actually reach
+	// the store log: `setPinned`/`adopt` on a table with no row simply answer
+	// `false`, which is a refusal rather than a storage failure.
+	assert.equal(failures.length, 9);
+	for (const line of failures) {
+		// The stub captures the format string unexpanded, so match the ledger's
+		// shape — prefix, function name, and what was left unaffected.
+		assert.match(line, /^skill_usage: (bumpUse|bumpView|bumpPatch|setPinned|adopt)\(/);
+		assert.match(line, /unaffected|not written|unchanged/);
+	}
 });
