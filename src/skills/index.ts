@@ -62,7 +62,7 @@ import { backgroundWriteGuard, markRead, type WriteVerdict } from "./guards.ts";
 import { listEntries, rollbackEntry, type LedgerDeps } from "./ledger.ts";
 import { runOperations, type ManageDeps, type Operation, type SkillAction } from "./manage.ts";
 import { ReviewCoordinator, type ReviewCoordinatorDeps, type ReviewSpawnInput, type ReviewSpawnResult } from "./review.ts";
-import { activityCount, adopt, latestActivityAt, setPinned } from "./usage.ts";
+import { activityCount, adopt, bumpUse, latestActivityAt, setPinned } from "./usage.ts";
 import { validateSkillName } from "./validate.ts";
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -726,16 +726,36 @@ export class BuddySkillsService extends Service {
 	}
 
 	/**
-	 * Remember that a review loaded a skill, so read-before-write can be judged.
+	 * The absolute skills root both providers are built over.
+	 *
+	 * The preset row resolves its two providers from here rather than importing
+	 * `resolveBuddyPaths` or reaching into the store row: the path travels as a
+	 * service call, so the preset bundle carries no store logic and there is one
+	 * authority for where a buddy skill lives.
+	 * @returns `<buddy home>/main/skills`.
+	 */
+	skillsRoot(): string {
+		return this.host.buddyStore.paths.skills;
+	}
+
+	/**
+	 * Record one skill load: the usage bump **and** the read mark.
 	 *
 	 * Called by the preset row's `tools/post-execute` observer, the only place a
-	 * `skill` tool call is visible. Kept host-side because the verdict is host
-	 * state: `manage.ts` must not learn where provenance or the read set come
-	 * from.
-	 * @param sessionId - the review sub-session that did the reading.
-	 * @param skill - the skill name it read.
+	 * `skill` tool call is visible. The two halves belong to one call because they
+	 * observe one event: a load is a use (the counters a pruning pass reads), and
+	 * for an automatic review it is also the read that read-before-write is
+	 * judged against. Splitting them would leave the preset row deciding which
+	 * sessions get a read mark, which is host state `manage.ts` must not learn
+	 * from a caller.
+	 *
+	 * Neither half rejects — `bumpUse` swallows a table failure and the read set
+	 * is a plain map — so this resolves even when the telemetry write fails.
+	 * @param sessionId - the session that did the loading.
+	 * @param skill - the skill name it loaded.
 	 */
-	noteSkillRead(sessionId: string, skill: string): void {
+	async noteSkillUsed(sessionId: string, skill: string): Promise<void> {
+		await bumpUse(this.host.buddyStore.skillUsage(), skill, new Date().toISOString());
 		markRead(this.readSets, sessionId, skill);
 	}
 
