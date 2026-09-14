@@ -121,6 +121,16 @@ interface Mounted {
 	readonly heartbeatDelays: number[];
 	/** Invoke the heartbeat bound's callback, as ten seconds passing would. */
 	fireHeartbeat(): void;
+	/** Every line the row sent to `console.error`, which is its log sink. */
+	readonly logLines: string[];
+	/**
+	 * Reinstall the real `console.error`.
+	 *
+	 * The capture has to survive the mount itself (the degradation is logged as
+	 * the row settles, e.g. on the first skipped review), so it is the test that
+	 * releases it — `node:test` restores a clean console between files either way.
+	 */
+	restoreLogging(): void;
 	/** Unmount the whole graph, the way a plugin reload does. */
 	dispose(): Promise<void>;
 }
@@ -152,8 +162,13 @@ interface MountOptions {
 	readonly holdStart?: boolean;
 	/** What `sessionQuery.readSurface` answers, per session id. */
 	readonly surfaces?: Readonly<Record<string, readonly unknown[]>>;
-	/** What `sessionQuery.readRoute` answers, per session id. */
-	readonly routes?: Readonly<Record<string, { provider: string; model: string }>>;
+	/**
+	 * Each live agent's `AgentOptions`, keyed by session id.
+	 *
+	 * A session absent from this map has no live agent at all — the agents
+	 * service answers `undefined`, exactly as the registry does.
+	 */
+	readonly agents?: Readonly<Record<string, { provider?: string; model?: string }>>;
 }
 
 /**
@@ -231,6 +246,7 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 	// row arms it: every other timeout still goes to the real scheduler (the
 	// harness's own polls depend on it), and only the bound is held.
 	const realSetTimeout = globalThis.setTimeout;
+	const realConsoleError = console.error;
 	const heartbeatCallbacks: (() => void)[] = [];
 	const heartbeatDelays: number[] = [];
 
@@ -241,7 +257,13 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			heartbeatDelays.push(delay);
 			return realSetTimeout(() => undefined, 0);
 		}) as typeof setTimeout;
-		const root = new Context() as unknown as Host;
+		// The row logs through `console.error`; capturing it is what lets a test
+	// assert that a degradation is *said out loud* rather than silent.
+	const logLines: string[] = [];
+	console.error = (...args: unknown[]) => {
+		logLines.push(args.map((value) => String(value)).join(" "));
+	};
+	const root = new Context() as unknown as Host;
 		/** Every mounted fiber, so `dispose` tears the graph down the way a reload does. */
 		const fibers: { dispose(): Promise<void> }[] = [];
 		const contributions: unknown[] = [];
@@ -255,6 +277,8 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		const reviewTable = tableStub<ReviewUsageRecord>();
 		const surfaces = new Map<string, readonly unknown[]>(Object.entries(options.surfaces ?? {}));
 		let global: Record<string, unknown> = {};
+		/** Each live agent's `options`, keyed by session id. */
+		const agents = new Map<string, { provider?: string; model?: string }>(Object.entries(options.agents ?? {}));
 		let releaseStart: () => void = () => undefined;
 		const startGate = {
 			promise: new Promise<void>((resolve) => {
@@ -316,9 +340,23 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		// the live Agent a session id belongs to, to hand `subagents.start` its
 		// `parent`.
 		if (options.withAgents !== false) {
+			// Exactly the verified shape and nothing more: `AgentRegistry.get`
+			// (`dsh-agent/lib/types/index.d.ts`) answering a live Agent whose
+			// `options: AgentOptions` is the documented runtime face
+			// (`dsh-agent/lib/types/runtime-types.d.ts:139-141`). A test that reaches
+			// for an accessor the harness does not really have therefore fails here
+			// instead of being satisfied by an invented method — which is precisely
+			// how a fictional `sessionQuery.readRoute` stayed invisible once before.
 			sibling("fake-agents", (ctx) =>
 				give(ctx, "agents", {
-					get: (sessionId: string) => ({ id: sessionId }),
+					get: (sessionId: string) =>
+						agents.has(sessionId)
+							? { id: sessionId, options: agents.get(sessionId) }
+							: // No map was supplied: a bare live agent with no route, which is
+								// what a session the deployment never pinned looks like.
+								options.agents === undefined
+								? { id: sessionId, options: {} }
+								: undefined,
 				}),
 			);
 		}
@@ -367,8 +405,8 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		if (options.withSessionQuery === true) {
 			sibling("fake-session-query", (ctx) =>
 				give(ctx, "sessionQuery", {
+					// Only methods the shipped `SessionQueryEngine` really has.
 					readSurface: async (sessionId: string) => ({ events: surfaces.get(sessionId) ?? [] }),
-					readRoute: async (sessionId: string) => options.routes?.[sessionId],
 					listSessions: async () => [],
 					readTitle: async () => undefined,
 				}),
@@ -409,6 +447,10 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			usage: usageTable.rows,
 			ledger: ledgerTable.rows,
 			reviews: reviewTable.rows,
+			logLines,
+			restoreLogging: () => {
+				console.error = realConsoleError;
+			},
 			heartbeatDelays,
 			fireHeartbeat: () => {
 				for (const fire of [...heartbeatCallbacks]) fire();
@@ -539,9 +581,16 @@ test("the row mounts and serves without a typert registry, and says so", async (
 	assert.deepEqual(mounted.contributions, [], "there is no registry to contribute to");
 	assert.equal(typeof service["onTurnEnd"], "function");
 	assert.equal((await dispatch(service, "status", [])) instanceof Object, true);
+	// An unlogged degradation is the silent failure this phase exists to remove,
+	// so the loss of the panel has to be observable in the log.
+	assert.match(
+		mounted.logLines.join("\n"),
+		/typert registry is unavailable.*panel will have no endpoints/s,
+	);
+	mounted.restoreLogging();
 });
 
-test("the heartbeat bound fires the not-synced state after ten seconds", async () => {
+test("a heartbeat before the bound flips the notice from the start", async () => {
 	const service = serviceOf(await mountSkills());
 	assert.equal(await dispatch(service, "presetSynced", []), false, "no heartbeat has arrived yet");
 	dispatch(service, "noteAgentRowMounted", []);
@@ -682,27 +731,44 @@ test("refine starts a review addressed to the agent the command handed over", as
 	);
 });
 
-test("refine keeps the session's own route instead of falling back to buddy.model", async () => {
+test("refine reads the route off the live agent instead of falling back to buddy.model", async () => {
 	// `buddy.model` is the shipped all-empty default. A refine that dropped the
 	// route would compare the configured review model against that empty pair,
 	// see "different", and spawn on the aux model — when the review model here
-	// *equals* the session's real route, so the same-model fork is correct.
+	// *equals* the route the live agent was composed for, so the same-model fork
+	// is correct. The route comes from `AgentRegistry.get(id).options`, the only
+	// real accessor: delete that read and this test spawns instead of forking.
 	const mounted = await mountSkills({
 		withSessionQuery: true,
 		skills: { reviewProvider: "p", reviewModel: "m" },
-		routes: { "agent-7": { provider: "p", model: "m" } },
+		agents: { "agent-7": { provider: "p", model: "m" } },
 	});
 	await dispatch(serviceOf(mounted), "refine", [{ id: "agent-7" }, ""]);
 	assert.equal(mounted.started.length, 1);
-	assert.equal(mounted.started[0]?.name, "fork", "the session route says the same model, so this must fork");
+	assert.equal(mounted.started[0]?.name, "fork", "the live agent's route says the same model, so this must fork");
 	assert.equal(mounted.started[0]?.agentOptions, undefined);
+});
+
+test("refine says out loud when the route cannot be resolved", async () => {
+	// No live agent for the session: §7.1's decision has to fall back to
+	// `buddy.model`, and the whole point is that the degradation is *visible*
+	// rather than a silently wrong path choice.
+	const mounted = await mountSkills({
+		withSessionQuery: true,
+		skills: { reviewProvider: "p", reviewModel: "cheap" },
+		agents: {},
+	});
+	await dispatch(serviceOf(mounted), "refine", [{ id: "missing-session" }, ""]);
+	assert.equal(mounted.started.length, 1, "the review still runs on the documented fallback");
+	assert.match(mounted.logLines.join("\n"), /review route is unknown.*falls back to buddy\.model/s);
+	mounted.restoreLogging();
 });
 
 test("refine carries the transcript, so an explicit review is not blind", async () => {
 	const mounted = await mountSkills({
 		withSessionQuery: true,
 		skills: { reviewProvider: "p", reviewModel: "cheap" },
-		routes: { "agent-7": { provider: "p", model: "expensive" } },
+		agents: { "agent-7": { provider: "p", model: "expensive" } },
 		surfaces: {
 			"agent-7": [
 				{ type: "user/message", content: [{ type: "text", text: "hello" }] },
@@ -853,6 +919,37 @@ test("a project promotion is reported as its own tier, not as global", async () 
 		promoted.skills.find((entry) => entry["name"] === "path-skill")?.["visibility"],
 		"project:/srv/other",
 	);
+});
+
+test("an unknown tier or a malformed name in the document reads as buddy and the directory", async () => {
+	// The panel is what a human acts on, so a listing row must agree with the
+	// providers' own validation (Task 9) rather than echo whatever the document
+	// says. An unrecognized tier is not a tier; a name the registry would reject
+	// is not a name.
+	const mounted = await mountSkills();
+	await mkdir(join(mounted.skillsRoot, "dir-name"), { recursive: true });
+	await writeFile(
+		join(mounted.skillsRoot, "dir-name", "SKILL.md"),
+		'---\nname: Not A Valid Name\ndescription: Use when the document is odd.\nvisibility: superuser\n---\n\nBody.\n',
+		"utf8",
+	);
+	await writeSkill(mounted, "ok-skill");
+
+	const skills = (await dispatch(serviceOf(mounted), "listSkills", [])) as Record<string, unknown>[];
+	const odd = skills.find((entry) => entry["name"] === "dir-name");
+	if (odd === undefined) assert.fail("the directory name is the fallback address");
+	assert.equal(odd["visibility"], "buddy", "an unknown tier fails closed, as the providers do");
+	const listed = skills.find((entry) => entry["name"] === "ok-skill");
+	assert.equal(listed?.["visibility"], "buddy");
+	// A valid frontmatter name still wins over the directory name.
+	await mkdir(join(mounted.skillsRoot, "dir-other"), { recursive: true });
+	await writeFile(
+		join(mounted.skillsRoot, "dir-other", "SKILL.md"),
+		'---\nname: proper-name\ndescription: Use when names matter.\n---\n\nBody.\n',
+		"utf8",
+	);
+	const again = (await dispatch(serviceOf(mounted), "listSkills", [])) as Record<string, unknown>[];
+	assert.equal(again.some((entry) => entry["name"] === "proper-name"), true);
 });
 
 test("the usage and reviewUsage endpoints report the tables as owned rows", async () => {
