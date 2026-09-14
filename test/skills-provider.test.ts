@@ -20,6 +20,14 @@
  * its own `try`, so passing one bad entry through would abort discovery for the
  * whole layer.
  *
+ * Every candidate `list()` returns and every definition `get()` returns in this
+ * suite passes through {@link listChecked} / {@link getChecked}, which assert
+ * the whole registry contract on it — not just the fields a test happens to
+ * look at. `provider === provider.name`, a finite `rank`, a string `source`,
+ * boolean invocation flags, a kebab-case name, a non-empty description and a
+ * string `path` are correct *by construction* in `provider.ts`; this is what
+ * fails if a later refactor perturbs one.
+ *
  * Every filesystem test uses a real temp directory and tears it down in
  * `finally`; no test writes into `~/.dsh`.
  * @module test/skills-provider
@@ -34,8 +42,21 @@ import {
 	PROMOTED_SKILL_PROVIDER_NAME,
 	createBuddyProvider,
 	createPromotedProvider,
+	type CompleteSkillProvider,
 	type ProviderDeps,
+	type SkillCandidate,
+	type SkillDefinition,
+	type SkillLookupOptions,
 } from "../src/skills/provider.ts";
+
+/**
+ * The registry's own skill-name grammar, deliberately inlined instead of
+ * imported from `src/skills/validate.ts`: the point of this copy is to catch a
+ * drift between what this provider emits and what `dsh-skill` accepts, and
+ * reusing the provider's own constant would hide exactly that drift. Literal
+ * copied from `@deepseek-ai/dsh-skill/lib/index.js:17`.
+ */
+const REGISTRY_SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 /** A temp buddy home plus the handles a test drives through it. */
 interface Fixture {
@@ -57,6 +78,71 @@ interface Fixture {
 	writeRaw(rel: string, content: string): Promise<string>;
 	/** Remove the temp home. */
 	cleanup(): Promise<void>;
+}
+
+/**
+ * Assert every precondition `dsh-skill` checks on a summary it is handed.
+ *
+ * The registry validates each entry with a **throw**, and for candidates that
+ * throw sits outside the `try` that wraps `provider.list()`
+ * (`dsh-skill/lib/index.js:359-360`, validator at `:452`), so one perturbed
+ * field is a catalog-wide failure rather than a skipped skill. These properties
+ * hold by construction in `provider.ts`; this helper is the tripwire.
+ * @param provider - the provider that produced the entry; its own `name` is the
+ *   value the `provider` field must equal.
+ * @param entry - the candidate or definition to check.
+ */
+function assertRegistryShape(provider: CompleteSkillProvider, entry: SkillCandidate | SkillDefinition): void {
+	assert.equal(entry.provider, provider.name, `'${entry.name}' must report provider '${provider.name}'`);
+	assert.equal(typeof entry.source, "string", `'${entry.name}' must have a string source`);
+	assert.equal(
+		typeof entry.invocation.modelInvocable,
+		"boolean",
+		`'${entry.name}' must have a boolean invocation.modelInvocable`,
+	);
+	assert.equal(
+		typeof entry.invocation.userInvocable,
+		"boolean",
+		`'${entry.name}' must have a boolean invocation.userInvocable`,
+	);
+	assert.ok(REGISTRY_SKILL_NAME.test(entry.name), `'${entry.name}' must match the registry's name grammar`);
+	assert.ok(entry.description.length > 0, `'${entry.name}' must carry a non-empty description`);
+	if (entry.path !== undefined) assert.equal(typeof entry.path, "string", `'${entry.name}' must have a string path`);
+}
+
+/**
+ * List through a provider, asserting the registry contract on every candidate.
+ * @param provider - the provider to list.
+ * @param options - the lookup options to pass through.
+ * @returns exactly what the provider returned.
+ */
+async function listChecked(
+	provider: CompleteSkillProvider,
+	options: SkillLookupOptions = {},
+): Promise<readonly SkillCandidate[]> {
+	const candidates = await provider.list(options);
+	for (const candidate of candidates) {
+		assertRegistryShape(provider, candidate);
+		assert.ok(Number.isFinite(candidate.rank), `'${candidate.name}' must have a finite rank`);
+	}
+	return candidates;
+}
+
+/**
+ * Load through a provider, asserting the registry contract on any definition.
+ * @param provider - the provider to load through.
+ * @param candidate - the candidate returned by that provider's `list`.
+ * @param options - the lookup options to pass through.
+ * @returns exactly what the provider returned.
+ */
+async function getChecked(
+	provider: CompleteSkillProvider,
+	candidate: SkillCandidate,
+	options: SkillLookupOptions = {},
+): Promise<SkillDefinition | undefined> {
+	const definition = await provider.get(candidate, options);
+	if (definition !== undefined) assertRegistryShape(provider, definition);
+	return definition;
 }
 
 /**
@@ -95,8 +181,8 @@ async function fixture(): Promise<Fixture> {
  * @param cwd - the optional caller workspace.
  * @returns the sorted candidate names.
  */
-async function names(provider: ReturnType<typeof createBuddyProvider>, cwd?: string): Promise<string[]> {
-	const listed = await provider.list(cwd === undefined ? {} : { cwd });
+async function names(provider: CompleteSkillProvider, cwd?: string): Promise<string[]> {
+	const listed = await listChecked(provider, cwd === undefined ? {} : { cwd });
 	return listed.map((candidate) => candidate.name).sort();
 }
 
@@ -106,7 +192,7 @@ test("the buddy layer sees buddy-visibility skills and nothing else", async () =
 		await writeSkill("only-buddy", "visibility: buddy");
 		await writeSkill("promoted", "visibility: global");
 		await writeSkill("no-field", "");
-		const names = (await createBuddyProvider(deps).list({})).map((c) => c.name).sort();
+		const names = (await listChecked(createBuddyProvider(deps), {})).map((c) => c.name).sort();
 		assert.deepEqual(names, ["no-field", "only-buddy"]);
 	} finally {
 		await cleanup();
@@ -118,8 +204,8 @@ test("the promoted provider honours project scoping through cwd", async () => {
 	try {
 		await writeSkill("for-project", "visibility: project: /work/alpha");
 		const provider = createPromotedProvider(deps);
-		const inside = (await provider.list({ cwd: "/work/alpha/sub" })).map((c) => c.name);
-		const outside = (await provider.list({ cwd: "/work/beta" })).map((c) => c.name);
+		const inside = (await listChecked(provider, { cwd: "/work/alpha/sub" })).map((c) => c.name);
+		const outside = (await listChecked(provider, { cwd: "/work/beta" })).map((c) => c.name);
 		assert.deepEqual(inside, ["for-project"]);
 		assert.deepEqual(outside, []);
 	} finally {
@@ -132,8 +218,8 @@ test("a candidate is loadable and carries a directory resource base", async () =
 	try {
 		const dir = await writeSkill("only-buddy", "visibility: buddy");
 		const provider = createBuddyProvider(deps);
-		const [candidate] = await provider.list({});
-		const loaded = await provider.get(candidate!, {});
+		const [candidate] = await listChecked(provider, {});
+		const loaded = await getChecked(provider, candidate!, {});
 		assert.equal(loaded?.name, candidate!.name);
 		assert.equal(loaded?.resourceBase?.kind, "directory");
 		assert.equal(loaded?.resourceBase?.kind === "directory" ? loaded.resourceBase.path : undefined, dir);
@@ -185,9 +271,9 @@ test("an unparsable document is salvaged into the buddy catalog and still loads"
 		const path = await writeRaw("main/skills/hand-written/SKILL.md", raw);
 		const provider = createBuddyProvider(deps);
 		assert.deepEqual(await names(provider), ["hand-written"]);
-		const [candidate] = await provider.list({});
+		const [candidate] = await listChecked(provider, {});
 		assert.equal(candidate?.description, "written by hand");
-		const loaded = await provider.get(candidate!, {});
+		const loaded = await getChecked(provider, candidate!, {});
 		assert.equal(loaded?.name, "hand-written");
 		// The documented fallback: with no parseable fence there is no body to
 		// separate, so the raw text is the content and the skill stays loadable.
@@ -241,8 +327,8 @@ test("a file that declares no description is skipped, and a valid sibling surviv
 		// The bad entries are absent; the good one is untouched, proving the skip
 		// is scoped rather than fatal.
 		assert.deepEqual(await names(provider), ["good-skill"]);
-		const [candidate] = await provider.list({});
-		assert.equal((await provider.get(candidate!, {}))?.name, "good-skill");
+		const [candidate] = await listChecked(provider, {});
+		assert.equal((await getChecked(provider, candidate!, {}))?.name, "good-skill");
 	} finally {
 		await cleanup();
 	}
@@ -277,8 +363,32 @@ test("an invalid frontmatter name falls back to the directory name", async () =>
 		);
 		const provider = createBuddyProvider(deps);
 		assert.deepEqual(await names(provider), ["fine-name"]);
-		const [candidate] = await provider.list({});
+		const [candidate] = await listChecked(provider, {});
 		assert.equal(candidate?.name, "fine-name");
+	} finally {
+		await cleanup();
+	}
+});
+
+test("a valid frontmatter name deliberately wins over the directory name", async () => {
+	const { deps, writeRaw, cleanup } = await fixture();
+	try {
+		// Both names satisfy the grammar, so this is not a fallback: the declared
+		// name is the addressable one. That mirrors the shipped filesystem
+		// provider, which takes `parsed.name` from the frontmatter rather than the
+		// directory (`dsh-skill-filesystem/lib/index.js:120`), and it is the case
+		// a reader tends to assume goes the other way.
+		await writeRaw(
+			"main/skills/fine-name/SKILL.md",
+			"---\nname: other-name\ndescription: declares a different name\n---\n\nbody\n",
+		);
+		const provider = createBuddyProvider(deps);
+		assert.deepEqual(await names(provider), ["other-name"]);
+		const [candidate] = await listChecked(provider, {});
+		assert.equal(candidate?.name, "other-name");
+		// `get` agrees, so the registry's `definition.name === candidate.name`
+		// re-check cannot invalidate the entry.
+		assert.equal((await getChecked(provider, candidate!, {}))?.name, "other-name");
 	} finally {
 		await cleanup();
 	}
@@ -289,12 +399,12 @@ test("get refuses a candidate whose description disappeared after listing", asyn
 	try {
 		await writeSkill("loses-its-description", "visibility: buddy");
 		const provider = createBuddyProvider(deps);
-		const [candidate] = await provider.list({});
+		const [candidate] = await listChecked(provider, {});
 		assert.ok(candidate !== undefined);
 		await writeRaw("main/skills/loses-its-description/SKILL.md", "---\nname: loses-its-description\n---\n\nbody\n");
 		// Returning a definition here would make the registry throw; `undefined`
 		// is the contract's "no longer loadable".
-		assert.equal(await provider.get(candidate, {}), undefined);
+		assert.equal(await getChecked(provider, candidate, {}), undefined);
 	} finally {
 		await cleanup();
 	}
@@ -306,11 +416,11 @@ test("get re-applies the visibility rule to a file rewritten after listing", asy
 		await writeSkill("changed-its-mind", "visibility: buddy");
 		const buddy = createBuddyProvider(deps);
 		const promoted = createPromotedProvider(deps);
-		const [candidate] = await buddy.list({});
+		const [candidate] = await listChecked(buddy, {});
 		// The same directory name, now promoted: the stale candidate must not
 		// load through the buddy tier.
 		await writeSkill("changed-its-mind", "visibility: global");
-		assert.equal(await buddy.get(candidate!, {}), undefined);
+		assert.equal(await getChecked(buddy, candidate!, {}), undefined);
 		assert.deepEqual(await names(buddy), []);
 		assert.deepEqual(await names(promoted), ["changed-its-mind"]);
 	} finally {
@@ -323,11 +433,11 @@ test("a project skill loads through the promoted tier only inside its cwd", asyn
 	try {
 		await writeSkill("for-project", "visibility: project: /work/alpha");
 		const promoted = createPromotedProvider(deps);
-		const [candidate] = await promoted.list({ cwd: "/work/alpha/sub" });
+		const [candidate] = await listChecked(promoted, { cwd: "/work/alpha/sub" });
 		assert.ok(candidate !== undefined);
-		assert.equal((await promoted.get(candidate, { cwd: "/work/alpha/sub" }))?.name, "for-project");
-		assert.equal(await promoted.get(candidate, { cwd: "/work/beta" }), undefined);
-		assert.equal(await promoted.get(candidate, {}), undefined);
+		assert.equal((await getChecked(promoted, candidate, { cwd: "/work/alpha/sub" }))?.name, "for-project");
+		assert.equal(await getChecked(promoted, candidate, { cwd: "/work/beta" }), undefined);
+		assert.equal(await getChecked(promoted, candidate, {}), undefined);
 	} finally {
 		await cleanup();
 	}
@@ -349,8 +459,8 @@ test("get returns the body with the frontmatter removed", async () => {
 	try {
 		await writeSkill("only-buddy", "visibility: buddy");
 		const provider = createBuddyProvider(deps);
-		const [candidate] = await provider.list({});
-		const loaded = await provider.get(candidate!, {});
+		const [candidate] = await listChecked(provider, {});
+		const loaded = await getChecked(provider, candidate!, {});
 		// `parseFrontmatter` returns everything after the closing fence, blank
 		// separator line included; this layer does not re-trim it.
 		assert.equal(loaded?.content, "\n## When to Use\n\nUse this for only-buddy.\n");
@@ -364,9 +474,9 @@ test("get returns undefined once the file is gone", async () => {
 	try {
 		await writeSkill("only-buddy", "visibility: buddy");
 		const provider = createBuddyProvider(deps);
-		const [candidate] = await provider.list({});
+		const [candidate] = await listChecked(provider, {});
 		await rm(join(deps.skillsRoot, "only-buddy"), { recursive: true, force: true });
-		assert.equal(await provider.get(candidate!, {}), undefined);
+		assert.equal(await getChecked(provider, candidate!, {}), undefined);
 	} finally {
 		await cleanup();
 	}
@@ -376,11 +486,11 @@ test("a missing or unreadable skills root yields an empty list", async () => {
 	const home = await mkdtemp(join(tmpdir(), "buddy-skills-provider-"));
 	try {
 		const deps: ProviderDeps = { skillsRoot: join(home, "not", "there") };
-		assert.deepEqual(await createBuddyProvider(deps).list({}), []);
-		assert.deepEqual(await createPromotedProvider(deps).list({}), []);
+		assert.deepEqual(await listChecked(createBuddyProvider(deps), {}), []);
+		assert.deepEqual(await listChecked(createPromotedProvider(deps), {}), []);
 		// A file where the root should be is unreadable as a directory too.
 		await writeFile(join(home, "afile"), "not a directory");
-		assert.deepEqual(await createBuddyProvider({ skillsRoot: join(home, "afile") }).list({}), []);
+		assert.deepEqual(await listChecked(createBuddyProvider({ skillsRoot: join(home, "afile") }), {}), []);
 	} finally {
 		await rm(home, { recursive: true, force: true });
 	}
