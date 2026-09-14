@@ -28,7 +28,7 @@
 |---|---|
 | `src/paths.ts`（改） | 新增 `skills` 与 `skillSnapshots` 两个路径 |
 | `src/config.ts`（改） | `buddy.skills` 段（开关、间隔、review 模型、预算、writeApproval、ledger） |
-| `src/store/domain.ts`（改） | 新增 `skillUsage` / `skillLedger` / `reviewUsage` 三张表，并在 handle 上暴露 |
+| `src/store/domain.ts`（改） | 新增 `skill_usage` / `skill_ledger` / `review_usage` 三张表（**存储名，snake_case**），并在 handle 上以同义 camelCase 字段暴露 |
 | `src/store/index.ts`（改） | 把三张表挂到 `ctx.buddyStore` 上 |
 | `src/store/preset.ts`（改） | `installPreset` → `syncPreset`：生成物标记 + 覆盖前备份 |
 | `src/skills/validate.ts`（新） | 技能名 / frontmatter / 体积校验（纯函数） |
@@ -171,7 +171,7 @@ git commit -m "feat: buddy skills root and its settings section"
 
 ```ts
 test("the domain declares the three skill tables", () => {
-	assert.deepEqual(Object.keys(buddyDomainSpec.tables).sort(), ["reviewUsage", "skillLedger", "skillUsage"]);
+	assert.deepEqual(Object.keys(buddyDomainSpec.tables).sort(), ["review_usage", "skill_ledger", "skill_usage"]);
 });
 
 test("a usage record round-trips and defaults are explicit", async () => {
@@ -271,14 +271,16 @@ export const buddyDomainSpec = defineDomain({
 	compatibleVersions: [1],
 	global: { schema: globalSchema, initial: {} },
 	tables: {
-		skillUsage: { valueSchema: skillUsageSchema },
-		skillLedger: { valueSchema: skillLedgerSchema },
-		reviewUsage: { valueSchema: reviewUsageSchema },
+		// 表名是**存储单元名**，受 `UNIT_NAME_RE`（`/^[a-z][a-z0-9_]*$/`）约束：
+		// 必须 snake_case。写成 camelCase 会在 `defineDomain` 处（即模块加载时）抛错。
+		skill_usage: { valueSchema: skillUsageSchema },
+		skill_ledger: { valueSchema: skillLedgerSchema },
+		review_usage: { valueSchema: reviewUsageSchema },
 	},
 });
 ```
 
-`BuddyDomainHandle` 加三个只读字段并在 `openStore` 里 `domain.table('skillUsage')` 等填上。`src/store/index.ts` 的 `BuddyStore` 类加三个访问器方法（`skillUsage()` 等），与既有 `config()`/`paths()` 同风格。
+`BuddyDomainHandle` 加三个只读字段（**camelCase 代码标识符**：`skillUsage` / `skillLedger` / `reviewUsage`）并在 `openStore` 里用**存储名** `domain.table('skill_usage')` / `'skill_ledger'` / `'review_usage'` 填上——两套拼写并存是刻意的：存储名受 `UNIT_NAME_RE` 约束，代码标识符不受。`src/store/index.ts` 的 `BuddyStore` 类加三个访问器方法（`skillUsage()` 等），与既有 `config()`/`paths()` 同风格。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -608,7 +610,7 @@ git commit -m "feat: content-addressed skill snapshots and the mutation ledger"
 - Test: `test/skills-usage.test.ts`
 
 **Interfaces:**
-- Consumes: Task 2 的 `skillUsage` 表、`SkillUsageRecord` 与 `emptyUsageRecord`
+- Consumes: Task 2 的 `skill_usage` 表、`SkillUsageRecord` 与 `emptyUsageRecord`
 - Produces: `recordCreated(table, name, { agentCreated, now })`、`bumpUse(table, name, now)`、`bumpView(table, name, now)`、`bumpPatch(table, name, action, now)`、`setPinned(table, name, pinned)`、`adopt(table, name)`、`latestActivityAt(record): string | undefined`、`activityCount(record): number`（`emptyUsageRecord` 来自 Task 2，本任务不重复定义）
 
 - [ ] **Step 1: 写失败的测试**
@@ -1074,7 +1076,7 @@ git commit -m "feat: review digest algorithm and prompts"
 - Test: `test/skills-review.test.ts`
 
 **Interfaces:**
-- Consumes: Task 11、Task 2（`reviewUsage`）、Task 1 settings
+- Consumes: Task 11、Task 2（`review_usage` 表）、Task 1 settings
 - Produces: `class ReviewCoordinator`，方法 `noteStep(sessionId): void`、`noteSkillManageCalled(sessionId): void`、`onTurnEnd(input: { sessionId; reason; origin?; delegationDepth? }): Promise<void>`、`noteChildEvent(childSessionId, event): void`，构造参数 `{ config(); spawn(input: { provider: "fork" | "spawn"; prompt: string; toolFilter: readonly string[] }): { childSessionId: string; done: Promise<unknown> }; interrupt(childSessionId): void; now(); log(line) }`
 
 - [ ] **Step 1: 写失败的测试**
@@ -1160,7 +1162,7 @@ Expected: FAIL — 模块不存在
 - `onTurnEnd` 判定链：`origin === "subagent"` 或 `delegationDepth > 0` → 返回；`reason.kind !== "completed"` → 返回；计数不足 → 返回；该会话已有在跑 → 丢弃。命中即清零并起 review。
 - 起 review：`reviewProvider && reviewModel && (provider, model) !== 父路由` → `spawn` + digest + 提示词；否则 `fork` + 提示词。两者都传 `toolFilter` 白名单 `["skill", "skill_manage", "read", "grep", "glob"]`。
 - `noteChildEvent`：`step/end` 累加步数；`assistant/message` 累加 `usage.inputTokens`（并记 `cacheReadTokens`/`cacheWriteTokens`/`outputTokens`）；任一超预算 → `interrupt(childSessionId)`。
-- 结束时（成功/失败/取消都算）在 `finally` 里写 `reviewUsage`，并打一行形如 `"Background review complete: calls=%d in=%d out=%d cache_read=%d result=%s"` 的日志。
+- 结束时（成功/失败/取消都算）在 `finally` 里写 `review_usage` 表，并打一行形如 `"Background review complete: calls=%d in=%d out=%d cache_read=%d result=%s"` 的日志。
 
 - [ ] **Step 4: 跑测试确认通过**
 
