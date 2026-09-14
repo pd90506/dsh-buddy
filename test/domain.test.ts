@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BUDDY_DOMAIN_NAME, buddyDomainSpec, globalSchema, openStore } from "../src/store/domain.ts";
+import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
+import {
+	BUDDY_DOMAIN_NAME,
+	buddyDomainSpec,
+	emptyUsageRecord,
+	globalSchema,
+	openStore,
+	type ReviewUsageRecord,
+	type SkillLedgerRecord,
+	type SkillUsageRecord,
+} from "../src/store/domain.ts";
+import { tableStub } from "./support/domain-tables.ts";
+
+/** The tables one {@link domainStub} serves, by storage name. */
+interface StubTables {
+	skill_usage: SkillUsageRecord;
+	skill_ledger: SkillLedgerRecord;
+	review_usage: ReviewUsageRecord;
+}
 
 /** A minimal live domain stand-in matching the accessors openStore uses. */
 interface DomainStub {
@@ -9,6 +27,7 @@ interface DomainStub {
 		get(): Record<string, unknown>;
 		set(next: Record<string, unknown>): Promise<void>;
 	};
+	table<N extends keyof StubTables>(name: N): KvTable<string, StubTables[N]>;
 	close(): Promise<void>;
 	/** Set by `close`, so a test can tell a delegated close from a swallowed one. */
 	closed: boolean;
@@ -21,6 +40,11 @@ interface DomainStub {
  */
 function domainStub(initial: Record<string, unknown> = {}): DomainStub {
 	let global = initial;
+	const tables: { [N in keyof StubTables]: KvTable<string, StubTables[N]> } = {
+		skill_usage: tableStub<SkillUsageRecord>(),
+		skill_ledger: tableStub<SkillLedgerRecord>(),
+		review_usage: tableStub<ReviewUsageRecord>(),
+	};
 	const stub: DomainStub = {
 		name: BUDDY_DOMAIN_NAME,
 		global: {
@@ -29,6 +53,7 @@ function domainStub(initial: Record<string, unknown> = {}): DomainStub {
 				global = next;
 			},
 		},
+		table: (name) => tables[name],
 		close: async () => {
 			stub.closed = true;
 		},
@@ -40,10 +65,48 @@ function domainStub(initial: Record<string, unknown> = {}): DomainStub {
 test("the domain spec is named and versioned", () => {
 	assert.equal(BUDDY_DOMAIN_NAME, "buddy");
 	assert.equal(buddyDomainSpec.name, "buddy");
-	assert.equal(buddyDomainSpec.version, 1);
-	// Phase 1 has no per-key derived state; the global slot carries everything.
-	assert.deepEqual(buddyDomainSpec.tables, {});
+	// Version 2 added the three skill tables; `compatibleVersions` keeps a
+	// version 1 install's stored global readable instead of rejecting the open.
+	assert.equal(buddyDomainSpec.version, 2);
+	assert.deepEqual(buddyDomainSpec.compatibleVersions, [1]);
 	assert.deepEqual(buddyDomainSpec.global.initial, {});
+});
+
+test("the domain declares the three skill tables", () => {
+	// Storage-unit names, i.e. snake_case (`UNIT_NAME_RE`), NOT the camelCase of
+	// the TypeScript handles that read them.
+	assert.deepEqual(Object.keys(buddyDomainSpec.tables).sort(), ["review_usage", "skill_ledger", "skill_usage"]);
+});
+
+test("a usage record round-trips and defaults are explicit", async () => {
+	const live = domainStub();
+	const facility = { open: async () => live, get: () => undefined };
+	const handle = await openStore({ get: () => facility });
+
+	const record = emptyUsageRecord("2026-09-13T00:00:00.000Z");
+	await handle.skillUsage.put("my-skill", record);
+	assert.equal(handle.skillUsage.get("my-skill")?.use_count, 0);
+	assert.equal(handle.skillUsage.get("my-skill")?.created_by, null);
+	assert.equal(handle.skillUsage.get("my-skill")?.state, "active");
+	// The record a fresh skill starts from is NOT under automatic management:
+	// only a caller that says so may stamp `created_by`.
+	assert.equal(record.created_by, null);
+});
+
+test("all three table handles come from the opened domain, not fresh tables", async () => {
+	const live = domainStub();
+	const facility = { open: async () => live, get: () => undefined };
+	const handle = await openStore({ get: () => facility });
+
+	// Written through the handle, read through the domain: a handle that
+	// fabricated its own tables would pass a write-then-read on itself while
+	// leaving the real domain empty.
+	await handle.skillUsage.put("a-b", emptyUsageRecord("2026-09-13T00:00:00.000Z"));
+	assert.equal(live.table("skill_usage").get("a-b")?.created_at, "2026-09-13T00:00:00.000Z");
+	assert.equal(handle.skillLedger.size, 0);
+	assert.equal(handle.reviewUsage.size, 0);
+	assert.equal(handle.skillLedger, live.table("skill_ledger"));
+	assert.equal(handle.reviewUsage, live.table("review_usage"));
 });
 
 test("the global schema accepts an absent timestamp and rejects a non-string one", () => {

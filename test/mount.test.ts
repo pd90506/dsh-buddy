@@ -22,6 +22,7 @@ import { BUDDY_PRESET_ID, SOUL_VARIABLE } from "../src/index.ts";
 import { DEFAULT_SOUL } from "../src/persona/soul.ts";
 import { FALLBACK_CONFIG } from "../src/config.ts";
 import type { BuddySessionSummary, PersonaView, PreferencesView } from "../src/persona/gateway.ts";
+import { tableStub } from "./support/domain-tables.ts";
 
 /** A prompt-variable provider, as `systemPrompt.variable` receives it. */
 type VariableProvider = (context: unknown) => string | undefined;
@@ -188,16 +189,27 @@ async function mount(options: MountOptions = {}): Promise<Mounted> {
 		);
 		sibling("fake-storage", (ctx) =>
 			give(ctx, "storageDomain", {
-				open: async () => ({
-					name: "buddy",
-					global: {
-						get: () => global,
-						set: async (next: Record<string, unknown>) => {
-							global = next;
+				open: async () => {
+					// The store row resolves its three skill table handles at open,
+					// by their storage names (`UNIT_NAME_RE`: snake_case). Real maps
+					// behind them, so a test can write and read back through a handle.
+					const tables = {
+						skill_usage: tableStub(),
+						skill_ledger: tableStub(),
+						review_usage: tableStub(),
+					};
+					return {
+						name: "buddy",
+						global: {
+							get: () => global,
+							set: async (next: Record<string, unknown>) => {
+								global = next;
+							},
 						},
-					},
-					close: async () => undefined,
-				}),
+						table: (name: keyof typeof tables) => tables[name],
+						close: async () => undefined,
+					};
+				},
 				get: () => undefined,
 			}),
 		);

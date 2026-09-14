@@ -7,13 +7,36 @@ import { Context } from "@deepseek-ai/cordis";
 import type { Plugin } from "@deepseek-ai/cordis";
 import * as row from "../src/store/index.ts";
 import { BuddyStore } from "../src/store/index.ts";
-import type { BuddyDomainHandle, BuddyGlobal } from "../src/store/domain.ts";
+import type {
+	BuddyDomainHandle,
+	BuddyGlobal,
+	ReviewUsageRecord,
+	SkillLedgerRecord,
+	SkillUsageRecord,
+} from "../src/store/domain.ts";
 import { Config, FALLBACK_CONFIG, SETTINGS_NAMESPACE, type BuddyConfig } from "../src/config.ts";
 import { resolveBuddyPaths, type BuddyPaths } from "../src/paths.ts";
+import { tableStub } from "./support/domain-tables.ts";
+
+/** The storage names of the three skill tables (`UNIT_NAME_RE`: snake_case). */
+type StorageTableName = "skill_usage" | "skill_ledger" | "review_usage";
+
+/** Any one of the three skill tables. */
+type StorageTable = BuddyDomainHandle["skillUsage"] | BuddyDomainHandle["skillLedger"] | BuddyDomainHandle["reviewUsage"];
+
+/** The domain object a `storageDomain.open` stub hands back to the store row. */
+interface DomainStubLike {
+	readonly name: string;
+	readonly global: BuddyDomainHandle["global"];
+	table(name: StorageTableName): StorageTable;
+	close(): Promise<void>;
+}
 
 /** A domain stand-in plus the flags a test needs to read back. */
 interface HandleStub extends BuddyDomainHandle {
 	closed: boolean;
+	/** The opened domain's table resolver, so {@link domainOf} can forward it. */
+	table(name: StorageTableName): StorageTable;
 }
 
 /**
@@ -22,6 +45,19 @@ interface HandleStub extends BuddyDomainHandle {
  */
 function handleStub(initial: BuddyGlobal = {}): HandleStub {
 	let global: BuddyGlobal = initial;
+	// Real tables behind real maps: the store row resolves all three at open, so
+	// the stand-in must serve them, and a test that writes through one must read
+	// back the same object (`test/support/domain-tables.ts` is shared with the
+	// domain spec's own stand-in).
+	const tables: {
+		skill_usage: BuddyDomainHandle["skillUsage"];
+		skill_ledger: BuddyDomainHandle["skillLedger"];
+		review_usage: BuddyDomainHandle["reviewUsage"];
+	} = {
+		skill_usage: tableStub<SkillUsageRecord>(),
+		skill_ledger: tableStub<SkillLedgerRecord>(),
+		review_usage: tableStub<ReviewUsageRecord>(),
+	};
 	const stub: HandleStub = {
 		global: {
 			get: () => global,
@@ -29,12 +65,28 @@ function handleStub(initial: BuddyGlobal = {}): HandleStub {
 				global = next;
 			},
 		},
+		// An arrow property, not a method: the `provide` sites pass it detached,
+		// and a method would lose its receiver.
+		table: (name) => tables[name],
+		skillUsage: tables.skill_usage,
+		skillLedger: tables.skill_ledger,
+		reviewUsage: tables.review_usage,
 		close: async () => {
 			stub.closed = true;
 		},
 		closed: false,
 	};
 	return stub;
+}
+
+/**
+ * The domain object to hand a `storageDomain` stub's `open`, so the store row
+ * can resolve its three table handles from it.
+ * @param handle - the stand-in whose tables the row should receive.
+ * @returns the opened-domain stand-in.
+ */
+function domainOf(handle: HandleStub): DomainStubLike {
+	return { name: "buddy", global: handle.global, table: handle.table, close: handle.close };
 }
 
 /**
@@ -175,7 +227,7 @@ test("the row waits for storageDomain, then creates the home and publishes the s
 		assert.equal(existsSync(join(scratch.home, "buddy")), false);
 
 		ctx.provide("storageDomain", {
-			open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+			open: async () => (domainOf(handle)),
 			get: () => undefined,
 		});
 		await until(() => ctx.get("buddyStore") !== undefined);
@@ -246,7 +298,7 @@ test("a home set through the settings plane is the home the store boots on", asy
 		ctx.provide("storageDomain", {
 			open: async () => {
 				order.push("open");
-				return { name: "buddy", global: handle.global, close: handle.close };
+				return domainOf(handle);
 			},
 			get: () => undefined,
 		});
@@ -306,7 +358,7 @@ test(
 				},
 			});
 			ctx.provide("storageDomain", {
-				open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+				open: async () => (domainOf(handle)),
 				get: () => undefined,
 			});
 			const fiber = ctx.plugin(storeRow);
@@ -349,7 +401,7 @@ test(
 				settingsStub({ ...FALLBACK_CONFIG, home: join(scratch.home, "never-delivered") }, []),
 			);
 			ctx.provide("storageDomain", {
-				open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+				open: async () => (domainOf(handle)),
 				get: () => undefined,
 			});
 
@@ -409,7 +461,7 @@ test("the composition entry is the fallback config, so a settings detach stays u
 	try {
 		ctx.provide("settings", settingsStub({ ...FALLBACK_CONFIG, home: "" }, sections));
 		ctx.provide("storageDomain", {
-			open: async () => ({ name: "buddy", global: handle.global, close: handle.close }),
+			open: async () => (domainOf(handle)),
 			get: () => undefined,
 		});
 		ctx.plugin(storeRow);
@@ -447,7 +499,7 @@ test("a dispose that lands mid-boot still closes the opened domain", async () =>
 			open: async () => {
 				opening = true;
 				await openHeld;
-				return { name: "buddy", global: handle.global, close: handle.close };
+				return domainOf(handle);
 			},
 			get: () => undefined,
 		});
