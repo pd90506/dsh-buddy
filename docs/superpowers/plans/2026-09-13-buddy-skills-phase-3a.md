@@ -387,7 +387,7 @@ export function validateSkillDocument(input: {
 	if (input.content.length > MAX_SKILL_CONTENT_CHARS) {
 		return { ok: false, error: `SKILL.md exceeds ${MAX_SKILL_CONTENT_CHARS} chars` };
 	}
-	const parsed = splitFrontmatter(input.content);
+	const parsed = parseFrontmatter(input.content);
 	if ("error" in parsed) return { ok: false, error: parsed.error };
 	const rawName = parsed.frontmatter["name"];
 	if (typeof rawName !== "string" || rawName.trim() === "") {
@@ -409,7 +409,7 @@ export function validateSkillDocument(input: {
 }
 ```
 
-`splitFrontmatter` **不用 YAML 库**（理由见上）：首行必须是 `---`、必须找到闭合 `---`，中间按行解析成**扁平映射**——`key: value`，值支持裸标量、单/双引号字符串、行内列表 `[a, b]` 与块列表（`- item` 续行）；空行与 `#` 注释跳过。解析结果必须是映射（数组/标量都拒绝）。**两条路径的严格度不同**：
+`parseFrontmatter` **不用 YAML 库**（理由见上）：首行必须是 `---`、必须找到闭合 `---`，中间按行解析成**扁平映射**——`key: value`，值支持裸标量、单/双引号字符串、行内列表 `[a, b]` 与块列表（`- item` 续行）；空行与 `#` 注释跳过。解析结果必须是映射（数组/标量都拒绝）。**只有一个导出名 `parseFrontmatter`**（内部实现细节不再另起名字，见 Task 3 的评审裁定）。**两条路径的严格度不同**：
 
 - **写路径（`validateSkillDocument`）严格**：只接受这个子集，遇到无法解析的行返回 `{ ok: false, error }`，错误文案要告诉模型"frontmatter 必须是扁平的 key: value"。这是我们自己写出去的格式，收紧是有意的。
 - **读路径必须容忍、永不抛**：provider 读 `visibility` 时若 frontmatter 解析失败或字段缺失，一律回落成默认 `visibility: "buddy"`，绝不让一个手写技能因为解析问题从技能列表里消失（`$H` 的加载器用真 YAML，比我们宽；读宽写严是这个差异的正确处理方式）。
