@@ -12,11 +12,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import * as storeRow from "../src/store/index.ts";
+import { GENERATED_MARKER } from "../src/store/preset.ts";
 import * as personaRow from "../src/persona/index.ts";
 import { BUDDY_PRESET_ID, SOUL_VARIABLE } from "../src/index.ts";
 import { DEFAULT_SOUL } from "../src/persona/soul.ts";
@@ -350,8 +352,20 @@ test("mounting the store row for real installs the shipped preset under the harn
 	// would catch that regression.
 	const { dshHome } = await mount();
 	const presetDir = join(dshHome, ".agent-presets", "buddy");
-	assert.deepEqual((await readdir(presetDir)).sort(), ["agent.cordis.yml", "preset.yml"]);
+	// The marker is part of the install, not an afterthought: without it the
+	// next boot's `syncPreset` would read this directory as the user's own and
+	// never repair the template again.
+	assert.deepEqual((await readdir(presetDir)).sort(), [GENERATED_MARKER, "agent.cordis.yml", "preset.yml"]);
 	assert.equal(await readFile(join(presetDir, "preset.yml"), "utf8"), await readFile(join("assets", "preset", "preset.yml"), "utf8"));
+	// It must carry a real baseline — the sha256 of what was just written —
+	// rather than being a bare presence flag.
+	const marker = JSON.parse(await readFile(join(presetDir, GENERATED_MARKER), "utf8")) as {
+		version?: unknown;
+		files?: Record<string, string>;
+	};
+	const installed = await readFile(join(presetDir, "agent.cordis.yml"));
+	assert.equal(marker.version, 1);
+	assert.equal(marker.files?.["agent.cordis.yml"], createHash("sha256").update(installed).digest("hex"));
 });
 
 test("the row puts exactly one typert contribution on the wire", async () => {
