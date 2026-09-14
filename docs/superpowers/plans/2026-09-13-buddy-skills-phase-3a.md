@@ -958,8 +958,12 @@ test("a fresh directory gets the template plus the generated marker", async () =
 });
 
 test("a marked install is synced when the template moves on", async () => {
+	// 订正（2026-09-14）：这一条原样写会把 "old\n" 覆盖到已安装文件上，而按标记里的「上次写出哈希」
+	// 判定，那**就是**手改场景，应该得到 backed-up-synced —— 与下一条测试是同一件事。要让「模板前进
+	// 而没人手改」可表达，唯一的办法是让 "old\n" 成为插件自己上次写出的内容，即在 install 之前把它
+	// 写进模板。照抄时务必保留这个顺序，否则"永远备份"这种 bug 也能全绿。
+	await writeFile(await templateFile("agent.cordis.yml"), "old\n");
 	await syncPreset(target, await template());
-	await writeFile(join(target, "agent.cordis.yml"), "old\n");
 	await writeFile(await templateFile("agent.cordis.yml"), "new\n");
 	assert.equal(await syncPreset(target, await template()), "synced");
 	assert.equal(await readFile(join(target, "agent.cordis.yml"), "utf8"), "new\n");
@@ -1014,7 +1018,13 @@ git commit -m "feat: the buddy preset becomes a generated artifact with a guarde
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `digestHistory(messages: readonly DigestMessage[]): DigestMessage[]`；`SKILL_REVIEW_PROMPT: string`、`REVIEW_TOOL_CLAUSE: string`、`REFINE_FOCUS_SUFFIX: string`；`DigestMessage = { role: "user" | "assistant" | "tool"; text: string; toolNames?: readonly string[] }`
+- Produces: `digestHistory(messages: readonly DigestMessage[]): DigestMessage[]`；`SKILL_REVIEW_PROMPT: string`、`REVIEW_TOOL_CLAUSE: string`、`REFINE_FOCUS_SUFFIX: (focus: string) => string`；`DigestMessage = { role: "user" | "assistant" | "tool"; text: string; toolNames?: readonly string[] }`
+
+> **订正（2026-09-14）：** 上面 Produces 原先把 `REFINE_FOCUS_SUFFIX` 列成 `string`，与下方 Step 3 的
+> 代码块自相矛盾——后缀里要插用户 `/refine <focus>` 的原文，不可能是常量。以 Step 3 的函数形式为准。
+> 提示词是**按 DSH 词汇改写**，不是逐字照抄 Hermes 原文：`skill_view`/`skills_list` 换成 DSH 的 `skill`
+> 加载器（§7.3），`bundled`/`hub`/`external_dirs` 那几个受保护类别在 Buddy 场景不存在（§8.4），
+> `hermes curator adopt` 换成面板的 `adopt`（§8.5），`execute_code` 换成 shell 工具。
 
 - [ ] **Step 1: 写失败的测试**
 
