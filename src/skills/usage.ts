@@ -63,6 +63,10 @@ const ACTIVITY_KEYS = ["last_used_at", "last_viewed_at", "last_patched_at"] as c
  * pruning. Only provenance (`created_by`) and the new `created_at` survive.
  *
  * This deliberately does **not** bump `patch_count`: see {@link bumpPatch}.
+ *
+ * Never throws and never rejects: telemetry is not a gate (see the module
+ * header), so a table failure is logged and the create the caller already
+ * applied is unaffected.
  * @param table - the `skill_usage` table (`ctx.buddyStore.skillUsage`).
  * @param name - the skill name, which is the table key.
  * @param options - `agentCreated` is `true` when an automatic review created the
@@ -73,8 +77,12 @@ export async function recordCreated(
 	name: string,
 	options: { agentCreated: boolean; now: string },
 ): Promise<void> {
-	const fresh = emptyUsageRecord(options.now);
-	await table.put(name, { ...fresh, created_by: options.agentCreated ? "agent" : null });
+	try {
+		const fresh = emptyUsageRecord(options.now);
+		await table.put(name, { ...fresh, created_by: options.agentCreated ? "agent" : null });
+	} catch (error) {
+		console.error("skill_usage: recordCreated('%s') failed (%s) — skill creation unaffected", name, messageOf(error));
+	}
 }
 
 /**
