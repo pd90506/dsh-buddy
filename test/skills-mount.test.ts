@@ -78,6 +78,14 @@ interface Mounted {
 	readonly home: string;
 	/** The skills root under that home. */
 	readonly skillsRoot: string;
+	/** The real cordis root context, so a test can resolve a service the way the gateway does. */
+	readonly root: Host & { get(name: string): unknown };
+	/** The numeric state of the skills row's own fiber (`0` waiting, `2` active). */
+	skillsRowState(): number;
+	/** Mount the store row after the fact, releasing a waiting skills row. */
+	provideStore(): void;
+	/** Let a `holdStart` mount's pending `subagents.start` resolve. */
+	releaseStart(): void;
 	/** The `buddySkills` service, or `undefined` while the row is waiting. */
 	skills(): ServiceProxy | undefined;
 	/** Every contribution handed to `typert.register`. */
@@ -90,6 +98,19 @@ interface Mounted {
 	readonly runs: RunHandle[];
 	/** The `subagents.interrupt` authority arguments, in order. */
 	readonly authorities: unknown[];
+	/**
+	 * The effective stop, as the harness observed it.
+	 *
+	 * `interrupt` is a documented no-op for a one-shot run, so a suite that
+	 * asserted only on it would stay green with the abort and the disposal
+	 * deleted — and the amended §7.4 mechanism would go unverified.
+	 */
+	readonly witness: {
+		/** Every started review's request signal, in order, keeping its live state. */
+		readonly signals: AbortSignal[];
+		/** How many runs had `dispose()` called, in order of the calls. */
+		readonly disposed: string[];
+	};
 	/** The `skill_usage` table the row writes through. */
 	readonly usage: Map<string, SkillUsageRecord>;
 	/** The `skill_ledger` table the row reads and rolls back through. */
@@ -112,6 +133,10 @@ interface MountOptions {
 	readonly withSubagents?: boolean;
 	/** Mount a `sessionQuery` plane; default `false` (the soft-absent case). */
 	readonly withSessionQuery?: boolean;
+	/** Mount a `typert` registry; default `true`. */
+	readonly withTypert?: boolean;
+	/** Mount an `agents` registry; default `true`. */
+	readonly withAgents?: boolean;
 	/** Skills settings merged over the shipped defaults. */
 	readonly skills?: Partial<BuddyConfig["skills"]>;
 	/**
@@ -120,8 +145,15 @@ interface MountOptions {
 	 * settles each run on a microtask.
 	 */
 	readonly holdRuns?: boolean;
+	/**
+	 * Leave `subagents.start` itself unresolved until `releaseStart()` is called,
+	 * so a test can dispose the row inside the pre-registration window.
+	 */
+	readonly holdStart?: boolean;
 	/** What `sessionQuery.readSurface` answers, per session id. */
 	readonly surfaces?: Readonly<Record<string, readonly unknown[]>>;
+	/** What `sessionQuery.readRoute` answers, per session id. */
+	readonly routes?: Readonly<Record<string, { provider: string; model: string }>>;
 }
 
 /**
@@ -217,11 +249,18 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		const interrupted: string[] = [];
 		const authorities: unknown[] = [];
 		const runs: RunHandle[] = [];
+		const witness = { signals: [] as AbortSignal[], disposed: [] as string[] };
 		const usageTable = tableStub<SkillUsageRecord>();
 		const ledgerTable = tableStub<SkillLedgerRecord>();
 		const reviewTable = tableStub<ReviewUsageRecord>();
 		const surfaces = new Map<string, readonly unknown[]>(Object.entries(options.surfaces ?? {}));
 		let global: Record<string, unknown> = {};
+		let releaseStart: () => void = () => undefined;
+		const startGate = {
+			promise: new Promise<void>((resolve) => {
+				releaseStart = resolve;
+			}),
+		};
 
 		const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
 			fibers.push(root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) }) as never);
@@ -230,14 +269,16 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
 		};
 
-		sibling("fake-typert", (ctx) =>
-			give(ctx, "typert", {
-				register: (contribution: unknown) => {
-					contributions.push(contribution);
-					return () => undefined;
-				},
-			}),
-		);
+		if (options.withTypert !== false) {
+			sibling("fake-typert", (ctx) =>
+				give(ctx, "typert", {
+					register: (contribution: unknown) => {
+						contributions.push(contribution);
+						return () => undefined;
+					},
+				}),
+			);
+		}
 		sibling("fake-storage", (ctx) =>
 			give(ctx, "storageDomain", {
 				open: async () => ({
@@ -274,15 +315,18 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		// The real agent registry is a soft dependency: the row only asks it for
 		// the live Agent a session id belongs to, to hand `subagents.start` its
 		// `parent`.
-		sibling("fake-agents", (ctx) =>
-			give(ctx, "agents", {
-				get: (sessionId: string) => ({ id: sessionId }),
-			}),
-		);
+		if (options.withAgents !== false) {
+			sibling("fake-agents", (ctx) =>
+				give(ctx, "agents", {
+					get: (sessionId: string) => ({ id: sessionId }),
+				}),
+			);
+		}
 		if (options.withSubagents !== false) {
 			sibling("fake-subagents", (ctx) =>
 				give(ctx, "subagents", {
 					start: async (name: string, request: Record<string, unknown>) => {
+						if (options.holdStart === true) await startGate.promise;
 						started.push({
 							name,
 							prompt: request["prompt"] as Started["prompt"],
@@ -291,6 +335,7 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 							parent: request["parent"],
 						});
 						const childSessionId = `child-${started.length}`;
+						witness.signals.push(request["signal"] as AbortSignal);
 						let finishRun: () => void = () => undefined;
 						const result = new Promise<unknown>((resolve) => {
 							finishRun = () => resolve({ stopReason: "completed" });
@@ -303,7 +348,14 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 						runs.push({ childSessionId, finish: () => finishRun() });
 						// A run's disposal settles its result, exactly as the
 						// in-process driver does by cancelling the child.
-						return { id: childSessionId, result, dispose: async () => finishRun() };
+						return {
+							id: childSessionId,
+							result,
+							dispose: async () => {
+								witness.disposed.push(childSessionId);
+								finishRun();
+							},
+						};
 					},
 					interrupt: (childSessionId: string, authority: unknown) => {
 						interrupted.push(childSessionId);
@@ -316,17 +368,20 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			sibling("fake-session-query", (ctx) =>
 				give(ctx, "sessionQuery", {
 					readSurface: async (sessionId: string) => ({ events: surfaces.get(sessionId) ?? [] }),
+					readRoute: async (sessionId: string) => options.routes?.[sessionId],
 					listSessions: async () => [],
 					readTitle: async () => undefined,
 				}),
 			);
 		}
 
-		const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): void => {
-			fibers.push(root.plugin({ name: row.name, inject: row.inject, apply: row.apply }) as never);
+		const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): unknown => {
+			const fiber = root.plugin({ name: row.name, inject: row.inject, apply: row.apply });
+			fibers.push(fiber as never);
+			return fiber;
 		};
 		if (options.withStore !== false) mountRow(storeRow as never);
-		mountRow(skillsRow as never);
+		const skillsFiber = mountRow(skillsRow as never) as { state: number };
 
 		const service = (): ServiceProxy | undefined => root.get(BUDDY_SKILLS_SERVICE) as ServiceProxy | undefined;
 		if (options.withStore !== false) {
@@ -336,12 +391,20 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 
 		return {
 			home,
+			root,
+			skillsRowState: () => skillsFiber.state,
+			provideStore: () => {
+				if (options.withStore !== false) return;
+				mountRow(storeRow as never);
+			},
+			releaseStart: () => releaseStart(),
 			skillsRoot: join(home, "main", "skills"),
 			skills: service,
 			contributions,
 			started,
 			interrupted,
 			authorities,
+			witness,
 			runs,
 			usage: usageTable.rows,
 			ledger: ledgerTable.rows,
@@ -399,8 +462,18 @@ test("the skills row names itself and declares its one hard dependency", () => {
 });
 
 test("without the store the row waits instead of throwing", async () => {
+	// "Unmounted" alone cannot tell a waiting row from a failed one: a throw out
+	// of `apply` also publishes nothing. The fiber's own state is the difference.
 	const failure = await mountSkills({ withStore: false });
 	assert.equal(failure.skills(), undefined, "a missing hard dependency must leave the row waiting");
+	// Cordis fiber states: 0 waiting on an inject, 2 active. A throw out of
+	// `apply` leaves the fiber failed, which is the distinction that matters.
+	assert.equal(failure.skillsRowState(), 0, "the row must be held pending its inject, not failed");
+	// And it is genuinely waiting rather than inert: the moment the store appears
+	// the same fiber finishes mounting.
+	failure.provideStore();
+	await until(() => failure.skills() !== undefined);
+	assert.equal(failure.skillsRowState(), 2, "and it must finish mounting once its inject arrives");
 });
 
 test("the row mounts on the store and publishes ctx.buddySkills", async () => {
@@ -427,21 +500,48 @@ test("the row mounts on the store and publishes ctx.buddySkills", async () => {
 	}
 });
 
-test("the row mounts without a subagent plane, a session query or an agent registry", async () => {
-	// Every one of those is soft. A review is skipped with one log line rather
-	// than throwing out of the turn-end path.
-	const service = serviceOf(await mountSkills({ withSessionQuery: false, withSubagents: false }));
-	assert.equal(typeof service["onTurnEnd"], "function");
-	await dispatch(service, "noteStep", ["s1"]);
-	await dispatch(service, "onTurnEnd", [{ sessionId: "s1", reason: { kind: "completed" }, route: config0Route() }]);
+test("a full interval with no subagent plane, session query or agent registry is a skipped review", async () => {
+	// Every one of those planes is soft. The assertion is not "it did not throw"
+	// but "it took the whole path and skipped the review": a full nudge interval
+	// elapsed, the turn ended as completed, and the coordinator reached its spawn
+	// seam with nowhere to start — one log line, no throw, no interrupt.
+	const mounted = await mountSkills({ withSessionQuery: false, withSubagents: false });
+	const service = serviceOf(mounted);
+	for (let step = 0; step < FALLBACK_CONFIG.skills.creationNudgeInterval; step += 1) {
+		dispatch(service, "noteStep", ["s1"]);
+	}
+	await dispatch(service, "onTurnEnd", [{ sessionId: "s1", reason: { kind: "completed" } }]);
+	assert.equal(mounted.started.length, 0, "there is no plane to start a review on");
+	assert.equal(mounted.interrupted.length, 0);
+	assert.equal(mounted.witness.disposed.length, 0);
 });
 
-/** @returns the all-empty route a session with no pin runs on. */
-function config0Route(): { provider: string; model: string } {
-	return { provider: FALLBACK_CONFIG.model.provider, model: FALLBACK_CONFIG.model.model };
-}
+test("with no agent registry either, the turn end is still a skip rather than a throw", async () => {
+	// The subagent plane exists here but no parent Agent can be resolved, which
+	// is the other half of the same soft surface.
+	const mounted = await mountSkills({ withAgents: false });
+	const service = serviceOf(mounted);
+	for (let step = 0; step < FALLBACK_CONFIG.skills.creationNudgeInterval; step += 1) {
+		dispatch(service, "noteStep", ["s1"]);
+	}
+	await dispatch(service, "onTurnEnd", [{ sessionId: "s1", reason: { kind: "completed" } }]);
+	assert.equal(mounted.started.length, 0);
+});
 
-test("the agent row's heartbeat is what clears the not-synced notice", async () => {
+test("the row mounts and serves without a typert registry, and says so", async () => {
+	// `typert` is soft, like every other plane besides the store. A profile
+	// without it must still get `ctx.buddySkills` — the preset row and the review
+	// coordinator read that service — and pay only a log line for the missing
+	// panel, never a failed mount.
+	const mounted = await mountSkills({ withTypert: false });
+	const service = mounted.skills();
+	if (service === undefined) assert.fail("a missing typert registry must not take the row down");
+	assert.deepEqual(mounted.contributions, [], "there is no registry to contribute to");
+	assert.equal(typeof service["onTurnEnd"], "function");
+	assert.equal((await dispatch(service, "status", [])) instanceof Object, true);
+});
+
+test("the heartbeat bound fires the not-synced state after ten seconds", async () => {
 	const service = serviceOf(await mountSkills());
 	assert.equal(await dispatch(service, "presetSynced", []), false, "no heartbeat has arrived yet");
 	dispatch(service, "noteAgentRowMounted", []);
@@ -461,6 +561,8 @@ test("the heartbeat bound fires the not-synced state after ten seconds", async (
 	mounted.fireHeartbeat();
 	assert.equal(await dispatch(service, "presetSyncMissed", []), true);
 	assert.equal(await dispatch(service, "presetSynced", []), false);
+	// The same fact on the wire, which is what a panel actually reads.
+	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: true });
 });
 
 test("a heartbeat that arrives late still clears the notice", async () => {
@@ -481,6 +583,31 @@ test("a heartbeat that arrived before the bound is never reported as a miss", as
 	mounted.fireHeartbeat();
 	assert.equal(await dispatch(service, "presetSyncMissed", []), false);
 	assert.equal(await dispatch(service, "presetSynced", []), true);
+	assert.deepEqual(await dispatch(service, "status", []), { synced: true, missed: false });
+});
+
+test("every endpoint names the service key that actually carries the typert binding", async () => {
+	// The api-gateway resolves a strict descriptor as `ctx.get(descriptor.service)`
+	// and then requires that service to expose a `typertRemote` binding whose
+	// `serviceKey` **and** `namespace` agree with the descriptor
+	// (`dsh-api-gateway/lib/index.js:1002-1005`). A descriptor that names the wire
+	// namespace where the binding does not live is a dead endpoint: every call
+	// fails `gateway/binding-invalid` at runtime while every offline test passes.
+	// This test therefore resolves the descriptor the way the gateway does,
+	// rather than trusting the two strings to look similar.
+	const mounted = await mountSkills();
+	const contribution = mounted.contributions[0] as {
+		invocations: readonly { method: string; namespace: string; service: string }[];
+	};
+	for (const invocation of contribution.invocations) {
+		assert.equal(invocation.namespace, "buddySkills", `${invocation.method} must be on the wire namespace`);
+		const bound = (mounted.root.get(invocation.service) as { typertRemote?: unknown } | undefined)?.typertRemote as
+			| { serviceKey?: string; namespace?: string }
+			| undefined;
+		assert.notEqual(bound, undefined, `${invocation.method}: ctx.get(${invocation.service}) carries no typert binding`);
+		assert.equal(bound?.serviceKey, invocation.service, `${invocation.method}: the binding key must be the descriptor's service`);
+		assert.equal(bound?.namespace, invocation.namespace, `${invocation.method}: the binding namespace must match`);
+	}
 });
 
 test("exactly one typert contribution carries every panel endpoint", async () => {
@@ -555,6 +682,43 @@ test("refine starts a review addressed to the agent the command handed over", as
 	);
 });
 
+test("refine keeps the session's own route instead of falling back to buddy.model", async () => {
+	// `buddy.model` is the shipped all-empty default. A refine that dropped the
+	// route would compare the configured review model against that empty pair,
+	// see "different", and spawn on the aux model — when the review model here
+	// *equals* the session's real route, so the same-model fork is correct.
+	const mounted = await mountSkills({
+		withSessionQuery: true,
+		skills: { reviewProvider: "p", reviewModel: "m" },
+		routes: { "agent-7": { provider: "p", model: "m" } },
+	});
+	await dispatch(serviceOf(mounted), "refine", [{ id: "agent-7" }, ""]);
+	assert.equal(mounted.started.length, 1);
+	assert.equal(mounted.started[0]?.name, "fork", "the session route says the same model, so this must fork");
+	assert.equal(mounted.started[0]?.agentOptions, undefined);
+});
+
+test("refine carries the transcript, so an explicit review is not blind", async () => {
+	const mounted = await mountSkills({
+		withSessionQuery: true,
+		skills: { reviewProvider: "p", reviewModel: "cheap" },
+		routes: { "agent-7": { provider: "p", model: "expensive" } },
+		surfaces: {
+			"agent-7": [
+				{ type: "user/message", content: [{ type: "text", text: "hello" }] },
+				{ type: "assistant/message", content: [{ type: "text", text: "hi" }] },
+			],
+		},
+	});
+	await dispatch(serviceOf(mounted), "refine", [{ id: "agent-7" }, "house style"]);
+	assert.equal(mounted.started.length, 1);
+	assert.equal(mounted.started[0]?.name, "spawn");
+	// A spawn has no seed, so without the digest the review reads nothing at all.
+	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /Earlier conversation digest/);
+	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /USER: hello/);
+	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /house style/);
+});
+
 test("a review that finishes still attributes its usage to the parent conversation", async () => {
 	const mounted = await mountSkills({ skills: { reviewProvider: "p", reviewModel: "cheap" }, holdRuns: true });
 	const service = serviceOf(mounted);
@@ -585,11 +749,41 @@ test("unmounting the row interrupts every in-flight review", async () => {
 	void dispatch(service, "refine", [{ id: "agent-7" }, ""]);
 	await settle();
 	assert.equal(mounted.runs.length, 1);
+	assert.equal(mounted.witness.signals[0]?.aborted, false, "nothing has cancelled the review yet");
 	await mounted.dispose();
+
+	// The *effective* stop, not merely the declared one: `interrupt` is a
+	// documented no-op for a one-shot run, so a suite asserting only on it would
+	// stay green with the abort and the disposal deleted.
+	assert.equal(mounted.witness.signals[0]?.aborted, true, "the request signal must be aborted");
+	assert.deepEqual(mounted.witness.disposed, ["child-1"], "the run itself must be disposed");
 	assert.deepEqual(mounted.interrupted, ["child-1"]);
 	// The ancestor authority is what spec §7.4 asks the interrupt to be scoped
 	// under: the exact live parent Agent, not a bare id.
 	assert.deepEqual(mounted.authorities, [{ kind: "ancestor", agent: { id: "agent-7" } }]);
+});
+
+test("a review whose start is still in flight when the row unloads is stopped, not registered", async () => {
+	// The pre-registration window: `subagents.start` has not resolved yet, so the
+	// coordinator's `children` and the row's `liveReviews` are both still empty.
+	// A dispose here must not leave the child to appear afterwards with nothing
+	// enforcing its budgets or recording its cost.
+	const mounted = await mountSkills({
+		skills: { reviewProvider: "p", reviewModel: "cheap" },
+		holdRuns: true,
+		holdStart: true,
+	});
+	const service = serviceOf(mounted);
+	void dispatch(service, "refine", [{ id: "agent-7" }, ""]);
+	await settle();
+	assert.equal(mounted.started.length, 0, "the start must still be in flight");
+
+	await mounted.dispose();
+	// Only now does the run come back — after the row was told to unload.
+	mounted.releaseStart();
+	await settle();
+	assert.equal(mounted.witness.signals[0]?.aborted, true, "the late run must be cancelled");
+	assert.deepEqual(mounted.witness.disposed, ["child-1"], "and disposed rather than registered");
 });
 
 test("listSkills merges what is on disk with what the usage table knows", async () => {
@@ -635,6 +829,30 @@ test("listSkills merges what is on disk with what the usage table knows", async 
 		"useCount",
 		"visibility",
 	]);
+});
+
+test("a project promotion is reported as its own tier, not as global", async () => {
+	// Both `global` and `project:<path>` skills are served by the promoted
+	// provider, so a row that inferred the tier from the provider would answer
+	// "global" for a project skill — contradicting the very message that says
+	// "now visible to project:...". The tier comes from the document.
+	const mounted = await mountSkills();
+	await writeSkill(mounted, "path-skill", "project: /srv/app");
+	await writeSkill(mounted, "open-skill", "global");
+	const skills = (await dispatch(serviceOf(mounted), "listSkills", [])) as Record<string, unknown>[];
+	assert.equal(skills.find((entry) => entry["name"] === "path-skill")?.["visibility"], "project: /srv/app");
+	assert.equal(skills.find((entry) => entry["name"] === "open-skill")?.["visibility"], "global");
+	// And a promotion really reports what it wrote.
+	const promoted = (await dispatch(serviceOf(mounted), "visibility", ["path-skill", "project:/srv/other"])) as {
+		success: boolean;
+		message: string;
+		skills: Record<string, unknown>[];
+	};
+	assert.equal(promoted.success, true, promoted.message);
+	assert.equal(
+		promoted.skills.find((entry) => entry["name"] === "path-skill")?.["visibility"],
+		"project:/srv/other",
+	);
 });
 
 test("the usage and reviewUsage endpoints report the tables as owned rows", async () => {
