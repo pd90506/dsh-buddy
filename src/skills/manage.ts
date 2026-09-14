@@ -29,9 +29,9 @@ import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { SkillLedgerRecord } from "../store/domain.ts";
-import { captureBefore, recordMutation, type LedgerDeps } from "./ledger.ts";
+import { captureBefore, captureManifest, recordMutation, type LedgerDeps } from "./ledger.ts";
 import { lintSkill, type LintFinding } from "./linter.ts";
-import { atomicSnapshot } from "./snapshot.ts";
+import { atomicSnapshot, type SnapshotEntry } from "./snapshot.ts";
 import { bumpPatch, recordCreated, type UsageTable } from "./usage.ts";
 import { validateSkillDocument, validateSkillName, validateSupportBytes, validateSupportPath } from "./validate.ts";
 
@@ -162,14 +162,16 @@ export async function runOperations(deps: ManageDeps, operations: readonly Opera
 	const snapshot = await snapshotTouched(deps, operations);
 	if (!snapshot.ok) return { success: false, results: [], error: snapshot.error };
 
-	// The audit ledger's `before` is best effort — its failure only means this
-	// entry has no baseline, and the write continues. `captureBefore` takes one
-	// root, so each touched skill is captured on its own and the manifests are
-	// merged into the flat `{ path, sha256 }[]` the ledger stores. One failed
-	// capture drops the whole `before`: a partial audit record is worse than none.
+	// The audit manifests are best effort — a capture failure only means this
+	// entry carries no manifest, and the write continues. Each capture takes one
+	// root, so every touched skill is captured on its own and the parts are merged
+	// into the flat `{ path, sha256 }[]` the ledger stores: all-or-nothing, so one
+	// failed part voids the whole manifest rather than half-building one. A skill
+	// the batch is about to create has no pre-batch state and is left out of
+	// `before`, which also stops the "before-capture failed" line a create batch
+	// used to log for it.
 	const roots = [...new Set(operations.map((operation) => join(deps.skillsRoot, operation.name)))];
-	const captured = await Promise.all(roots.map((root) => captureBefore(deps, root)));
-	const before = captured.every((part) => part !== undefined) ? captured.flatMap((part) => part ?? []) : undefined;
+	const before = await captureBeforeAll(deps, await existingRoots(roots));
 
 	const results: unknown[] = [];
 	for (const [index, operation] of operations.entries()) {
@@ -187,16 +189,20 @@ export async function runOperations(deps: ManageDeps, operations: readonly Opera
 		results.push(outcome.value);
 	}
 
-	// The batch is whole, so the atomicity copy is spent; drop it before the
-	// audit capture so the ledger's `after` manifest never names it.
+	// The batch is whole, so the atomicity copy is spent.
 	await discardSnapshot(snapshot.snapshot);
+	// `after` mirrors `before`: the same touched roots, now in their new state. A
+	// root the batch deleted is gone, so it is left out — capturing it could only
+	// log an ENOENT line — and a root the batch created is in. Whole-root capture
+	// is deliberately NOT used here: it would sweep in every unrelated skill and
+	// the snapshot blobs, and `rollbackEntry` would then remove and rewrite them.
 	await recordMutation(deps, {
 		actor: deps.actor(),
 		action: operations[0]!.action,
 		skill: operations[0]!.name,
 		evidence: {},
 		before,
-		afterRoot: deps.skillsRoot,
+		after: await captureAfterAll(deps, await existingRoots(roots)),
 	});
 	return { success: true, results };
 }
@@ -418,6 +424,62 @@ async function removeSkillFile(deps: ManageDeps, operation: Operation): Promise<
 	await rm(target, { force: true });
 	await bumpPatch(deps.usage, name, "remove_file", deps.now());
 	return { success: true, value: { action: "remove_file", name, path: target } };
+}
+
+/**
+ * The subset of roots that exists right now.
+ *
+ * Called once before the batch and once after it, which is what makes the two
+ * audit manifests mirror each other: a root a create will add is absent from
+ * `before` and present in `after`, and a root a delete removes is the reverse.
+ * @param roots - the touched roots.
+ * @returns those that exist, in the given order.
+ */
+async function existingRoots(roots: readonly string[]): Promise<string[]> {
+	const found: string[] = [];
+	for (const root of roots) {
+		if (await pathExists(root)) found.push(root);
+	}
+	return found;
+}
+
+/**
+ * Capture the pre-mutation manifest of every root, best effort.
+ *
+ * All-or-nothing: `captureBefore` answers `undefined` for a root it could not
+ * capture, and one such part voids the whole manifest rather than recording a
+ * partial baseline a later rollback would trust.
+ * @param deps - the home, the snapshot directory and the ledger table.
+ * @param roots - the roots to capture.
+ * @returns the merged manifest, or `undefined` when any part failed.
+ */
+async function captureBeforeAll(deps: ManageDeps, roots: readonly string[]): Promise<SnapshotEntry[] | undefined> {
+	const captured = await Promise.all(roots.map((root) => captureBefore(deps, root)));
+	return captured.every((part) => part !== undefined) ? captured.flatMap((part) => part ?? []) : undefined;
+}
+
+/**
+ * Capture the post-mutation manifest of every root, best effort.
+ *
+ * `captureManifest` is the throwing counterpart of `captureBefore`, so the
+ * try/catch lives here and the merge is all-or-nothing like
+ * {@link captureBeforeAll}: a failure answers `undefined` — no manifest — rather
+ * than a half-built one. The unreadable-entry policy stays the one the ledger's
+ * own after-capture used (`completePackage: false`): an unreadable entry is
+ * skipped, so the rest of the manifest still lets a rollback remove what the
+ * batch created.
+ * @param deps - the home, the snapshot directory and the ledger table.
+ * @param roots - the roots to capture.
+ * @returns the merged manifest, or `undefined` when the capture failed.
+ */
+async function captureAfterAll(deps: ManageDeps, roots: readonly string[]): Promise<SnapshotEntry[] | undefined> {
+	try {
+		const captured = await Promise.all(roots.map((root) => captureManifest(deps, root, false)));
+		return captured.flat();
+	} catch (error) {
+		console.error("skill_manage: after-capture failed (%s) — mutation unaffected", messageOf(error));
+		return undefined;
+	}
 }
 
 /**

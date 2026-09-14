@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
-import { listEntries } from "../src/skills/ledger.ts";
+import { listEntries, rollbackEntry } from "../src/skills/ledger.ts";
 import { MAX_BATCH_OPERATIONS, runOperations, type ManageDeps } from "../src/skills/manage.ts";
 import { recordCreated } from "../src/skills/usage.ts";
 import type { SkillLedgerRecord, SkillUsageRecord } from "../src/store/domain.ts";
@@ -381,6 +381,94 @@ test("a successful batch records one ledger entry with the merged per-skill befo
 	}
 });
 
+test("rolling back a batch touches only the skills it mutated", async () => {
+	const f = await fixture();
+	try {
+		const siblingBefore = await readFile(join(f.skillsRoot, "c-d", "SKILL.md"), "utf8");
+		const result = await runOperations(f.deps, [
+			{ action: "patch", name: "a-b", old_string: "one", new_string: "two" },
+		]);
+		assert.equal(result.success, true);
+		const [entry] = await listEntries(f.deps);
+		assert.ok(entry);
+		// The after manifest names the mutated skill and nothing else. A
+		// whole-root capture would sweep in the sibling and the snapshot blobs,
+		// so `rollbackEntry` would remove and rewrite files this batch never
+		// touched.
+		assert.deepEqual(
+			entry.after.map((item) => item.path),
+			[join(f.skillsRoot, "a-b", "SKILL.md")],
+		);
+
+		const rolled = await rollbackEntry(f.deps, entry.id);
+		assert.equal(rolled.ok, true);
+		// The sibling was never named, so it cannot have been removed and
+		// restored — its bytes are exactly the ones the batch found.
+		assert.equal(await readFile(join(f.skillsRoot, "c-d", "SKILL.md"), "utf8"), siblingBefore);
+		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), validDoc("a-b"));
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("a batch's before and after cover the same touched roots", async () => {
+	const f = await fixture();
+	try {
+		const result = await runOperations(f.deps, [
+			{ action: "patch", name: "a-b", old_string: "one", new_string: "two" },
+			{ action: "write_file", name: "c-d", file_path: "references/notes.md", content: "note" },
+		]);
+		assert.equal(result.success, true);
+		const [entry] = await listEntries(f.deps);
+		assert.ok(entry);
+		assert.deepEqual(
+			entry.before.map((item) => item.path).sort(),
+			[join(f.skillsRoot, "a-b", "SKILL.md"), join(f.skillsRoot, "c-d", "SKILL.md")].sort(),
+		);
+		// The file the batch created in the *second* skill is in `after`, so a
+		// rollback removes it — a first-root-only after manifest would leave it.
+		assert.deepEqual(
+			entry.after.map((item) => item.path).sort(),
+			[
+				join(f.skillsRoot, "a-b", "SKILL.md"),
+				join(f.skillsRoot, "c-d", "SKILL.md"),
+				join(f.skillsRoot, "c-d", "references", "notes.md"),
+			].sort(),
+		);
+
+		const rolled = await rollbackEntry(f.deps, entry.id);
+		assert.equal(rolled.ok, true);
+		await assert.rejects(() => stat(join(f.skillsRoot, "c-d", "references", "notes.md")));
+		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), validDoc("a-b"));
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("a created skill lives in after, not before, so its batch rolls back", async () => {
+	const f = await fixture();
+	try {
+		const result = await runOperations(f.deps, [{ action: "create", name: "g-h", content: validDoc("g-h") }]);
+		assert.equal(result.success, true);
+		const [entry] = await listEntries(f.deps);
+		assert.ok(entry);
+		// Create/delete are the asymmetry the two snapshots exist for: a created
+		// skill has no prior state, and its manifest is what removes it again.
+		assert.deepEqual(entry.before, []);
+		assert.deepEqual(
+			entry.after.map((item) => item.path),
+			[join(f.skillsRoot, "g-h", "SKILL.md")],
+		);
+
+		const rolled = await rollbackEntry(f.deps, entry.id);
+		assert.equal(rolled.ok, true);
+		await assert.rejects(() => stat(join(f.skillsRoot, "g-h", "SKILL.md")));
+		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), validDoc("a-b"));
+	} finally {
+		await f.cleanup();
+	}
+});
+
 test("recordCreated never rejects, so a broken usage table cannot fail a create", async () => {
 	const f = await fixture();
 	const logged = console.error;
@@ -404,10 +492,11 @@ test("recordCreated never rejects, so a broken usage table cannot fail a create"
 		await f.cleanup();
 	}
 	// One line per failed telemetry write, on the module's own prefix shape:
-	// logged, and the write unaffected. (The one other line is the audit ledger
-	// noting that the brand-new skill has no prior state to capture.)
+	// logged, and the write unaffected. Nothing else is logged — in particular
+	// the create no longer captures its own not-yet-existing `before` root, so
+	// the spurious "before-capture failed" line is gone too.
 	const telemetry = lines.filter((line) => line.startsWith("skill_usage: recordCreated"));
 	assert.equal(telemetry.length, 2);
-	assert.equal(lines.length - telemetry.length, 1);
+	assert.equal(lines.length, telemetry.length);
 	for (const line of telemetry) assert.match(line, /^skill_usage: recordCreated\('%s'\) failed/);
 });
