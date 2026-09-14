@@ -199,6 +199,12 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 - **16 轮**：数 review 子会话的 `step/end`；到 `maxReviewSteps`（16）→ 停。**不是**数工具调用。重试是另一个事件（`assistant/attempt`），不计数。
 - **60 万输入 token**：累加 review 子会话每条 `assistant/message` 的 `usage.inputTokens`；到 `maxInputTokens`（600000）→ 停。这正是 `$H` 的 `session_input_tokens` 语义（累计输入，回合间检查）。
 - **停的手段**：`ctx.subagents.interrupt(childSessionId, {kind:'ancestor', agent: parentAgent})`，在一步结束之后停（不在工具执行中间打断），避免留下半个批量写入。
+  > **2026-09-14 订正（平台事实，Task 13 核出并已实现）：** 这一条对本期**不成立**。shipped 的
+  > `SubagentRuntime.interrupt` 的契约原文是「An absent target — including a **one-shot** or unknown id —
+  > is an accepted no-op」，它只作用于 **continuable** Activation；而本期的两条 review 路径都是
+  > `start()` 起的一次性 `SubagentRun`。真正能停的机制是：`signal.abort()` → （保留祖先 `interrupt`，
+  > 语义正确且对将来任何 continuable 子会话有效）→ `await run.dispose()`，最后这一步才是决定性的。
+  > 只按原文实现会得到「预算超限却继续花钱」，这是必须记下的偏差。
 - **cache 实证**：同时记录 `cacheReadTokens`。`$H` 自己的完成日志就是 `"Background review complete: thread=bg-review calls=%d in=%d out=%d cache_read=%d result=%s"`（`$H:background_review.py:753-760`），我们照抄这个形状，好让"同模型 fork 确实吃到缓存"是可验证的事实而不是保证。
 - **不做**起飞前的体积降级：60 万是累计预算，不是"transcript 多大"的门槛；同模型 fork 能吃 cache，没有理由因为长就降级（这是我先前版本的错误，已废弃）。
 
