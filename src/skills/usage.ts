@@ -18,6 +18,15 @@
  *   archiving; this phase only declares the fields, so nothing here writes
  *   them.
  *
+ * **Telemetry is not a gate.** No function here throws or rejects: a load or a
+ * mutation that has already happened must never be refused — or, worse, turned
+ * into an unhandled rejection on a fire-and-forget listener — because
+ * bookkeeping failed. A failed table write is logged once and swallowed, the
+ * way the sibling mutation ledger does it. A skill with no row yet is likewise
+ * normal rather than an error: bundled, project and hand-authored skills are
+ * loaded without ever having been created, so the bumpers seed a row with null
+ * provenance instead of dropping the event.
+ *
  * Records are plain values, so every writer reads a **copy** and puts a fresh
  * object back rather than mutating whatever handle storage returned. Nothing
  * here reads a cordis service or holds a live object.
@@ -71,45 +80,66 @@ export async function recordCreated(
 /**
  * Count one load of a skill (the DSH `skill` tool call) as a use.
  *
+ * A load is a fact about **any** skill, so this does not require a prior
+ * {@link recordCreated}: DSH's `skill` tool also loads bundled, project and
+ * hand-authored skills that never went through a create, and their telemetry
+ * must land too. An absent row is seeded with
+ * `emptyUsageRecord(now)` and `created_by: null` — null provenance is what
+ * keeps such a row out of curator management, so the seed never claims the
+ * skill is agent-created.
+ *
  * Also records the reuse generation: when the record has already been used at
- * least once and its `patch_generation` has advanced past
+ * least once (`use_count > 0`) and its `patch_generation` has advanced past
  * `last_reused_patch_generation`, this use marks the current generation as
- * reused. The first use after a patch is normally the patch's own authoring
- * pass, which is not a reuse of it — hence the `use_count > 0` guard.
+ * reused. The guard is about the record *never having been used*, not about
+ * the first use after a patch: a `use → patch → use` sequence does credit the
+ * new generation, because that middle load is what a patch's own authoring
+ * pass looks like and it must not be mistaken for a reuse.
+ *
+ * Never throws and never rejects: telemetry is not a gate (see the module
+ * header), so a table failure is logged and the load is unaffected.
  * @param table - the `skill_usage` table.
  * @param name - the skill name.
  * @param now - the ISO-8601 timestamp to stamp.
- * @throws when the skill has no usage record; a use cannot invent one.
  */
 export async function bumpUse(table: UsageTable, name: string, now: string): Promise<void> {
-	const record = requireRecord(table, name);
-	const uses = safeInt(record.use_count);
-	const generation = safeInt(record.patch_generation);
-	const lastReused = Math.min(safeInt(record.last_reused_patch_generation), generation);
-	const reuseAfterPatch = uses > 0 && generation > lastReused;
-	await table.put(name, {
-		...record,
-		use_count: uses + 1,
-		last_used_at: now,
-		patch_generation: generation,
-		last_reused_patch_generation: reuseAfterPatch ? generation : lastReused,
-	});
+	try {
+		const record = loadRecord(table, name, now);
+		const uses = safeInt(record.use_count);
+		const generation = safeInt(record.patch_generation);
+		const lastReused = Math.min(safeInt(record.last_reused_patch_generation), generation);
+		const reuseAfterPatch = uses > 0 && generation > lastReused;
+		await table.put(name, {
+			...record,
+			use_count: uses + 1,
+			last_used_at: now,
+			patch_generation: generation,
+			last_reused_patch_generation: reuseAfterPatch ? generation : lastReused,
+		});
+	} catch (error) {
+		console.error("skill_usage: bumpUse('%s') failed (%s) — skill load unaffected", name, messageOf(error));
+	}
 }
 
 /**
  * Count one view of a skill.
  *
- * A view and a use share a timestamp here because DSH has exactly one load
- * path — the `skill` tool — so both counters observe the same event and the
- * pair only becomes interesting once a second, read-only path exists.
+ * Seeded from an absent row exactly like {@link bumpUse}, and never throws or
+ * rejects for the same reason. A view and a use share a timestamp here because
+ * DSH has exactly one load path — the `skill` tool — so both counters observe
+ * the same event and the pair only becomes interesting once a second,
+ * read-only path exists.
  * @param table - the `skill_usage` table.
  * @param name - the skill name.
  * @param now - the ISO-8601 timestamp to stamp.
- * @throws when the skill has no usage record.
  */
 export async function bumpView(table: UsageTable, name: string, now: string): Promise<void> {
-	const record = requireRecord(table, name);
-	await table.put(name, { ...record, view_count: safeInt(record.view_count) + 1, last_viewed_at: now });
+	try {
+		const record = loadRecord(table, name, now);
+		await table.put(name, { ...record, view_count: safeInt(record.view_count) + 1, last_viewed_at: now });
+	} catch (error) {
+		console.error("skill_usage: bumpView('%s') failed (%s) — skill load unaffected", name, messageOf(error));
+	}
 }
 
 /**
@@ -118,13 +148,17 @@ export async function bumpView(table: UsageTable, name: string, now: string): Pr
  * Bumps `patch_count`, advances `patch_generation` and stamps
  * `last_patched_at`. `create` is inert here by design: {@link recordCreated}
  * owns creation, and a create that also counted as a patch would skew both the
- * activity total and the reuse generation a load compares against.
+ * activity total and the reuse generation a load compares against. An absent
+ * row is seeded like {@link bumpUse}'s, so a mutation records its own history
+ * even when nothing created the row first.
+ *
+ * Never throws and never rejects: a table failure is logged and the mutation
+ * the caller already applied is unaffected.
  * @param table - the `skill_usage` table.
  * @param name - the skill name.
  * @param action - the mutation the caller applied; only the four mutating
  * actions count.
  * @param now - the ISO-8601 timestamp to stamp.
- * @throws when the skill has no usage record.
  */
 export async function bumpPatch(
 	table: UsageTable,
@@ -133,13 +167,17 @@ export async function bumpPatch(
 	now: string,
 ): Promise<void> {
 	if (action === "create") return;
-	const record = requireRecord(table, name);
-	await table.put(name, {
-		...record,
-		patch_count: safeInt(record.patch_count) + 1,
-		patch_generation: safeInt(record.patch_generation) + 1,
-		last_patched_at: now,
-	});
+	try {
+		const record = loadRecord(table, name, now);
+		await table.put(name, {
+			...record,
+			patch_count: safeInt(record.patch_count) + 1,
+			patch_generation: safeInt(record.patch_generation) + 1,
+			last_patched_at: now,
+		});
+	} catch (error) {
+		console.error("skill_usage: bumpPatch('%s', %s) failed (%s) — mutation unaffected", name, action, messageOf(error));
+	}
 }
 
 /**
@@ -149,17 +187,25 @@ export async function bumpPatch(
  * that changes what the next phase's pass may touch. It writes `pinned` and
  * nothing else — in particular it never touches `state` or `archived_at`,
  * which belong to archiving rather than to pinning.
+ *
+ * Never throws and never rejects: a table failure is logged and answered with
+ * `false`, so a panel handler reports "did not land" rather than crashing.
  * @param table - the `skill_usage` table.
  * @param name - the skill name.
  * @param pinned - the new flag value.
  * @returns `true` when the flag was written, `false` when the skill has no
- * usage record (a pin cannot invent one).
+ * usage record (a pin cannot invent one) or the write failed.
  */
 export async function setPinned(table: UsageTable, name: string, pinned: boolean): Promise<boolean> {
-	const record = table.get(name);
-	if (record === undefined) return false;
-	await table.put(name, { ...record, pinned });
-	return true;
+	try {
+		const record = table.get(name);
+		if (record === undefined) return false;
+		await table.put(name, { ...record, pinned });
+		return true;
+	} catch (error) {
+		console.error("skill_usage: setPinned('%s') failed (%s) — flag not written", name, messageOf(error));
+		return false;
+	}
 }
 
 /**
@@ -169,17 +215,25 @@ export async function setPinned(table: UsageTable, name: string, pinned: boolean
  * leaves every counter and timestamp alone, so the skill's inactivity clock
  * keeps running from wherever it was. It also never touches `state` or
  * `archived_at` — restoring or archiving is a separate decision.
+ *
+ * Never throws and never rejects: a table failure is logged and answered with
+ * `false`, so the panel reports "did not land" rather than crashing.
  * @param table - the `skill_usage` table.
  * @param name - the skill name.
  * @returns `true` when the skill is (now) agent-created, `false` when it has no
- * usage record.
+ * usage record or the write failed.
  */
 export async function adopt(table: UsageTable, name: string): Promise<boolean> {
-	const record = table.get(name);
-	if (record === undefined) return false;
-	if (record.created_by === "agent") return true;
-	await table.put(name, { ...record, created_by: "agent" });
-	return true;
+	try {
+		const record = table.get(name);
+		if (record === undefined) return false;
+		if (record.created_by === "agent") return true;
+		await table.put(name, { ...record, created_by: "agent" });
+		return true;
+	} catch (error) {
+		console.error("skill_usage: adopt('%s') failed (%s) — provenance unchanged", name, messageOf(error));
+		return false;
+	}
 }
 
 /**
@@ -224,17 +278,26 @@ export function activityCount(record: SkillUsageRecord): number {
 }
 
 /**
- * Read the record a bump applies to.
+ * Read the record a bump applies to, seeding an absent one.
+ *
+ * A load or a mutation of a skill that has no row yet is **normal**, not
+ * caller error: DSH's `skill` tool loads bundled, project and hand-authored
+ * skills that never went through {@link recordCreated}, and nothing backfills
+ * them. Dropping their telemetry would make the panel and the pruning pass read
+ * "never used" for a skill the model really did load. The seed is
+ * `emptyUsageRecord(now)` with `created_by: null` — null provenance is what
+ * keeps the row out of curator management, so the seed never quietly claims the
+ * skill is agent-created.
+ *
+ * The returned value is always an owned copy: callers spread it into a fresh
+ * object rather than mutating whatever storage handed back.
  * @param table - the `skill_usage` table.
  * @param name - the skill name.
- * @returns the stored record.
- * @throws when no record exists; telemetry never fabricates one, because a
- * counter bump with no create behind it means the caller wired the wrong key.
+ * @param now - the ISO-8601 timestamp an absent record is created at.
+ * @returns the stored record, or a fresh empty one when there is none.
  */
-function requireRecord(table: UsageTable, name: string): SkillUsageRecord {
-	const record = table.get(name);
-	if (record === undefined) throw new Error(`no skill usage record for '${name}'`);
-	return record;
+function loadRecord(table: UsageTable, name: string, now: string): SkillUsageRecord {
+	return table.get(name) ?? emptyUsageRecord(now);
 }
 
 /**
@@ -244,4 +307,12 @@ function requireRecord(table: UsageTable, name: string): SkillUsageRecord {
  */
 function safeInt(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
+/**
+ * @param error - an unknown throwable.
+ * @returns its message, or the value rendered.
+ */
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
