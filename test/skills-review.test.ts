@@ -172,7 +172,7 @@ function makeCoordinator(
 	};
 	const deps: ReviewCoordinatorDeps = {
 		config: () => config,
-		spawn: (input) => {
+		spawn: async (input) => {
 			shared.children += 1;
 			const childSessionId = shared.children === 1 ? "child" : `child${shared.children}`;
 			shared.lastChild = childSessionId;
@@ -223,7 +223,15 @@ interface TurnOptions {
  */
 function startReview(harness: Harness, options: TurnOptions = {}): Promise<void> {
 	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
-	return harness.coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" }, ...options });
+	// The coordinaor asks for the transcript lazily; the harness owns the read,
+	// exactly as the host row does, so a test still hands the surface over.
+	const surface = options.surface === undefined ? undefined : async () => options.surface;
+	return harness.coordinator.onTurnEnd({
+		sessionId: "s1",
+		reason: { kind: "completed" },
+		...(options.route === undefined ? {} : { route: options.route }),
+		...(surface === undefined ? {} : { surface }),
+	});
 }
 
 /** Start a review and wait for it to finish. */
@@ -407,7 +415,7 @@ test("usage is attributed to the parent session in a finally, even on failure", 
 	});
 	const coordinator = new ReviewCoordinator({
 		config: () => config,
-		spawn: () => ({ childSessionId: "child", done }),
+		spawn: async () => ({ childSessionId: "child", done }),
 		interrupt: () => {},
 		now: () => "2026-09-14T00:00:00.000Z",
 		log: () => {},
@@ -445,7 +453,7 @@ test("a failing usage write is logged, not thrown at the caller", async () => {
 	const logged: string[] = [];
 	const coordinator = new ReviewCoordinator({
 		config: () => ({ ...FALLBACK_CONFIG }),
-		spawn: () => ({ childSessionId: "child", done: Promise.resolve("ok") }),
+		spawn: async () => ({ childSessionId: "child", done: Promise.resolve("ok") }),
 		interrupt: () => {},
 		now: () => "2026-09-14T00:00:00.000Z",
 		log: (line) => {

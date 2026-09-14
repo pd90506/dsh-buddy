@@ -12,11 +12,18 @@ import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 
 /**
  * Build one empty in-memory table.
+ *
+ * The returned value also carries the backing `Map` as `rows`, so a caller can
+ * seed or read state directly: a row of telemetry that only the store ever
+ * writes is otherwise impossible to arrange from a mount test. The value stays
+ * assignable to `KvTable` — the extra field widens the object, it changes none
+ * of the eight contract members.
  * @returns a table backed by a `Map`, mirroring `KvTable`'s five reads and three writes.
  */
-export function tableStub<V>(): KvTable<string, V> {
+export function tableStub<V>(): KvTable<string, V> & { readonly rows: Map<string, V> } {
 	const rows = new Map<string, V>();
 	return {
+		rows,
 		get: (key) => rows.get(key),
 		entries: () => rows.entries(),
 		keys: () => rows.keys(),
