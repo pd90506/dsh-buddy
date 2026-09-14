@@ -46,7 +46,7 @@ import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 import type { BuddyConfig } from "../config.ts";
 import type { ReviewUsageRecord } from "../store/domain.ts";
 import { digestHistory, type DigestMessage } from "./digest.ts";
-import { REVIEW_TOOL_CLAUSE, SKILL_REVIEW_PROMPT } from "./prompt.ts";
+import { REVIEW_TOOL_CLAUSE, REFINE_FOCUS_SUFFIX, SKILL_REVIEW_PROMPT } from "./prompt.ts";
 
 /**
  * The tools a review sub-session may see (spec §7.3).
@@ -81,6 +81,15 @@ export interface ReviewSpawnResult {
 /** What the coordinator asks the host row to start. */
 export interface ReviewSpawnInput {
 	/**
+	 * The conversation whose completed turn triggered this review.
+	 *
+	 * Carried because the host row is the only side that can turn it into the
+	 * live parent Agent `subagents.start` needs, and because the digest path
+	 * reads that conversation's transcript — which the row should do lazily,
+	 * only when the digest is really needed.
+	 */
+	readonly parentSessionId: string;
+	/**
 	 * `"fork"` seeds the review with the parent's completed turns (same-model
 	 * path); `"spawn"` starts with no seed, so the prompt carries the digest
 	 * (cheap-model path). Spec §7.1.
@@ -103,10 +112,19 @@ export interface ReviewSpawnInput {
 export interface ReviewCoordinatorDeps {
 	/** The current buddy settings; read per decision, never cached. */
 	config(): BuddyConfig;
-	/** Start the review sub-session and hand back its id and its settlement. */
-	spawn(input: ReviewSpawnInput): ReviewSpawnResult;
+	/**
+	 * Start the review sub-session and hand back its id and its settlement.
+	 *
+	 * Asynchronous because the host row may need to await something real before
+	 * the child exists — reading the conversation's transcript for the cheap
+	 * model's digest, resolving the live parent Agent — and because a `start`
+	 * that cannot be attempted at all should **reject**: the coordinator records
+	 * a rejected spawn as a failed, attributed review rather than hanging on a
+	 * promise nothing will settle.
+	 */
+	spawn(input: ReviewSpawnInput): Promise<ReviewSpawnResult>;
 	/** Stop a review that has run out of budget. Must not throw. */
-	interrupt(childSessionId: string): void;
+	interrupt(childSessionId: string): void | Promise<void>;
 	/** The current time as ISO-8601, stamped onto the usage row. */
 	now(): string;
 	/** One diagnostic line. Must not throw. */
@@ -203,6 +221,74 @@ export class ReviewCoordinator {
 	}
 
 	/**
+	 * Start a review because the user asked for one (`/refine`, spec §6).
+	 *
+	 * Explicit rather than earned: the nudge interval is deliberately not
+	 * consulted, and the focus — when the user typed one — is appended to the
+	 * prompt as a priority suffix. The single-flight rule still holds, so a
+	 * second `/refine` while the first review is running is dropped rather than
+	 * queued.
+	 * @param sessionId - the conversation whose command triggered this.
+	 * @param focus - the user's focus text; empty means the general prompt.
+	 */
+	async refine(sessionId: string, focus: string): Promise<void> {
+		if (this.inFlight.has(sessionId)) return;
+		const settings = this.deps.config().skills;
+		this.inFlight.add(sessionId);
+		this.steps.set(sessionId, 0);
+		try {
+			const suffix = focus.trim() === "" ? "" : REFINE_FOCUS_SUFFIX(focus);
+			await this.start(sessionId, settings, { focus: suffix });		} finally {
+			this.inFlight.delete(sessionId);
+		}
+	}
+
+	/**
+	 * Stop every review still flying and release the coordinator's state.
+	 *
+	 * The coordinator is the only thing enforcing a review's budgets (through
+	 * {@link noteChildEvent}) and the only thing recording its cost (in
+	 * {@link start}'s `finally`), so a disposed host row that left a review
+	 * running would produce an unbudgeted, unattributed child. Every interrupt
+	 * and disposal is contained: a teardown path must not throw, whatever the
+	 * seam underneath does.
+	 *
+	 * Deliberately **not** part of the plan's original sketch, which called a
+	 * non-existent `dispose()`. Added with Task 13 because the row's own effect
+	 * cleanup needs it; an in-flight review is cut short on reload, which is the
+	 * safe direction.
+	 * @returns resolution once every in-flight review's teardown has settled.
+	 */
+	async dispose(): Promise<void> {
+		const children = [...this.children.keys()];
+		for (const review of this.active.values()) {
+			if (review.childSessionId !== undefined && !children.includes(review.childSessionId)) {
+				children.push(review.childSessionId);
+			}
+		}
+		const pending: Promise<void>[] = [];
+		for (const childSessionId of children) {
+			try {
+				// The seam is typed `void | Promise<void>`; a rejected teardown is a
+				// diagnostic, never a throw out of disposal.
+				pending.push(Promise.resolve(this.deps.interrupt(childSessionId)).then(
+					() => undefined,
+					(error: unknown) => {
+						this.logQuietly(`Background review: interrupt failed (${messageOf(error)})`);
+					},
+				));
+			} catch (error) {
+				this.logQuietly(`Background review: interrupt failed (${messageOf(error)})`);
+			}
+		}
+		await Promise.all(pending);
+		this.steps.clear();
+		this.inFlight.clear();
+		this.active.clear();
+		this.children.clear();
+	}
+
+	/**
 	 * The post-commit end of a turn: decide, and possibly start, a review.
 	 *
 	 * The chain is ordered and the order is the spec's (spec §6): a delegated
@@ -238,14 +324,23 @@ export class ReviewCoordinator {
 		 * instead. Task 13 must pass this.
 		 */
 		route?: { provider: string; model: string } | undefined;
-		surface?: readonly DigestMessage[] | undefined;
+		/**
+		 * The conversation's transcript, read lazily.
+		 *
+		 * A **function**, not an array, and deliberately so: reading it is a log
+		 * read in the host row, and only the cheap-model path consumes it. The
+		 * common path — a same-model fork, which carries the conversation as its
+		 * seed — must never pay for it, and neither must a turn that the gates
+		 * above already discarded.
+		 */
+		surface?: (() => Promise<readonly DigestMessage[] | undefined>) | undefined;
 	}): Promise<void> {
 		const { sessionId } = input;
 		if (input.origin === "subagent" || (input.delegationDepth ?? 0) > 0) return;
 		if (input.reason.kind !== "completed") return;
 
 		const settings = this.deps.config().skills;
-		if ((this.steps.get(sessionId) ?? 0) < settings.creationNudgeInterval) return;
+		if (!this.wouldReview(sessionId, settings)) return;
 		if (this.inFlight.has(sessionId)) return;
 
 		// The claim happens here, synchronously: everything above and below this
@@ -258,6 +353,23 @@ export class ReviewCoordinator {
 		} finally {
 			this.inFlight.delete(sessionId);
 		}
+	}
+
+	/**
+	 * Whether an ended turn could start a review right now.
+	 *
+	 * The host row's one legitimate use is to skip work that only a review would
+	 * consume — reading the transcript for the cheap model's digest is a real log
+	 * read, and it must not be paid on a turn that cannot earn one. This is a
+	 * *read-only* predicate: it claims nothing, and {@link onTurnEnd} still owns
+	 * the decision and every gate around it.
+	 * @param sessionId - the conversation that ended a turn.
+	 * @param settings - the settings to judge against; read fresh when omitted.
+	 * @returns `true` when the feature is on and the interval has elapsed.
+	 */
+	wouldReview(sessionId: string, settings: BuddyConfig["skills"] = this.deps.config().skills): boolean {
+		if (!settings.enabled) return false;
+		return (this.steps.get(sessionId) ?? 0) >= settings.creationNudgeInterval;
 	}
 
 	/**
@@ -324,7 +436,9 @@ export class ReviewCoordinator {
 		settings: BuddyConfig["skills"],
 		turn: {
 			readonly route?: { provider: string; model: string } | undefined;
-			readonly surface?: readonly DigestMessage[] | undefined;
+			readonly surface?: (() => Promise<readonly DigestMessage[] | undefined>) | undefined;
+			/** An explicit `/refine` focus, appended after the tool clause. */
+			readonly focus?: string | undefined;
 		},
 	): Promise<void> {
 		// The parent route §7.1 compares against: what the conversation really
@@ -336,9 +450,12 @@ export class ReviewCoordinator {
 			settings.reviewProvider !== parent.provider || settings.reviewModel !== parent.model;
 		const provider: "fork" | "spawn" = routed && differsFromParent ? "spawn" : "fork";
 		const model = provider === "spawn" ? settings.reviewModel : parent.model;
-		const body = `${SKILL_REVIEW_PROMPT}${REVIEW_TOOL_CLAUSE}`;
-		const prompt =
-			provider === "spawn" ? `${renderDigest(digestHistory(turn.surface ?? []))}\n\n${body}` : body;
+		const body = `${SKILL_REVIEW_PROMPT}${REVIEW_TOOL_CLAUSE}${turn.focus ?? ""}`;
+		// Only the cheap-model path reads the transcript: a fork inherits the
+		// conversation as its seed, so a digest would be both useless and a read
+		// the gate above deliberately avoided.
+		const digest = provider === "spawn" ? await readSurface(turn.surface) : undefined;
+		const prompt = digest === undefined ? body : `${renderDigest(digestHistory(digest))}\n\n${body}`;
 
 		const review: ActiveReview = {
 			parentSessionId,
@@ -356,7 +473,12 @@ export class ReviewCoordinator {
 
 		let outcome = OUTCOME_COMPLETED;
 		try {
-			const child = this.deps.spawn({ provider, prompt, toolFilter: REVIEW_TOOL_FILTER });
+			const child = await this.deps.spawn({
+				parentSessionId,
+				provider,
+				prompt,
+				toolFilter: REVIEW_TOOL_FILTER,
+			});
 			review.childSessionId = child.childSessionId;
 			this.children.set(child.childSessionId, review);
 			await child.done;
@@ -457,6 +579,27 @@ export class ReviewCoordinator {
 		} catch {
 			// A failing log sink is not worth an exception on the turn path.
 		}
+	}
+}
+
+/**
+ * Read the conversation's transcript lazily, or report that there is none.
+ *
+ * The host row owns the read (it is the side that knows `sessionQuery`); a row
+ * with no session plane, or one whose read fails, still gets a review — the
+ * cheap-model prompt simply carries no digest. A rejection here must never
+ * escape into the turn path.
+ * @param surface - the host row's reader, when it has one.
+ * @returns the transcript messages, or `undefined` when there are none.
+ */
+async function readSurface(
+	surface: (() => Promise<readonly DigestMessage[] | undefined>) | undefined,
+): Promise<readonly DigestMessage[] | undefined> {
+	if (surface === undefined) return undefined;
+	try {
+		return await surface();
+	} catch {
+		return undefined;
 	}
 }
 
