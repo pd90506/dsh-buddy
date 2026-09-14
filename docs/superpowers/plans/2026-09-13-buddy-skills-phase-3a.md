@@ -1580,9 +1580,12 @@ export const name = "dsh-buddy-skills-agent";
   其中 `SkillProviderControl = { signal: AbortSignal; invalidate: () => void }`
   （`dsh-skill/lib/types/index.d.ts:190-195,249`）。preset 行**只注册 buddy 层那一个**：
   `createBuddyProvider({ skillsRoot: plane.skillsRoot() })`。
-  **`control.invalidate()` 必须由 `skill_manage` 成功写入后调用**——注册表缓存目录，不 invalidate 的话新建
-  的技能永远不可见，而**没有**公开的 `ctx.skills.invalidate()`，唯一的失效入口就是工厂拿到的这个 control。
-  把 control 存进闭包，工具与监听器共用。
+  **目录失效的唯一个 Owner 是 host 行**（订正 5）——preset 行**不自己** invalidate，而是在注册时把工厂拿到
+  的 control 交给宿主服务（`plane.noteBuddyControl(control)`），由 host 行在写入成功后统一失效两份缓存。
+  理由：`skill_manage` 的写入本来就是 `plane.manage(...)`，host 行在同一处已经失效 promoted 缓存，工具再调
+  一次只是把 buddy 计数变成 2，而且**面板那条写入路径（`buddySkills/manage`）根本没有 preset 行的 control
+  可用**——把 owner 放在 host 行才覆盖全部路径，也只有一个真相来源。不 invalidate 的话新建的技能永远不可见，
+  而**没有**公开的 `ctx.skills.invalidate()`：唯一的失效入口就是工厂拿到的那个 control。
 - 工具：`import { defineTool } from "@deepseek-ai/dsh-tools"`（**必须 import**，见订正 3），
   `ctx.get("tools").register(defineTool({...}))`，`register(definition: ToolDefinition): () => void`
   （`dsh-tools/lib/types/index.d.ts:601`）。`defineTool` 的选项形状
@@ -1591,7 +1594,7 @@ export const name = "dsh-buddy-skills-agent";
   `parameters` 是 JSON-schema 风格的 DSL（`{ operations: { type: "array", items: {...} } }` 之类，
   以 `{type:'string'}` / `{type:'array', items}` 为节点）。`execute(args, exec)` 里先
   `plane.noteSkillManageCalled(exec.agent?.id)` 再 `plane.manage(exec.agent, operations)`；
-  **`exec.agent` 缺失时拒绝**（review 之外没有 agent 的调用不可信）。成功写入后调 `control.invalidate()`。
+  **`exec.agent` 缺失时拒绝**（review 之外没有 agent 的调用不可信）。**工具不自己 invalidate**（订正 5）。
 - `session/event`：监听器签名是 **两个参数** `(session, event)`
   （`dsh-session/lib/types/index.d.ts:62`，emit 不是 waterfall）。只做转发：
   `event.type === "step/end"` → `plane.noteStep(session.header.id)`；
@@ -1611,9 +1614,14 @@ export const name = "dsh-buddy-skills-agent";
 - 挂载时调 `plane.noteAgentRowMounted()`。
 - **host 行（`src/skills/index.ts` 的 `apply`）另外注册 promoted provider**：`ctx.get("skills")` 为软依赖，
   缺席就不注册；`ctx.effect(() => skills.registerProvider(() => createPromotedProvider({
-  skillsRoot: ctx.buddyStore.paths.skills })))`。把工厂拿到的 control 存到服务上，
-  `setVisibility`（以及任何改变 frontmatter `visibility` 的写入）成功后调 `control.invalidate()`。
-  **不要在 preset 行注册它**（订正 4）。
+  skillsRoot: ctx.buddyStore.paths.skills })))`。把工厂拿到的 control 存到服务上。
+  这条注册**必须在构造服务的那个 effect 里面**：一行在 `apply` 期间提供的服务要到 fiber 激活后才
+  `ctx.get` 得到，放在兄弟 effect 里会静默地什么都没注册、而较弱的测试仍然全绿（订正 6，实现者探针实测）。
+- **两份缓存的失效归 host 行管**（订正 5）：host 行同时持有 promoted 的 control 与 preset 行交来的 buddy
+  control，`manage` / `setVisibility` / `rollback` 成功后统一失效两份；失败路径不失效。preset 行不自己
+  invalidate。注册表的目录缓存不自己失效，而 `dsh-skill` 的 control 在注册已释放时是 no-op
+  （`lib/index.js:153-156` 的 identity 检查），所以存旧 control 无害，不需要额外的生命周期处理。
+  **不要在 preset 行注册 provider**（订正 4）。
 - **所有注册都走 `ctx.effect(...)`**（`registerProvider` / `tools.register` / `commands.register` 返回的
   disposer 就是 effect 的返回值；`ctx.on` 本身即 effect）。
 
