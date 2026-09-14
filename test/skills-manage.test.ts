@@ -18,7 +18,8 @@
  * @module test/skills-manage
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -31,6 +32,31 @@ import { tableStub } from "./support/domain-tables.ts";
 
 /** The one timestamp every fixture stamps, so nothing here depends on the wall clock. */
 const NOW = "2026-09-13T00:00:00.000Z";
+
+/**
+ * @param value - text to hash.
+ * @returns its lowercase hex sha256, the name a snapshot blob is stored under.
+ */
+function sha256Of(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+/**
+ * Every entry under a snapshots directory, or `[]` when it does not exist yet.
+ *
+ * A refused batch must leave the directory empty: the guards run before any
+ * snapshot work, so nothing — not a `.batch-*` copy, not a stray escaped copy —
+ * may appear there.
+ * @param snapshotsDir - the snapshots directory to list.
+ * @returns its entry names.
+ */
+async function snapshotEntries(snapshotsDir: string): Promise<string[]> {
+	try {
+		return await readdir(snapshotsDir);
+	} catch {
+		return [];
+	}
+}
 
 /**
  * A document that passes the write path's validation for `name`.
@@ -146,8 +172,11 @@ test("delete must be the sole operation in its call", async () => {
 		]);
 		assert.equal(result.success, false);
 		assert.match(String(result.error), /compose with other ops/);
-		// The guard runs before any snapshot or filesystem work, so the skill is intact.
+		// The guards run before any snapshot or filesystem work: the skill is
+		// intact AND the snapshots directory was never even created. A reordering
+		// that snapshotted first would leave a `.batch-*` copy behind.
 		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), before);
+		assert.deepEqual(await snapshotEntries(f.deps.snapshotsDir), []);
 	} finally {
 		await f.cleanup();
 	}
@@ -165,6 +194,8 @@ test("more than 20 operations is refused", async () => {
 		const result = await runOperations(f.deps, ops);
 		assert.equal(result.success, false);
 		assert.match(String(result.error), /20/);
+		// Refused before any snapshot work, so nothing was copied aside.
+		assert.deepEqual(await snapshotEntries(f.deps.snapshotsDir), []);
 	} finally {
 		await f.cleanup();
 	}
@@ -182,13 +213,44 @@ test("an empty batch is refused", async () => {
 	}
 });
 
-test("an unsafe skill name is refused before anything is touched", async () => {
+test("an unsafe skill name cannot reach outside the skills root", async () => {
 	const f = await fixture();
 	try {
+		// The guard's real job: a name-derived path is what `snapshotTouched`
+		// copies and what `restoreSnapshot` rm -rf's, so `../a-b` must never be
+		// able to name a real directory above the skills root. The fixture
+		// deliberately puts one there, with a sentinel inside it.
+		const outside = join(f.home, "main", "a-b");
+		await mkdir(outside, { recursive: true });
+		await writeFile(join(outside, "keep.md"), "sentinel");
+
 		const result = await runOperations(f.deps, [{ action: "delete", name: "../a-b" }]);
 		assert.equal(result.success, false);
 		assert.match(String(result.error), /lowercase letters, digits and hyphens/);
+		assert.equal(await readFile(join(outside, "keep.md"), "utf8"), "sentinel");
 		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), validDoc("a-b"));
+		// Nothing was copied aside either — not under `.batch-*`, and not a
+		// stray copy at the escaped destination.
+		assert.deepEqual(await snapshotEntries(f.deps.snapshotsDir), []);
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("a batch that creates a skill leaves no trace of it when a later operation fails", async () => {
+	const f = await fixture();
+	try {
+		const before = await readFile(join(f.skillsRoot, "c-d", "SKILL.md"), "utf8");
+		const result = await runOperations(f.deps, [
+			{ action: "create", name: "g-h", content: validDoc("g-h") },
+			{ action: "patch", name: "c-d", old_string: "absent", new_string: "x" },
+		]);
+		assert.equal(result.success, false);
+		assert.equal(result.failed_index, 1);
+		// The created skill had no pre-batch state, so the restore removes the
+		// half-written directory rather than copying anything back over it.
+		await assert.rejects(() => stat(join(f.skillsRoot, "g-h")));
+		assert.equal(await readFile(join(f.skillsRoot, "c-d", "SKILL.md"), "utf8"), before);
 	} finally {
 		await f.cleanup();
 	}
@@ -359,6 +421,60 @@ test("a failing audit ledger never blocks the write", async () => {
 	}
 });
 
+test("a failing audit capture never blocks the write", async () => {
+	const f = await fixture();
+	const logged = console.error;
+	console.error = () => undefined;
+	try {
+		// Blobs are named by the sha256 of their own bytes, so pre-creating a
+		// *directory* at a digest makes `storeBlob`'s rename fail for exactly the
+		// content whose capture should fail — and for no other content. That is
+		// the seam that lets the audit captures fail while the gating atomicity
+		// snapshot (which copies the directory, no blobs involved) still succeeds.
+		const original = validDoc("a-b");
+		const patched = original.split("one").join("two");
+
+		// The `before` capture fails, and the write still lands.
+		await mkdir(join(f.deps.snapshotsDir, sha256Of(original)), { recursive: true });
+		const beforeFailed = await runOperations(f.deps, [
+			{ action: "patch", name: "a-b", old_string: "one", new_string: "two" },
+		]);
+		assert.equal(beforeFailed.success, true);
+		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), patched);
+
+		// And the `after` capture fails, with the same outcome. Both digests must
+		// be free first: part one left a directory at the original digest and
+		// stored the patched bytes as a blob.
+		await writeFile(join(f.skillsRoot, "a-b", "SKILL.md"), original);
+		await rm(join(f.deps.snapshotsDir, sha256Of(original)), { recursive: true, force: true });
+		await rm(join(f.deps.snapshotsDir, sha256Of(patched)), { recursive: true, force: true });
+		await mkdir(join(f.deps.snapshotsDir, sha256Of(patched)), { recursive: true });
+		const afterFailed = await runOperations(f.deps, [
+			{ action: "patch", name: "a-b", old_string: "one", new_string: "two" },
+		]);
+		assert.equal(afterFailed.success, true);
+		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), patched);
+
+		// The two failures are visible in the ledger as missing manifests — and
+		// neither one cost the write, which is the best-effort contract.
+		const entries = await listEntries(f.deps);
+		assert.equal(entries.length, 2);
+		assert.deepEqual(entries[0]!.after, []);
+		assert.deepEqual(
+			entries[0]!.before.map((item) => item.path),
+			[join(f.skillsRoot, "a-b", "SKILL.md")],
+		);
+		assert.deepEqual(entries[1]!.before, []);
+		assert.deepEqual(
+			entries[1]!.after.map((item) => item.path),
+			[join(f.skillsRoot, "a-b", "SKILL.md")],
+		);
+	} finally {
+		console.error = logged;
+		await f.cleanup();
+	}
+});
+
 test("a successful batch records one ledger entry with the merged per-skill before", async () => {
 	const f = await fixture();
 	try {
@@ -370,8 +486,15 @@ test("a successful batch records one ledger entry with the merged per-skill befo
 		const entries = await listEntries(f.deps);
 		assert.equal(entries.length, 1);
 		assert.equal(entries[0]!.actor, "user");
+		// `skill`/`action` are the entry's primary pair — the first operation —
+		// and `evidence.operations` is the whole call, in order, so a multi-skill
+		// batch is not recorded as if it only touched `a-b`.
 		assert.equal(entries[0]!.action, "patch");
 		assert.equal(entries[0]!.skill, "a-b");
+		assert.deepEqual(entries[0]!.evidence["operations"], [
+			{ action: "patch", name: "a-b" },
+			{ action: "patch", name: "c-d" },
+		]);
 		assert.deepEqual(
 			entries[0]!.before.map((item) => item.path).sort(),
 			[join(f.skillsRoot, "a-b", "SKILL.md"), join(f.skillsRoot, "c-d", "SKILL.md")].sort(),
@@ -421,6 +544,11 @@ test("a batch's before and after cover the same touched roots", async () => {
 		assert.equal(result.success, true);
 		const [entry] = await listEntries(f.deps);
 		assert.ok(entry);
+		// A mixed batch records both operations, with their own actions, in order.
+		assert.deepEqual(entry.evidence["operations"], [
+			{ action: "patch", name: "a-b" },
+			{ action: "write_file", name: "c-d" },
+		]);
 		assert.deepEqual(
 			entry.before.map((item) => item.path).sort(),
 			[join(f.skillsRoot, "a-b", "SKILL.md"), join(f.skillsRoot, "c-d", "SKILL.md")].sort(),

@@ -191,16 +191,25 @@ export async function runOperations(deps: ManageDeps, operations: readonly Opera
 
 	// The batch is whole, so the atomicity copy is spent.
 	await discardSnapshot(snapshot.snapshot);
+	// WARNING: the audit manifests must stay **per touched root**. Do NOT go back
+	// to capturing `deps.skillsRoot` (or any root above a single skill) here — a
+	// whole-tree capture sweeps in every unrelated skill *and* the snapshot blobs,
+	// and `rollbackEntry` then removes and rewrites files this batch never
+	// touched. `before` and `after` must keep covering the same set of roots.
+	//
 	// `after` mirrors `before`: the same touched roots, now in their new state. A
 	// root the batch deleted is gone, so it is left out — capturing it could only
-	// log an ENOENT line — and a root the batch created is in. Whole-root capture
-	// is deliberately NOT used here: it would sweep in every unrelated skill and
-	// the snapshot blobs, and `rollbackEntry` would then remove and rewrite them.
+	// log an ENOENT line — and a root the batch created is in.
+	//
+	// One entry per batch, as the plan specifies: `action`/`skill` stay the
+	// entry's primary pair and name the FIRST operation, while
+	// `evidence.operations` carries the whole call, in order, so a multi-skill
+	// batch is not misattributed to whichever skill happens to be listed first.
 	await recordMutation(deps, {
 		actor: deps.actor(),
 		action: operations[0]!.action,
 		skill: operations[0]!.name,
-		evidence: {},
+		evidence: { operations: operations.map((operation) => ({ action: operation.action, name: operation.name })) },
 		before,
 		after: await captureAfterAll(deps, await existingRoots(roots)),
 	});
