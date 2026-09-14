@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
+import { descriptorOf, type KvTable } from "@deepseek-ai/dsh-storage-domain";
+import { JsonStorageBackend } from "@deepseek-ai/dsh-storage-json";
 import {
 	BUDDY_DOMAIN_NAME,
 	buddyDomainSpec,
@@ -65,10 +69,15 @@ function domainStub(initial: Record<string, unknown> = {}): DomainStub {
 test("the domain spec is named and versioned", () => {
 	assert.equal(BUDDY_DOMAIN_NAME, "buddy");
 	assert.equal(buddyDomainSpec.name, "buddy");
-	// Version 2 added the three skill tables; `compatibleVersions` keeps a
-	// version 1 install's stored global readable instead of rejecting the open.
-	assert.equal(buddyDomainSpec.version, 2);
-	assert.deepEqual(buddyDomainSpec.compatibleVersions, [1]);
+	// The version must stay 1 while the change is additive: the json backend's
+	// `single` layout rejects any stored/expected mismatch at open, and
+	// `compatibleVersions` is honoured only by the `per-record` layout, so a
+	// bump here would reject an existing install's `buddy.json` outright.
+	assert.equal(buddyDomainSpec.version, 1);
+	// A version 1 spec cannot declare `compatibleVersions` at all — every entry
+	// must be below the current version — and it would not help if it could,
+	// because the json backend consults it only for the `per-record` layout.
+	assert.equal("compatibleVersions" in buddyDomainSpec, false);
 	assert.deepEqual(buddyDomainSpec.global.initial, {});
 });
 
@@ -76,6 +85,48 @@ test("the domain declares the three skill tables", () => {
 	// Storage-unit names, i.e. snake_case (`UNIT_NAME_RE`), NOT the camelCase of
 	// the TypeScript handles that read them.
 	assert.deepEqual(Object.keys(buddyDomainSpec.tables).sort(), ["review_usage", "skill_ledger", "skill_usage"]);
+});
+
+test("a version 1 install's buddy.json still opens through the real json backend", async () => {
+	// Every other test here drives a stub facility whose `open` never looks at
+	// the version, so none of them can see a stored-stamp mismatch — the exact
+	// failure that would silently disable the plugin on an existing install.
+	// This test writes the document a pre-skill install already has on disk
+	// (`{unit, global, tables}` stamped version 1) and opens it with the real
+	// backend the `json` storage row mounts.
+	const root = await mkdtemp(join(tmpdir(), "dsh-buddy-domain-"));
+	try {
+		await writeFile(
+			join(root, `${BUDDY_DOMAIN_NAME}.json`),
+			`${JSON.stringify(
+				{
+					unit: { name: BUDDY_DOMAIN_NAME, version: 1 },
+					global: { lastPersonaWriteAt: "2026-01-01T00:00:00.000Z" },
+					tables: {},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		const backend = new JsonStorageBackend(root);
+		try {
+			const unit = await backend.kv.open(descriptorOf(buddyDomainSpec));
+			const snapshot = await unit.loadAll();
+			// The value the older install wrote survives the open...
+			assert.deepEqual(snapshot.global, { lastPersonaWriteAt: "2026-01-01T00:00:00.000Z" });
+			// ...and the three tables added since are served empty, not missing:
+			// a v1 document has no `tables` entries for them.
+			assert.deepEqual(Object.keys(snapshot.tables).sort(), ["review_usage", "skill_ledger", "skill_usage"]);
+			assert.deepEqual(snapshot.tables["skill_usage"], {});
+			await unit.close();
+		} finally {
+			// The unit is closed above; the backend drain is belt and braces so a
+			// failed assertion still releases the temp root.
+			await backend.close();
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
 });
 
 test("a usage record round-trips and defaults are explicit", async () => {
