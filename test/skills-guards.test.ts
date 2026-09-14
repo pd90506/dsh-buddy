@@ -112,6 +112,9 @@ function reviewDeps(
 test("only an agent-created record is curator-managed", () => {
 	assert.equal(isCuratorManaged({ created_by: "agent" }), true);
 	assert.equal(isCuratorManaged({ created_by: null }), false);
+	// A truthy-but-not-agent value must not pass: the rule is `=== "agent"`, not
+	// "some provenance exists".
+	assert.equal(isCuratorManaged({ created_by: "user" }), false);
 	assert.equal(isCuratorManaged({}), false);
 	assert.equal(isCuratorManaged(undefined), false);
 });
@@ -138,12 +141,20 @@ test("read-before-write applies only to the review and only to the target", () =
 	assert.equal(foreground.allow, true);
 });
 
-test("read-before-write covers patch, edit, write_file and remove_file", () => {
-	for (const action of ["patch", "edit", "write_file", "remove_file"] as const) {
+test("read-before-write covers patch, edit, delete, write_file and remove_file", () => {
+	for (const action of ["patch", "edit", "delete", "write_file", "remove_file"] as const) {
 		const verdict = backgroundWriteGuard({ reviewSession: true, record: { created_by: "agent", pinned: false }, pinned: false, action, skill: "a-b", readSet: new Set() });
 		assert.equal(verdict.allow, false, `${action} must need a read marker`);
 		assert.match(verdict.allow === false ? verdict.reason : "", /read/i);
 	}
+});
+
+test("a review may delete a managed skill it has read", () => {
+	// The companion of the delete case above: the read marker is the only thing
+	// standing between an unread delete and the same delete, so an accidental
+	// always-refuse for `delete` must not pass either.
+	const allowed = backgroundWriteGuard({ reviewSession: true, record: { created_by: "agent", pinned: false }, pinned: false, action: "delete", skill: "a-b", readSet: new Set(["a-b"]) });
+	assert.equal(allowed.allow, true);
 });
 
 test("a read marker for one skill does not license another", () => {
@@ -157,10 +168,44 @@ test("a review may create a skill it has not read", () => {
 	assert.equal(fresh.allow, true);
 });
 
-test("pinned outranks provenance and the read marker", () => {
-	const verdict = backgroundWriteGuard({ reviewSession: true, record: { created_by: "agent", pinned: true }, pinned: true, action: "patch", skill: "a-b", readSet: new Set(["a-b"]) });
-	assert.equal(verdict.allow, false);
-	assert.match(verdict.allow === false ? verdict.reason : "", /pinned/);
+test("the refusal order is pinned, then provenance, then the read marker", () => {
+	// Each case has **two** refusals genuinely competing and no marker or flag
+	// that would satisfy the later ones, so moving a check changes what is
+	// reported — a reordering fails here on the message, not merely on the
+	// boolean.
+	const pinnedHuman = backgroundWriteGuard({ reviewSession: true, record: { created_by: null, pinned: true }, pinned: true, action: "patch", skill: "a-b", readSet: new Set() });
+	assert.equal(pinnedHuman.allow, false);
+	const pinnedReason = pinnedHuman.allow === false ? pinnedHuman.reason : "";
+	assert.match(pinnedReason, /pinned/);
+	// Not the provenance refusal: `adopt` cannot unblock a pin, so that message
+	// would send the caller down a dead end. And not the read refusal either.
+	assert.doesNotMatch(pinnedReason, /adopt|read/i);
+
+	const unmanagedUnread = backgroundWriteGuard({ reviewSession: true, record: { created_by: null, pinned: false }, pinned: false, action: "patch", skill: "a-b", readSet: new Set() });
+	assert.equal(unmanagedUnread.allow, false);
+	const unmanagedReason = unmanagedUnread.allow === false ? unmanagedUnread.reason : "";
+	assert.match(unmanagedReason, /not curator-managed/);
+	// Provenance outranks the read marker: `adopt` is the actionable next step,
+	// and telling the caller to read first would be the wrong instruction.
+	assert.doesNotMatch(unmanagedReason, /read/i);
+
+	const managedUnread = backgroundWriteGuard({ reviewSession: true, record: { created_by: "agent", pinned: false }, pinned: false, action: "patch", skill: "a-b", readSet: new Set() });
+	assert.equal(managedUnread.allow, false);
+	assert.match(managedUnread.allow === false ? managedUnread.reason : "", /read/i);
+});
+
+test("the pin is honoured from either source, the input or the row", () => {
+	// Input-only: the row says unpinned, so this fails if the guard consults only
+	// `record.pinned`.
+	const inputOnly = backgroundWriteGuard({ reviewSession: true, record: { created_by: "agent", pinned: false }, pinned: true, action: "patch", skill: "a-b", readSet: new Set(["a-b"]) });
+	assert.equal(inputOnly.allow, false);
+	assert.match(inputOnly.allow === false ? inputOnly.reason : "", /pinned/);
+
+	// Row-only: the caller's resolved flag says unpinned, so this fails if the
+	// guard consults only `input.pinned`.
+	const rowOnly = backgroundWriteGuard({ reviewSession: true, record: { created_by: "agent", pinned: true }, pinned: false, action: "patch", skill: "a-b", readSet: new Set(["a-b"]) });
+	assert.equal(rowOnly.allow, false);
+	assert.match(rowOnly.allow === false ? rowOnly.reason : "", /pinned/);
 });
 
 test("markRead is per review session and idempotent; resetReadSet forgets one session", () => {
