@@ -107,8 +107,8 @@ interface Mounted {
 	 * and never from the preset row. Empty when no `skills` registry is present.
 	 */
 	readonly providerNames: string[];
-	/** How many times any promoted registration's `control.invalidate()` was called. */
-	promotedInvalidations(): number;
+	/** How many times one registration's `control.invalidate()` was called, by provider name. */
+	invalidationsFor(provider: string): number;
 	/** Every `subagents.start` call, in order. */
 	readonly started: Started[];
 	/** Every `subagents.interrupt` call, in order. */
@@ -311,7 +311,7 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		/** The providers the row registered, and the controls it was handed. */
 		const providerNames: string[] = [];
 		const providerControls = new Map<string, { readonly signal: AbortSignal; invalidate(): void }>();
-		const promotedCounters = { invalidations: 0 };
+		const invalidations = new Map<string, number>();
 		const started: Started[] = [];
 		const interrupted: string[] = [];
 		const authorities: unknown[] = [];
@@ -358,13 +358,18 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			sibling("fake-skills", (ctx) =>
 				give(ctx, "skills", {
 					registerProvider: (create: (control: unknown) => { readonly name: string }) => {
+						// The name is only known once the factory returns, so the holder
+						// is filled in immediately after and read when `invalidate` runs.
+						let name = "";
 						const control = {
 							signal: new AbortController().signal,
 							invalidate: (): void => {
-								promotedCounters.invalidations += 1;
+								const key = name === "" ? "unknown" : name;
+								invalidations.set(key, (invalidations.get(key) ?? 0) + 1);
 							},
 						};
 						const provider = create(control);
+						name = provider.name;
 						providerNames.push(provider.name);
 						providerControls.set(provider.name, control);
 						return () => {
@@ -521,7 +526,7 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			skills: service,
 			contributions,
 			providerNames,
-			promotedInvalidations: () => promotedCounters.invalidations,
+			invalidationsFor: (provider) => invalidations.get(provider) ?? 0,
 			started,
 			interrupted,
 			authorities,
@@ -762,13 +767,13 @@ test("a visibility change invalidates the promoted catalog", async () => {
 	// back as done while ordinary sessions keep seeing the old catalog.
 	const mounted = await mountSkills();
 	await writeSkill(mounted, "alpha-skill");
-	assert.equal(mounted.promotedInvalidations(), 0, "nothing has been promoted yet");
+	assert.equal(mounted.invalidationsFor("buddy-promoted"), 0, "nothing has been promoted yet");
 	const result = (await dispatch(serviceOf(mounted), "visibility", ["alpha-skill", "global"])) as {
 		success: boolean;
 		message: string;
 	};
 	assert.equal(result.success, true, result.message);
-	assert.equal(mounted.promotedInvalidations(), 1, "the promoted catalog must be refreshed");
+	assert.equal(mounted.invalidationsFor("buddy-promoted"), 1, "the promoted catalog must be refreshed");
 	await mounted.dispose();
 });
 
@@ -779,7 +784,7 @@ test("a refused visibility change does not invalidate the catalog", async () => 
 		success: boolean;
 	};
 	assert.equal(result.success, false);
-	assert.equal(mounted.promotedInvalidations(), 0);
+	assert.equal(mounted.invalidationsFor("buddy-promoted"), 0);
 	await mounted.dispose();
 });
 
@@ -803,7 +808,11 @@ test("a write that carries a visibility line also invalidates the promoted catal
 	assert.equal(created.success, true, created.message);
 	const listed = (await dispatch(serviceOf(mounted), "listSkills", [])) as Record<string, unknown>[];
 	assert.equal(listed.find((entry) => entry["name"] === "alpha-skill")?.["visibility"], "global");
-	assert.equal(mounted.promotedInvalidations(), 1, "the promoted provider's contribution changed");
+	assert.equal(mounted.invalidationsFor("buddy-promoted"), 1, "the promoted provider's contribution changed");
+	// No preset row is mounted here, so no buddy control was ever handed over:
+	// refreshing both catalogs must be a no-op for the one that does not exist
+	// rather than a throw or a silently skipped registration.
+	assert.equal(mounted.invalidationsFor("buddy-skills"), 0);
 	await mounted.dispose();
 });
 

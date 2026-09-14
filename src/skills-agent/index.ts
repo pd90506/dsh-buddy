@@ -142,6 +142,8 @@ interface SkillsPlane {
 	noteAgentRowMounted(): void;
 	/** Record one skill load: the usage bump and the read mark together. */
 	noteSkillUsed(sessionId: string, skill: string): Promise<void>;
+	/** Take ownership of this row's provider registration control. */
+	noteBuddyControl(control: SkillProviderControl): void;
 	/** Apply one batch of `skill_manage` operations through the write path. */
 	manage(
 		actor: SkillPlaneAgent,
@@ -223,17 +225,20 @@ export function apply(ctx: AgentContext): void {
 	// here too would put it in the buddy layer and make a panel promotion a
 	// silent no-op everywhere else — the failure §5.1 exists to remove.
 	//
-	// The factory is also where the **control** is captured: it is
-	// registration-scoped, it is the only invalidation entry point there is
-	// (there is no public `ctx.skills.invalidate()`), and the registry caches
-	// completed catalogs — so without it a skill the model just wrote stays
-	// invisible to the next `skill` call.
-	let invalidate: () => void = () => undefined;
+	// The factory is also where the **control** is captured, and it goes straight
+	// to the host service: the control is registration-scoped, it is the only
+	// invalidation entry point there is (there is no public
+	// `ctx.skills.invalidate()`), the registry caches completed catalogs, and the
+	// host row owns every write path that can make this catalog stale — the
+	// panel's `manage` and `setVisibility` as much as this row's tool, which is
+	// only a call into `manage`. Handing it over keeps one owner; a second, local
+	// copy here would invalidate the buddy catalog twice per tool write and could
+	// never cover the panel path, which does not come through this row at all.
 	if (skills !== undefined) {
 		ctx.effect(
 			() =>
 				skills.registerProvider((control: SkillProviderControl) => {
-					invalidate = control.invalidate;
+					plane.noteBuddyControl(control);
 					return createBuddyProvider({ skillsRoot: plane.skillsRoot() });
 				}),
 			"dsh-buddy-skills-agent: buddy provider",
@@ -243,7 +248,7 @@ export function apply(ctx: AgentContext): void {
 	ctx.effect(() => {
 		const tools = ctx.get("tools") as ToolRegistry | undefined;
 		if (tools === undefined) return () => undefined;
-		return tools.register(skillManageTool(plane, () => invalidate()));
+		return tools.register(skillManageTool(plane));
 	}, "dsh-buddy-skills-agent: skill_manage");
 
 	// `session/event` is an **emit**, not a waterfall: the listener takes
@@ -338,11 +343,9 @@ export function apply(ctx: AgentContext): void {
  * declaration is required by the contract and is what renders the model-facing
  * content of a successful call.
  * @param plane - the host service the tool forwards to.
- * @param invalidate - invalidate the provider catalogs, as a callback so the
- *   tool always reads the control the live registration installed.
  * @returns the registry-ready definition.
  */
-function skillManageTool(plane: SkillsPlane, invalidate: () => void): unknown {
+function skillManageTool(plane: SkillsPlane): unknown {
 	return defineTool({
 		name: TOOL_NAME,
 		description:
@@ -406,12 +409,13 @@ function skillManageTool(plane: SkillsPlane, invalidate: () => void): unknown {
 			// the model curated, and a batch the guard then refuses is not a reason
 			// to make the automatic review fire as if nothing had happened.
 			plane.noteSkillManageCalled(agent.id);
+			// No invalidation here: `manage` is the host row's write path and
+			// refreshes **both** catalogs on success, because the two tiers read the
+			// same skills root and one write can move a skill between them. A second
+			// call from this side would be the same invalidation twice and would
+			// still not be the one that matters for a panel write, which never
+			// passes through this tool.
 			const outcome = await plane.manage(agent, args.operations);
-			// The registry caches completed catalogs, and the control captured at
-			// registration is the only invalidation entry point there is. Without
-			// this the skill the model just created stays invisible to the next
-			// `skill` call, which reads to the model as a write that did not work.
-			if (outcome.success) invalidate();
 			return { success: outcome.success, message: outcome.message };
 		},
 	});
