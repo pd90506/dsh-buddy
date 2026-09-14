@@ -100,7 +100,7 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 | 平面 | 内容 |
 |---|---|
 | 文件 | `<home>/main/skills/<name>/SKILL.md` + `references/ templates/ scripts/ assets/`；内容寻址快照 `<home>/main/skills/.snapshots/blobs/<sha256>` |
-| storage domain `buddy` | `skillUsage` 表（hermes `.usage.json` 字段逐个照抄）、`skillLedger` 表、`reviewUsage` 表（§8.4） |
+| storage domain `buddy` | `skill_usage` 表（hermes `.usage.json` 字段逐个照抄）、`skill_ledger` 表、`review_usage` 表（§8.4）。**表名是存储单元名，受 `UNIT_NAME_RE`（`/^[a-z][a-z0-9_]*$/`）约束，必须 snake_case**——代码侧的 handle 字段与 TS 类型仍是 camelCase |
 | settings `buddy`（扩展现有 schema） | `skills.enabled`、`skills.creationNudgeInterval`(10)、`skills.reviewProvider`/`skills.reviewModel`（空 = 跟随父模型）、`skills.maxInputTokens`(600000)、`skills.maxReviewSteps`(16)、`skills.writeApproval`(false)、`skills.ledger`(true) |
 
 技能保持纯文件的理由（沿用第 1 期设计文档 §3）：`skill_manage` 自己做文件 I/O，因此技能可 grep、可 git、可手改、可备份。
@@ -278,7 +278,7 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 
 ### 9.1 字段与写入点
 
-字段名逐个照抄（§2.3），存在 storage domain 的 `skillUsage` 表。**有意偏差**：`$H` 放 `.usage.json` 文件，我们按仓库三平面铁律放 domain（派生态）。**后果要记住**：`$H` 的整树 tar.gz 快照**包含** `.usage.json`，整树回滚能恢复遥测；我们的领域表不在文件快照里，所以 3b 做整树快照时**必须显式把领域表一起快照**，否则会出现"文件回去了、账目没回去"。
+字段名逐个照抄（§2.3），存在 storage domain 的 `skill_usage` 表。**有意偏差**：`$H` 放 `.usage.json` 文件，我们按仓库三平面铁律放 domain（派生态）。**后果要记住**：`$H` 的整树 tar.gz 快照**包含** `.usage.json`，整树回滚能恢复遥测；我们的领域表不在文件快照里，所以 3b 做整树快照时**必须显式把领域表一起快照**，否则会出现"文件回去了、账目没回去"。
 
 写入点（照抄 `$H` 的时机）：
 
@@ -298,10 +298,10 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 
 ### 9.2 review 用量归属（照 hermes 的机制，不改父会话日志）
 
-每次 review 跑完，把用量写进领域的 `reviewUsage` 表：父会话 id、子会话 id、provider、model、step 数、`inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、结果、时间。
+每次 review 跑完，把用量写进领域的 `review_usage` 表：父会话 id、子会话 id、provider、model、step 数、`inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、结果、时间。
 
 - `$H` 的对应机制就是**它自己的旁表**（SQLite 的 `session_model_usage`，`record_auxiliary_usage(session_id, task="background_review")`），**不动 transcript**（fork 的 `_session_db = None`）。
-- **明确偏差（可见性）**：DSH 的 stock token 投影只折**会话自己日志里 provider 上报的用量**（§2.2），所以 **DSH 原生会话页的成本视图不会包含这笔**。要进那个视图只能伪造模型消息，**不做**。可见位置是：Buddy 面板上每条对话的"自我改进花费" + `reviewUsage` 表。
+- **明确偏差（可见性）**：DSH 的 stock token 投影只折**会话自己日志里 provider 上报的用量**（§2.2），所以 **DSH 原生会话页的成本视图不会包含这笔**。要进那个视图只能伪造模型消息，**不做**。可见位置是：Buddy 面板上每条对话的"自我改进花费" + `review_usage` 表。
 - **`sessionTelemetry` 不是可用路径**（已核实，订正先前说法）：它是 **backend 契约**（`SessionTelemetryBackend`），`emit()` **由 coordinator 调用、不是插件接口**；coordinator 的采集只有三条路——会话 firehose（每个规范事件一条 ledger 记录）、`agent/error` 转发的 `agent-error` ops 记录、按需 `captureSession()` 重放规范日志（`dsh-session-telemetry/lib/types/coordinator.d.ts:29-100`）。**没有"插件自报一条 ops 记录"的 API**。即便有，它也是**出站遥测**（给分析后端用）而不是本地成本视图，并且受 `sharing: SessionTelemetrySharingStatus` 约束——分享关掉就发进空气。
 - 备选（已评估并否决）：往父会话日志追加一条自有事件。DSH 允许，但**必须带 `ignorable` 标记**且没有事件名注册 API（§2.2），而 `$H` 自己也没动 transcript——用更重、更险的机制换不到任何东西，故不采用。
 - **两条实现约束**：(1) **review 跑完时父会话可能已经结束或被销毁**，所以记录写领域表（不依赖活会话）——这也是不选日志路径的第二个理由；(2) **归属必须放在 `finally` 里**：`$H` 专门保证"一个烧了 token 然后才抛异常的 fork 也要归属"（其 issue #87250），取消与失败路径同样要记。
@@ -314,7 +314,7 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 |---|---|
 | 列技能：名字 / 描述 / 状态 / 使用次数 / 最后使用 / 是否 pinned / 是否归自动管 | `hermes curator list`、`list-unmanaged` |
 | pin / unpin | `hermes curator pin` |
-| 看账本（`skillLedger`） | `hermes curator ledger` |
+| 看账本（`skill_ledger`） | `hermes curator ledger` |
 | 一键回滚到某条 | `hermes curator rollback <entry-id>` |
 | adopt（把自己写的技能交给自动管理） | `hermes curator adopt` |
 | 提升可见性 buddy → project → global（**仅人能点**） | 本仓库设计文档 §7.1 的既有决定（`$H` 无对应物） |
@@ -409,7 +409,7 @@ curator 的 **pause / run-now** 属于 3b（`$H` 有 `PUT /api/curator/paused`�
 5. **cache 实证**：`cacheReadTokens` > 0，证明同模型 fork 吃到前缀缓存。
 6. 建一个技能 → 改它 → 从面板回滚 → 文件回到改动前。
 7. 前台建的技能（`created_by=None`）在 review 里被拒绝改写并提示 adopt；pinned 的同样被拒。
-8. 改 `created_by` 的手检：`skillUsage` 表里前台创建与 review 创建可区分。
+8. 改 `created_by` 的手检：`skill_usage` 表里前台创建与 review 创建可区分。
 9. 验完 `find ~/.dsh -newermt '<probe start>'` 为空。
 
 ## 14. 交付物清单
@@ -420,7 +420,7 @@ curator 的 **pause / run-now** 属于 3b（`$H` 有 `PUT /api/curator/paused`�
 | preset 行 | `src/skills-agent/`（新增，导出 `./skills-agent`）+ `assets/preset/agent.cordis.yml` |
 | 生成物语义 | `src/store/preset.ts`（`syncPreset` + 标记 + 备份） |
 | settings | `src/config.ts` 新增 `skills` 段 |
-| 领域 | `src/store/domain.ts` 新增 `skillUsage` / `skillLedger` / `reviewUsage` |
+| 领域 | `src/store/domain.ts` 新增 `skill_usage` / `skill_ledger` / `review_usage` 三张表 |
 | 幽灵过滤 | `src/persona/index.ts` 的 `listSessions` |
 | 面板 | `src/client/` 新增 Skills 模块 + 可见性开关 |
 | 文档 | 本文件；`CLAUDE.md:58`；设计文档 §5/§9 |
