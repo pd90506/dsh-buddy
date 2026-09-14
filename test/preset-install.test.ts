@@ -14,11 +14,32 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { GENERATED_MARKER, presetTargetDir, resolveTemplateDir, syncPreset } from "../src/store/preset.ts";
+import {
+	GENERATED_MARKER,
+	presetOwnership,
+	presetTargetDir,
+	resolveTemplateDir,
+	syncPreset,
+} from "../src/store/preset.ts";
+
+/**
+ * Absolute path to one file of the REAL historical template.
+ *
+ * Synthetic bytes can never hash into the published-template table, so the
+ * adoption path cannot be reached with a fixture this file invents: these bytes
+ * are the ones `git show 59b9e98:assets/preset/...` produced, i.e. exactly what
+ * the plugin left in a real `~/.dsh/.agent-presets/buddy/` before it wrote
+ * markers. The test is therefore falsifiable against the real machine's state.
+ * @param name - the template file name.
+ * @returns the fixture's absolute path.
+ */
+function legacyFixture(name: string): string {
+	return join(dirname(fileURLToPath(import.meta.url)), "fixtures", "preset-legacy", name);
+}
 
 /** sha256 hex of a file's bytes — the value the marker records per template file. */
 async function sha256(path: string): Promise<string> {
@@ -168,6 +189,111 @@ test("a hand-edited marked install is backed up before being overwritten", async
 		assert.equal(await syncPreset(f.target, f.template), "synced");
 		assert.equal(await readFile(join(f.target, "agent.cordis.yml"), "utf8"), "newer\n");
 		assert.equal(await readFile(join(f.target, "agent.cordis.yml.bak"), "utf8"), "hand edited\n");
+	} finally {
+		await f.cleanup();
+	}
+});
+
+// ── the legacy install this plugin itself wrote before it wrote markers ────
+//
+// The old `installPreset` never wrote a marker, so the directory the plugin
+// installed is byte-identical to a template it published and still looks like
+// someone else's hand-written preset. Under "unmarked = the user's" that
+// directory would be `kept` forever and every later row would silently never
+// arrive. The rule that recovers it has to be strict — it may only claim bytes
+// this plugin provably published — because a wrong claim overwrites a human's
+// preset.
+
+test("a pristine legacy install is adopted and upgraded, not left alone", async () => {
+	const f = await fixture();
+	try {
+		await mkdir(f.target, { recursive: true });
+		await copyFile(legacyFixture("agent.cordis.yml"), join(f.target, "agent.cordis.yml"));
+		await copyFile(legacyFixture("preset.yml"), join(f.target, "preset.yml"));
+		// Before the claim it is indistinguishable from a hand-written preset.
+		assert.equal(await presetOwnership(f.target), "user");
+		assert.equal(await syncPreset(f.target, f.template), "synced");
+		// The claim must have MARKED the directory and upgraded its files, and
+		// it must have done so silently: the bytes it overwrote were its own,
+		// so there is nothing to preserve and no `.bak` to leave behind.
+		assert.equal(existsSync(join(f.target, GENERATED_MARKER)), true);
+		assert.equal(
+			await readFile(join(f.target, "agent.cordis.yml"), "utf8"),
+			await readFile(f.templateFile("agent.cordis.yml"), "utf8"),
+		);
+		assert.equal(existsSync(join(f.target, "agent.cordis.yml.bak")), false);
+		assert.equal(await presetOwnership(f.target), "plugin");
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("one hand-edited file makes the legacy directory the user's, and it is reported", async () => {
+	const f = await fixture();
+	try {
+		await mkdir(f.target, { recursive: true });
+		await copyFile(legacyFixture("agent.cordis.yml"), join(f.target, "agent.cordis.yml"));
+		// Not bytes this plugin ever published, so the directory is the user's.
+		await writeFile(join(f.target, "preset.yml"), "mine\n", "utf8");
+		assert.equal(await syncPreset(f.target, f.template), "kept");
+		assert.equal(existsSync(join(f.target, GENERATED_MARKER)), false);
+		assert.equal(await readFile(join(f.target, "preset.yml"), "utf8"), "mine\n");
+		// And that verdict has to reach the panel, not just a log line.
+		assert.equal(await presetOwnership(f.target), "user");
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("a legacy directory with one extra entry is not claimed", async () => {
+	// The entry set must match the template exactly. A `.bak` beside a pristine
+	// legacy pair means a human was in here — the plugin's own sync never
+	// leaves a backup next to files it wrote itself.
+	const f = await fixture();
+	try {
+		await mkdir(f.target, { recursive: true });
+		await copyFile(legacyFixture("agent.cordis.yml"), join(f.target, "agent.cordis.yml"));
+		await copyFile(legacyFixture("preset.yml"), join(f.target, "preset.yml"));
+		await writeFile(join(f.target, "agent.cordis.yml.bak"), "leftover\n", "utf8");
+		assert.equal(await syncPreset(f.target, f.template), "kept");
+		assert.equal(existsSync(join(f.target, GENERATED_MARKER)), false);
+		assert.equal(
+			await readFile(join(f.target, "agent.cordis.yml"), "utf8"),
+			await readFile(legacyFixture("agent.cordis.yml"), "utf8"),
+		);
+		assert.equal(await readFile(join(f.target, "agent.cordis.yml.bak"), "utf8"), "leftover\n");
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("a directory byte-identical to the current template is marked without a rewrite", async () => {
+	// The current template's own hash belongs in the table: an install that is
+	// already up to date and merely unmarked needs the marker, not a rewrite.
+	// A table that stopped at the previous release would leave this `kept`,
+	// unmarked and stuck — and would return `kept` for every future release too.
+	const f = await fixture();
+	try {
+		await mkdir(f.target, { recursive: true });
+		await copyFile(join(REAL_TEMPLATE_DIR, "agent.cordis.yml"), join(f.target, "agent.cordis.yml"));
+		await copyFile(join(REAL_TEMPLATE_DIR, "preset.yml"), join(f.target, "preset.yml"));
+		assert.equal(await syncPreset(f.target, REAL_TEMPLATE_DIR), "kept");
+		assert.equal(existsSync(join(f.target, GENERATED_MARKER)), true);
+		assert.equal(existsSync(join(f.target, "agent.cordis.yml.bak")), false);
+		assert.equal(await presetOwnership(f.target), "plugin");
+	} finally {
+		await f.cleanup();
+	}
+});
+
+test("presetOwnership classifies without throwing, and never reads a missing directory as the user's", async () => {
+	const f = await fixture();
+	try {
+		// Absent and empty are both "nothing here yet": the panel says so
+		// instead of claiming the user owns a directory that does not exist.
+		assert.equal(await presetOwnership(f.target), "absent");
+		await mkdir(f.target, { recursive: true });
+		assert.equal(await presetOwnership(f.target), "absent");
 	} finally {
 		await f.cleanup();
 	}

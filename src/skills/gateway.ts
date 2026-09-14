@@ -14,6 +14,10 @@
  * @module dsh-buddy/skills/gateway
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+// `import type`, deliberately: a value import would inline the whole
+// `src/store/preset.ts` module — and its `node:crypto` / `node:fs` imports —
+// into `lib/skills.js`, which ships to the browser's host half as its own file.
+import type { PresetOwnership } from "../store/preset.ts";
 
 /** Typert wire namespace, and the name the panel calls. */
 export const BUDDY_SKILLS_SERVICE = "buddySkills";
@@ -116,6 +120,15 @@ export interface SkillsStatusView {
 	readonly synced: boolean;
 	/** `true` while the not-synced notice is showing. */
 	readonly missed: boolean;
+	/**
+	 * Who the `buddy` preset directory belongs to.
+	 *
+	 * The other half of the same diagnosis: a preset id occupied by the user's
+	 * own hand-written directory is never synced by this plugin, so the row can
+	 * never arrive and no heartbeat will ever clear `missed`. `"user"` is what
+	 * turns that into something the panel can say out loud.
+	 */
+	readonly preset: PresetOwnership;
 }
 
 /** The outcome of one panel write, plus the listing that follows it. */

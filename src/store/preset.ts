@@ -58,6 +58,51 @@ const MARKER_VERSION = 1;
 /** What a hand-edited file is preserved as before it is overwritten. */
 const BACKUP_SUFFIX = ".bak";
 
+/**
+ * Who a `buddy` preset directory belongs to.
+ *
+ * A panel needs this because the two failure modes look identical from the
+ * outside — no `buddy-skills-agent` row ever arrives — and the fix differs:
+ * `"plugin"` means the plugin owns the directory and will sync it on the next
+ * release, `"user"` means a hand-written preset occupies the id and the plugin
+ * will never touch it, so only the user can resolve it.
+ */
+export type PresetOwnership = "absent" | "plugin" | "user";
+
+/**
+ * The sha256 of every template file this plugin has ever published.
+ *
+ * **Append to this table whenever a template file's bytes change.** It is what
+ * makes a pre-marker install provable as the plugin's own output: the old
+ * `installPreset` wrote no marker, so a directory the plugin itself installed
+ * looks exactly like a hand-written one, and without this record the ownership
+ * rule ("unmarked = the user's") keeps it forever — silently freezing every
+ * later row out of that install.
+ *
+ * Deliberately an explicit list. Scanning a git history or fetching a hash
+ * cannot work: neither exists on a user's machine, and an unbounded rule
+ * ("anything that looks like our template") is how a hand-edit gets
+ * overwritten. Every entry was verified against the commit that published it.
+ */
+const PUBLISHED_TEMPLATE_HASHES: Record<string, readonly string[]> = {
+	"agent.cordis.yml": [
+		// 9ac9ca2 (provisional)
+		"451ccc7ed34c02282aeb5e1f2b441e1951b848596d10bfec8d63e60aab180337",
+		// 9d393f7
+		"b7a3d0a1fba93d47fe5be26951946c21bf4c071c7cad37cca0bb0dc85a8667d8",
+		// 0b7cad8
+		"67a8042208047bd7f3c9000fd5f68999c92a42c537e21103ad3c457e3a5ef83d",
+		// 3a0028c
+		"ee5a74423496f7cbc38452ae19e24f491219d5498e8f3b39a2653a566f0e4ff5",
+		// 59b9e98 — the bytes a real machine's unmarked install held
+		"731b2258190785f8827f5c68a5e742864fcafc59bbb707586fbb95c8fa7c58b8",
+		// d4e1607 — the template Task 10 published, and the current one
+		"2c5e5f59990e494026fed63093e68fb4f3b216e4d544d19f6158b7c51e16f291",
+	],
+	// `preset.yml` has never changed, so it has exactly one published value.
+	"preset.yml": ["eaf479947aa348633ce2d0ca44494f26433e832086f7576e4e7e23291914267c"],
+};
+
 /** What a sync did to the preset's files. */
 export type PresetSyncResult = "installed" | "synced" | "kept" | "backed-up-synced";
 
@@ -132,6 +177,50 @@ async function writeMarker(targetDir: string): Promise<void> {
 }
 
 /**
+ * Whether an unmarked, non-empty directory is provably this plugin's own old
+ * output.
+ *
+ * Strict on purpose — a wrong claim overwrites a human's preset, while a missed
+ * claim only leaves an install the user can delete. Both conditions must hold:
+ * the entry set is exactly {@link PRESET_FILES} (an extra `.bak` beside a
+ * pristine pair means a human was in there; the plugin's own sync never leaves
+ * one next to files it wrote itself), and every file's sha256 appears in that
+ * file's row of {@link PUBLISHED_TEMPLATE_HASHES}.
+ * @param targetDir - the preset directory.
+ * @param entries - its current entry names, as `readdir` reported them.
+ * @returns `true` when the directory may be claimed and marked.
+ */
+async function isLegacyInstall(targetDir: string, entries: readonly string[]): Promise<boolean> {
+	if (entries.length !== PRESET_FILES.length) return false;
+	if (!PRESET_FILES.every((file) => entries.includes(file))) return false;
+	for (const file of PRESET_FILES) {
+		const published = PUBLISHED_TEMPLATE_HASHES[file];
+		if (published === undefined) return false;
+		const current = await hashFile(join(targetDir, file)).catch(() => undefined);
+		if (current === undefined || !published.includes(current)) return false;
+	}
+	return true;
+}
+
+/**
+ * Classify the `buddy` preset directory for the panel.
+ *
+ * Follows {@link syncPreset}'s own decision order and, like it, is total: a
+ * missing, unreadable or empty directory is `"absent"` rather than an error, so
+ * a panel can ask at any time without a try/catch. Only the marker decides
+ * between `"plugin"` and `"user"` here — an unmarked directory is the user's
+ * until a sync proves otherwise and marks it, which is also why this reports
+ * `"user"` for a pristine legacy install that has not been synced yet.
+ * @param targetDir - the preset directory.
+ * @returns who the directory belongs to.
+ */
+export async function presetOwnership(targetDir: string): Promise<PresetOwnership> {
+	const entries = await readdir(targetDir).catch(() => undefined);
+	if (entries === undefined || entries.length === 0) return "absent";
+	return existsSync(join(targetDir, GENERATED_MARKER)) ? "plugin" : "user";
+}
+
+/**
  * Where an authored preset named `buddy` belongs.
  * @param dshHome - the resolved harness home.
  * @returns the preset directory path.
@@ -153,12 +242,19 @@ export function presetTargetDir(dshHome: string): string {
  *    nothing to preserve, which is the distinction the pre-marker
  *    implementation drew between "no entries" and "one file present";
  * 2. it exists with entries but no marker → it is the user's own `buddy`
- *    preset; touch nothing, return `kept`;
+ *    preset, with one exception: when the entry set is exactly
+ *    {@link PRESET_FILES} and every file's sha256 is one this plugin published
+ *    ({@link PUBLISHED_TEMPLATE_HASHES}), it is this plugin's own pre-marker
+ *    output — the old installer wrote no marker — so it is CLAIMED: the marker
+ *    is written with the on-disk bytes as the baseline, and the sync continues
+ *    through case 3. Anything else is the user's: touch nothing, return `kept`;
  * 3. it exists with the marker → compare file by file. An identical file is
  *    left alone. A differing file is overwritten; if its current bytes do not
  *    hash to the baseline (or it has no baseline entry, or the marker could
  *    not be trusted at all) it cannot be proven unedited, so it is copied to
- *    `<file>.bak` first — `backed-up-synced` — otherwise `synced`.
+ *    `<file>.bak` first — `backed-up-synced` — otherwise `synced`. A claimed
+ *    directory's baseline is what it held a moment ago, so its upgrade is
+ *    silent: no `.bak`.
  *
  * @param targetDir - where the preset belongs.
  * @param templateDir - the shipped template directory.
@@ -175,7 +271,13 @@ export async function syncPreset(targetDir: string, templateDir: string): Promis
 		return "installed";
 	}
 	const markerPath = join(targetDir, GENERATED_MARKER);
-	if (!existsSync(markerPath)) return "kept";
+	if (!existsSync(markerPath)) {
+		if (!(await isLegacyInstall(targetDir, existing))) return "kept";
+		// The marker's baseline is written from what is on disk NOW, which is
+		// the legacy bytes, so case 3 sees files that still match their own
+		// baseline and upgrades them without a backup.
+		await writeMarker(targetDir);
+	}
 	const baseline = await readBaseline(markerPath);
 	let wrote = false;
 	let backedUp = false;
