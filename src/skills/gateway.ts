@@ -36,8 +36,21 @@ export const BUDDY_SKILLS_SERVICE = "buddySkills";
  */
 export const BUDDY_SKILLS_ENDPOINTS = "buddySkillsEndpoints";
 
-/** Package identity for the strict typert contribution. */
-const TYPERT_PACKAGE = "dsh-buddy";
+/**
+ * Package identity for the strict typert contribution.
+ *
+ * Distinct from the persona row's `dsh-buddy`, and it has to be: the typert
+ * registry is a host-plane singleton keyed on `${package}#${face}`, so a second
+ * host row claiming `dsh-buddy#host` throws `package face … is already
+ * registered` and the throw escapes the row's `apply` as `plugin tree failed to
+ * load` — the whole harness refuses to boot. Separate fibers do not help,
+ * because the map is one; the telegram row sets the same precedent with
+ * `dsh-buddy-telegram`. Only this identity moves: the wire namespace stays
+ * {@link BUDDY_SKILLS_SERVICE} and the binding key stays
+ * {@link BUDDY_SKILLS_ENDPOINTS}. `test/typert-faces.test.ts` pins the rule for
+ * every host row.
+ */
+const TYPERT_PACKAGE = "dsh-buddy-skills";
 
 /** One skill as the panel lists it. Owned data, never a live provider handle. */
 export interface SkillView {
