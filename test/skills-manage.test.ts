@@ -337,6 +337,58 @@ test("write_file refuses an escaping path, a disallowed directory and an oversiz
 	}
 });
 
+test("the write path refuses to raise a skill's visibility past buddy", async () => {
+	const f = await fixture();
+	const globalDoc = (name: string): string =>
+		`---\nname: ${name}\ndescription: helps with one thing\nvisibility: global\n---\n\n## When to Use\n\nUse this when one needs it.\n`;
+	try {
+		// A create is born in the buddy tier; `global` is refused before the
+		// existence probe and before any write, so nothing is left behind.
+		const created = await runOperations(f.deps, [
+			{ action: "create", name: "promoter", content: globalDoc("promoter") },
+		]);
+		assert.equal(created.success, false);
+		assert.match(String(created.error), /may not set visibility to 'global'/);
+		await assert.rejects(() => stat(join(f.skillsRoot, "promoter")));
+
+		// A patch can rewrite the frontmatter line, so the *resulting* tier is
+		// what is judged — not the action's name.
+		const raiseByPatch = await runOperations(f.deps, [
+			{
+				action: "patch",
+				name: "a-b",
+				old_string: "description: helps with one thing",
+				new_string: "description: helps with one thing\nvisibility: global",
+			},
+		]);
+		assert.equal(raiseByPatch.success, false);
+		assert.match(String(raiseByPatch.error), /may not set visibility to 'global'/);
+		assert.equal(await readFile(join(f.skillsRoot, "a-b", "SKILL.md"), "utf8"), validDoc("a-b"));
+
+		// `edit` carries the whole document, so it is the same refusal.
+		const raiseByEdit = await runOperations(f.deps, [{ action: "edit", name: "a-b", content: globalDoc("a-b") }]);
+		assert.equal(raiseByEdit.success, false);
+		assert.match(String(raiseByEdit.error), /may not set visibility to 'global'/);
+
+		// The panel's rail is the one writer that may raise a tier.
+		const promoted = await runOperations({ ...f.deps, maySetVisibility: true }, [
+			{
+				action: "patch",
+				name: "a-b",
+				old_string: "description: helps with one thing",
+				new_string: "description: helps with one thing\nvisibility: global",
+			},
+		]);
+		assert.equal(promoted.success, true);
+		// …and a skill a human already promoted stays editable: keeping its tier
+		// is not a raise.
+		const kept = await runOperations(f.deps, [{ action: "edit", name: "a-b", content: globalDoc("a-b") }]);
+		assert.equal(kept.success, true);
+	} finally {
+		await f.cleanup();
+	}
+});
+
 test("remove_file of an absent support file is refused", async () => {
 	const f = await fixture();
 	try {

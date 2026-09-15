@@ -17,11 +17,13 @@
  *    traceable proxy and the api-gateway dispatches with `Reflect.apply`, so a
  *    `#`-private field would pass every offline call and throw on the first live
  *    one. Every panel call below goes through the proxy.
- * 3. **`setVisibility` is the only way a skill's scope is raised.** It patches
- *    the frontmatter, so the providers really see the new tier, and it is
- *    deliberately *not* reachable through `skill_manage`'s operation set — the
- *    one hard guarantee that a habit learned in Buddy cannot leak into ordinary
- *    coding sessions.
+ * 3. **`setVisibility` is the only way a skill's scope is raised.** The write
+ *    path refuses any resulting document whose `visibility` is neither `buddy`
+ *    nor the tier the skill already had, so `skill_manage`'s `create`/`edit`/
+ *    `patch` content cannot promote one either; `setVisibility` is the single
+ *    writer admitted past that check, and it patches the frontmatter so the
+ *    providers really see the new tier. That is the one hard guarantee that a
+ *    habit learned in Buddy cannot leak into ordinary coding sessions.
  *
  * The heartbeat bound is ten seconds of wall clock, which no suite should wait
  * out. The harness therefore captures the timer where the row arms it (an
@@ -39,6 +41,7 @@ import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import * as storeRow from "../src/store/index.ts";
 import * as skillsRow from "../src/skills/index.ts";
+import * as skillsAgentRow from "../src/skills-agent/index.ts";
 import { BUDDY_SKILLS_SERVICE } from "../src/skills/gateway.ts";
 import { createBuddyProvider, createPromotedProvider } from "../src/skills/provider.ts";
 import { FALLBACK_CONFIG, type BuddyConfig } from "../src/config.ts";
@@ -136,6 +139,13 @@ interface Mounted {
 	readonly ledger: Map<string, SkillLedgerRecord>;
 	/** The `review_usage` table the coordinator writes. */
 	readonly reviews: Map<string, ReviewUsageRecord>;
+	/**
+	 * Emit one `session/event`, exactly as the harness's own session log does.
+	 *
+	 * The envelope is the real `{type, seq, time, data}` — no test here may hand
+	 * the rows an event shape the harness never produces.
+	 */
+	emitSessionEvent(sessionId: string, event: unknown): void;
 	/** The delays of every timer the heartbeat arm registered, in order. */
 	readonly heartbeatDelays: number[];
 	/** Invoke the heartbeat bound's callback, as ten seconds passing would. */
@@ -168,6 +178,15 @@ interface MountOptions {
 	readonly withSkillsRegistry?: boolean;
 	/** Mount an `agents` registry; default `true`. */
 	readonly withAgents?: boolean;
+	/**
+	 * Mount the preset row (`dsh-buddy/skills-agent`) on the same context;
+	 * default `false` (most tests drive the host service directly).
+	 *
+	 * The two rows are a pair in production: only the preset row's
+	 * `session/event` listener feeds the coordinator, so an end-to-end claim
+	 * about a review's budgets or its attributed spend has to mount both.
+	 */
+	readonly withAgentRow?: boolean;
 	/** Skills settings merged over the shipped defaults. */
 	readonly skills?: Partial<BuddyConfig["skills"]>;
 	/**
@@ -491,8 +510,8 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			);
 		}
 
-		const mountRow = (row: { name: string; inject: string[]; apply: (ctx: never) => void }): unknown => {
-			const fiber = root.plugin({ name: row.name, inject: row.inject, apply: row.apply });
+		const mountRow = (row: { name: string; inject?: string[]; apply: (ctx: never) => void }): unknown => {
+			const fiber = root.plugin({ name: row.name, inject: row.inject ?? [], apply: row.apply });
 			fibers.push(fiber as never);
 			// The file-scope teardown disposes these too, before the ambient
 			// home returns — a mount a test never disposes must not be able to
@@ -507,6 +526,12 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		if (options.withStore !== false) {
 			await until(() => service() !== undefined);
 		}
+		// Mounted only once the host row has *published* `buddySkills`: the preset
+		// row reads it with `ctx.get` at apply time and degrades to a silent no-op
+		// when it is not there yet, which a mount ordered before the publication
+		// would be. The composition mounts both rows in one pass and cordis orders
+		// the activation, so this is the harness's job, not a production seam.
+		if (options.withAgentRow === true) mountRow(skillsAgentRow as never);
 		await settle();
 
 		return {
@@ -535,6 +560,13 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 			usage: usageTable.rows,
 			ledger: ledgerTable.rows,
 			reviews: reviewTable.rows,
+			emitSessionEvent: (sessionId, event) => {
+				(root as unknown as { emit(name: string, ...args: unknown[]): unknown }).emit(
+					"session/event",
+					{ header: { id: sessionId } },
+					event,
+				);
+			},
 			logLines,
 			restoreLogging: () => {
 				console.error = realConsoleError;
@@ -580,6 +612,62 @@ function serviceOf(mounted: Mounted): ServiceProxy {
 	const service = mounted.skills();
 	if (service === undefined) assert.fail("the skills row must publish buddySkills");
 	return service;
+}
+
+/**
+ * One real surface event: `{type, seq, time, data}`, the envelope the session log
+ * appends and `sessionQuery.readSurface` answers with.
+ *
+ * These fixtures exist because the digest adapter reads the surface's event
+ * stream, and a fixture that hoists `content` to the envelope's top level cannot
+ * fail for the shape the adapter will really meet.
+ * @param type - the event type.
+ * @param data - the event's payload, at the level the log carries it.
+ * @param seq - the sequence number (also the timestamp).
+ * @returns the envelope.
+ */
+function surfaceEvent(type: string, data: unknown, seq: number): unknown {
+	return { type, seq, time: seq, data };
+}
+
+/** A real `user/message` surface event carrying one text block. */
+function userMessage(text: string, seq: number): unknown {
+	return surfaceEvent(
+		"user/message",
+		{ id: `m${seq}`, role: "user", content: [{ type: "text", text }], source: { kind: "user" } },
+		seq,
+	);
+}
+
+/**
+ * A real `assistant/message` surface event carrying text and tool calls.
+ *
+ * The tool names live on the message's `tool-call` content blocks, which is the
+ * only place the §7.1 `ASSISTANT[tools: …]` line can get them.
+ */
+function assistantMessage(text: string, seq: number, toolNames: readonly string[] = []): unknown {
+	const content: unknown[] = toolNames.map((name, index) => ({
+		type: "tool-call",
+		id: `c${seq}-${index}`,
+		name,
+		arguments: "{}",
+	}));
+	if (text !== "") content.push({ type: "text", text });
+	return surfaceEvent(
+		"assistant/message",
+		{
+			turn: 1,
+			step: seq,
+			message: {
+				id: `m${seq}`,
+				role: "assistant",
+				content,
+				source: { kind: "model", provider: "p", model: "m" },
+			},
+			stream: [],
+		},
+		seq,
+	);
 }
 
 /** The actor one foreground call claims to be. */
@@ -792,27 +880,75 @@ test("a write that carries a visibility line also invalidates the promoted catal
 	// `skill_manage` has no `visibility` action, but `create` and `edit` take the
 	// **whole document**, so a write can carry a `visibility:` line and change
 	// what the promoted provider contributes without going through
-	// `setVisibility` at all. The listing is the evidence that this is a real
-	// path rather than a hypothetical one.
+	// `setVisibility` at all. The one direction still open to the tool is a write
+	// that *lowers* a tier back to buddy — the direction that raises one is what
+	// the write path refuses (the next test). The listing is the evidence that
+	// this is a real path rather than a hypothetical one.
 	const mounted = await mountSkills();
-	const created = (await dispatch(serviceOf(mounted), "manage", [
+	const service = serviceOf(mounted);
+	await writeSkill(mounted, "alpha-skill");
+	// The panel's rail is the one writer that may raise a tier.
+	const promoted = (await dispatch(service, "visibility", ["alpha-skill", "global"])) as {
+		success: boolean;
+		message: string;
+	};
+	assert.equal(promoted.success, true, promoted.message);
+	assert.equal(mounted.invalidationsFor("buddy-promoted"), 1);
+	// `edit` hands the tool's own write path a document without the visibility
+	// line, which lowers the skill back to the buddy tier.
+	const lowered = (await dispatch(service, "manage", [
 		FOREGROUND,
-		[
-			{
-				action: "create",
-				name: "alpha-skill",
-				content: '---\nname: alpha-skill\ndescription: Use when.\nvisibility: global\n---\n\nBody.\n',
-			},
-		],
+		[{ action: "edit", name: "alpha-skill", content: skillDocument("alpha-skill") }],
 	])) as { success: boolean; message: string };
-	assert.equal(created.success, true, created.message);
-	const listed = (await dispatch(serviceOf(mounted), "listSkills", [])) as Record<string, unknown>[];
-	assert.equal(listed.find((entry) => entry["name"] === "alpha-skill")?.["visibility"], "global");
-	assert.equal(mounted.invalidationsFor("buddy-promoted"), 1, "the promoted provider's contribution changed");
+	assert.equal(lowered.success, true, lowered.message);
+	const listed = (await dispatch(service, "listSkills", [])) as Record<string, unknown>[];
+	assert.equal(listed.find((entry) => entry["name"] === "alpha-skill")?.["visibility"], "buddy");
+	assert.equal(mounted.invalidationsFor("buddy-promoted"), 2, "the promoted provider's contribution changed");
 	// No preset row is mounted here, so no buddy control was ever handed over:
 	// refreshing both catalogs must be a no-op for the one that does not exist
 	// rather than a throw or a silently skipped registration.
 	assert.equal(mounted.invalidationsFor("buddy-skills"), 0);
+	await mounted.dispose();
+});
+
+test("skill_manage cannot produce a skill outside the buddy tier", async () => {
+	// Spec §4.3's declaration layer, and the whole reason the action vocabulary
+	// removing `visibility` was not enough: `create`/`edit`/`patch` carry document
+	// content, and the mandated `missing-metadata` lint advisory actively tells the
+	// model to add the field. Every path is driven through the real service the
+	// tool forwards to, and the assertion is on the *resulting* document.
+	const mounted = await mountSkills();
+	const service = serviceOf(mounted);
+	const refused = async (operation: Record<string, unknown>): Promise<string> => {
+		const result = (await dispatch(service, "manage", [FOREGROUND, [operation]])) as {
+			success: boolean;
+			message: string;
+		};
+		assert.equal(result.success, false, `'${String(operation["action"])}' must be refused when it raises a scope`);
+		return result.message;
+	};
+	const globalDoc = '---\nname: promoter\ndescription: Use when.\nvisibility: global\n---\n\nBody.\n';
+	assert.match(await refused({ action: "create", name: "promoter", content: globalDoc }), /visibility/);
+	// Refused before the existence probe and before any write.
+	assert.deepEqual(await dispatch(service, "listSkills", []), []);
+
+	await writeSkill(mounted, "keeper");
+	assert.match(
+		await refused({ action: "edit", name: "keeper", content: skillDocument("keeper", "project: /tmp/anywhere") }),
+		/visibility/,
+	);
+	assert.match(
+		await refused({
+			action: "patch",
+			name: "keeper",
+			old_string: "description: Use when keeper matters.",
+			new_string: "description: Use when keeper matters.\nvisibility: global",
+		}),
+		/visibility/,
+	);
+	// The document is byte-for-byte the one the mount wrote: a refused batch
+	// restores every skill it touched.
+	assert.equal(await readFile(join(mounted.skillsRoot, "keeper", "SKILL.md"), "utf8"), skillDocument("keeper"));
 	await mounted.dispose();
 });
 
@@ -875,10 +1011,7 @@ test("the cheap-model path spawns with the digest from the session surface", asy
 		withSessionQuery: true,
 		skills: { reviewProvider: "p", reviewModel: "cheap" },
 		surfaces: {
-			s1: [
-				{ type: "user/message", content: [{ type: "text", text: "hello" }] },
-				{ type: "assistant/message", content: [{ type: "text", text: "hi" }] },
-			],
+			s1: [userMessage("hello", 1), assistantMessage("hi", 2)],
 		},
 	});
 	const service = serviceOf(mounted);
@@ -891,13 +1024,39 @@ test("the cheap-model path spawns with the digest from the session surface", asy
 	assert.equal(mounted.started.length, 1);
 	assert.equal(mounted.started[0]?.name, "spawn");
 	assert.deepEqual(mounted.started[0]?.agentOptions, { provider: "p", model: "cheap" });
+	// The digest is the review's whole view of the conversation on this path, so
+	// the text must have come from `data`, where the surface really carries it.
 	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /^Earlier conversation digest/);
+	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /USER: hello/);
+	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /ASSISTANT: hi/);
 	// The whitelist is the review's capability boundary, and it travels as the
 	// one visibility gate `toolFilter` really is.
 	assert.deepEqual(mounted.started[0]?.toolFilter, { allow: ["skill", "skill_manage", "read", "grep", "glob"] });
 	// The prompt must be ContentBlock[], never a bare string.
 	assert.equal(Array.isArray(mounted.started[0]?.prompt), true);
 	assert.equal((mounted.started[0]?.parent as { id?: string } | undefined)?.id, "s1");
+});
+
+test("the digest adapter reads assistant tool names off the message's content blocks", async () => {
+	// §7.1's `ASSISTANT[tools: …]` line is only reachable if the adapter finds
+	// the tool-call blocks, and those live inside `data.message.content` — never
+	// on the envelope. A compacted prefix is needed for the line to render, so
+	// the surface is one assistant tool call plus more than `TAIL` later turns.
+	const surface: unknown[] = [assistantMessage("", 0, ["skill", "grep"])];
+	for (let seq = 1; seq < 26; seq += 1) surface.push(userMessage(`q${seq}`, seq));
+	const mounted = await mountSkills({
+		withSessionQuery: true,
+		skills: { reviewProvider: "p", reviewModel: "cheap" },
+		surfaces: { s1: surface },
+	});
+	const service = serviceOf(mounted);
+	for (let step = 0; step < FALLBACK_CONFIG.skills.creationNudgeInterval; step += 1) {
+		dispatch(service, "noteStep", ["s1"]);
+	}
+	await dispatch(service, "onTurnEnd", [
+		{ sessionId: "s1", reason: { kind: "completed" }, route: { provider: "p", model: "expensive" } },
+	]);
+	assert.match(mounted.started[0]?.prompt[0]?.text ?? "", /ASSISTANT\[tools: skill, grep\]/);
 });
 
 test("refine starts a review addressed to the agent the command handed over", async () => {
@@ -951,10 +1110,7 @@ test("refine carries the transcript, so an explicit review is not blind", async 
 		skills: { reviewProvider: "p", reviewModel: "cheap" },
 		agents: { "agent-7": { provider: "p", model: "expensive" } },
 		surfaces: {
-			"agent-7": [
-				{ type: "user/message", content: [{ type: "text", text: "hello" }] },
-				{ type: "assistant/message", content: [{ type: "text", text: "hi" }] },
-			],
+			"agent-7": [userMessage("hello", 1), assistantMessage("hi", 2)],
 		},
 	});
 	await dispatch(serviceOf(mounted), "refine", [{ id: "agent-7" }, "house style"]);
@@ -973,10 +1129,10 @@ test("a review that finishes still attributes its usage to the parent conversati
 	await settle();
 	const run = mounted.runs[0];
 	if (run === undefined) assert.fail("refine must start exactly one run");
-	dispatch(service, "noteChildEvent", [run.childSessionId, { type: "step/end" }]);
+	dispatch(service, "noteChildEvent", [run.childSessionId, surfaceEvent("step/end", { turn: 1, step: 1 }, 1)]);
 	dispatch(service, "noteChildEvent", [
 		run.childSessionId,
-		{ type: "assistant/message", usage: { inputTokens: 7, cacheReadTokens: 900 } },
+		surfaceEvent("assistant/message", { turn: 1, step: 1, message: {}, stream: [], usage: { inputTokens: 7, cacheReadTokens: 900 } }, 2),
 	]);
 	run.finish();
 	await until(() => mounted.reviews.size > 0);
@@ -984,6 +1140,66 @@ test("a review that finishes still attributes its usage to the parent conversati
 	assert.equal(row?.parentSessionId, "agent-7");
 	assert.equal(row?.cacheReadTokens, 900);
 	assert.equal(row?.steps, 1);
+});
+
+test("a review child's real envelopes move its budget and attribute a nonzero spend", async () => {
+	// The one end-to-end claim of C1 and I1 together: both rows mounted, driven
+	// through the *preset row's own* `session/event` listener, with envelopes the
+	// harness really appends (`{type, seq, time, data}`). Delete the listener's
+	// forward to `noteChildEvent` — or read `usage` off the envelope's top level
+	// instead of `data` — and the stop below never fires and this row's spend
+	// stays zero, which is exactly the production state this test was added for.
+	const mounted = await mountSkills({
+		withAgentRow: true,
+		skills: { reviewProvider: "p", reviewModel: "cheap", maxReviewSteps: 2 },
+		holdRuns: true,
+	});
+	// A full nudge interval of real `step/end` envelopes, then a completed turn:
+	// the review starts through the listener, not through a direct service call.
+	for (let seq = 0; seq < FALLBACK_CONFIG.skills.creationNudgeInterval; seq += 1) {
+		mounted.emitSessionEvent("parent-1", { type: "step/end", seq, time: seq, data: { turn: 1, step: seq } });
+	}
+	mounted.emitSessionEvent("parent-1", {
+		type: "turn/end",
+		seq: 100,
+		time: 100,
+		data: { turn: 1, reason: { kind: "completed" } },
+	});
+	await until(() => mounted.runs.length === 1);
+	const child = mounted.runs[0]?.childSessionId;
+	if (child === undefined) assert.fail("the preset row's listener must have started one review");
+
+	// Token accounting rides on `data.usage`, beside the assistant message it
+	// belongs to. A coordinator reading the envelope's top level counts nothing.
+	mounted.emitSessionEvent(child, {
+		type: "assistant/message",
+		seq: 1,
+		time: 1,
+		data: {
+			turn: 1,
+			step: 1,
+			message: { id: "m1", role: "assistant", content: [], source: { kind: "model", provider: "p", model: "cheap" } },
+			stream: [],
+			usage: { inputTokens: 1200, outputTokens: 34, cacheReadTokens: 900 },
+		},
+	});
+	// Two model rounds is this test's whole step budget, so the second real
+	// `step/end` must stop the child — through the abort and the disposal, not
+	// merely the documented no-op `interrupt`.
+	mounted.emitSessionEvent(child, { type: "step/end", seq: 2, time: 2, data: { turn: 1, step: 1 } });
+	assert.deepEqual(mounted.interrupted, [], "one round is under the budget");
+	mounted.emitSessionEvent(child, { type: "step/end", seq: 3, time: 3, data: { turn: 1, step: 2 } });
+	assert.deepEqual(mounted.interrupted, [child], "the second round must fire the step budget");
+	assert.equal(mounted.witness.signals[0]?.aborted, true, "the request signal must be aborted");
+	assert.deepEqual(mounted.witness.disposed, [child], "the one-shot run must be disposed");
+
+	await until(() => mounted.reviews.size > 0);
+	const row = [...mounted.reviews.values()][0];
+	assert.equal(row?.parentSessionId, "parent-1", "the spend is attributed to the parent conversation");
+	assert.equal(row?.steps, 2, "both real step/end envelopes must be counted");
+	assert.equal(row?.inputTokens, 1200, "data.usage.inputTokens must be read, not a top-level usage");
+	assert.equal(row?.outputTokens, 34);
+	assert.equal(row?.cacheReadTokens, 900);
 });
 
 test("unmounting the row interrupts every in-flight review", async () => {

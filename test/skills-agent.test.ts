@@ -735,7 +735,7 @@ test("without the host row the whole row is a silent no-op rather than a blocked
 
 test("step and turn events drive the coordinator through the host service", async () => {
 	const scope = await mountAgentRow();
-	scope.emitSessionEvent("s1", { type: "step/end", seq: 1, time: 1, data: {} });
+	scope.emitSessionEvent("s1", { type: "step/end", seq: 1, time: 1, data: { turn: 1, step: 1 } });
 	scope.emitSessionEvent("s1", {
 		type: "turn/end",
 		seq: 2,
@@ -752,17 +752,42 @@ test("step and turn events drive the coordinator through the host service", asyn
 	await scope.dispose();
 });
 
-test("a session event that is neither a step nor a turn end is left alone", async () => {
+test("every session event is offered to the coordinator, envelope and all", async () => {
+	// The C1 wiring: the review's budgets and its attributed spend are observed
+	// only through this forward, so the row must offer *every* event — it cannot
+	// tell a review child from any other session, and the coordinator is the side
+	// that owns that knowledge. A row that forwarded only `step/end` would leave
+	// every review's token spend at zero; one that forwarded nothing would leave
+	// §7.4's budgets unenforced end to end.
+	const scope = await mountAgentRow();
+	const step = { type: "step/end", seq: 1, time: 1, data: { turn: 1, step: 1 } };
+	const usage = { type: "assistant/message", seq: 2, time: 2, data: { turn: 1, step: 1, usage: { inputTokens: 7 } } };
+	scope.emitSessionEvent("child-9", step);
+	scope.emitSessionEvent("child-9", usage);
+	await settle();
+	assert.deepEqual(
+		scope.calls.filter((call) => call.method === "noteChildEvent").map((call) => call.args),
+		[
+			["child-9", step],
+			["child-9", usage],
+		],
+	);
+	await scope.dispose();
+});
+
+test("an event that is neither a step nor a turn end drives no decision of this row's", async () => {
 	const scope = await mountAgentRow();
 	scope.emitSessionEvent("s1", { type: "turn/start", seq: 1, time: 1, data: { turn: 1 } });
 	scope.emitSessionEvent("s1", { type: "step/start", seq: 2, time: 2, data: { turn: 1, step: 1 } });
 	await settle();
 	// Mount already called `skillsRoot` and reported its own heartbeat; what this
-	// asserts is that neither event type reached the coordinator.
+	// asserts is that neither event type reached this row's two decisions. Both
+	// are still *offered* to the coordinator, which is not one of them.
 	assert.deepEqual(
 		scope.calls.filter((call) => call.method === "noteStep" || call.method === "onTurnEnd"),
 		[],
 	);
+	assert.equal(scope.calls.filter((call) => call.method === "noteChildEvent").length, 2);
 	await scope.dispose();
 });
 

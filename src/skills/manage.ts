@@ -37,7 +37,15 @@ import { captureBefore, captureManifest, recordMutation, type LedgerDeps } from 
 import { lintSkill, type LintFinding } from "./linter.ts";
 import { atomicSnapshot, type SnapshotEntry } from "./snapshot.ts";
 import { bumpPatch, recordCreated, type UsageTable } from "./usage.ts";
-import { validateSkillDocument, validateSkillName, validateSupportBytes, validateSupportPath } from "./validate.ts";
+import {
+	BUDDY_TIER,
+	declaredVisibility,
+	parseFrontmatter,
+	validateSkillDocument,
+	validateSkillName,
+	validateSupportBytes,
+	validateSupportPath,
+} from "./validate.ts";
 
 /** The most operations one `skill_manage` call may carry. */
 export const MAX_BATCH_OPERATIONS = 20;
@@ -93,6 +101,16 @@ export interface ManageDeps extends LedgerDeps {
 	 * `backgroundWriteGuard`; a foreground caller's guard allows everything.
 	 */
 	guard(action: Operation["action"], skill: string): { allow: true } | { allow: false; reason: string };
+	/**
+	 * Whether this writer may leave a document declaring a non-buddy visibility.
+	 *
+	 * `false` (the default) is the `skill_manage` contract: spec §4.3's third
+	 * isolation leg — the automatic pass may never raise a skill's scope, so a
+	 * habit learned in Buddy cannot leak into ordinary coding sessions. The
+	 * panel's human-only `setVisibility` is the one writer that sets this, and
+	 * it is the only path by which a tier is ever raised.
+	 */
+	readonly maySetVisibility?: boolean;
 }
 
 /** What a batch reports to its caller. */
@@ -293,6 +311,11 @@ async function createSkill(deps: ManageDeps, operation: Operation): Promise<Appl
 	if (typeof content !== "string") return { success: false, error: `create '${name}' needs 'content'` };
 	const validated = validateSkillDocument({ name, content, creating: true });
 	if (!validated.ok) return { success: false, error: validated.error };
+	// Spec §4.3's third isolation leg: a new skill is born in the buddy tier, and
+	// only the panel can move it out. Checked before the existence probe and
+	// before any write, so a refused create leaves nothing behind.
+	const scope = visibilityRefusal(deps, validated.frontmatter, undefined);
+	if (scope !== undefined) return { success: false, error: scope };
 	const dir = join(deps.skillsRoot, name);
 	if (await pathExists(dir)) return { success: false, error: `skill '${name}' already exists` };
 
@@ -351,6 +374,10 @@ async function patchSkill(deps: ManageDeps, operation: Operation): Promise<Apply
 	const patched = current.split(oldString).join(newString);
 	const validated = validateSkillDocument({ name, content: patched, creating: false });
 	if (!validated.ok) return { success: false, error: `patch '${name}' would leave an invalid document: ${validated.error}` };
+	// A patch can rewrite the very `visibility:` line the providers filter on, so
+	// the resulting tier is judged exactly as a create's or an edit's is.
+	const scope = visibilityRefusal(deps, validated.frontmatter, frontmatterOf(current));
+	if (scope !== undefined) return { success: false, error: scope };
 
 	const file = join(deps.skillsRoot, name, "SKILL.md");
 	await writeFile(file, patched);
@@ -372,9 +399,15 @@ async function editSkill(deps: ManageDeps, operation: Operation): Promise<ApplyO
 	const name = operation.name;
 	const content = operation.content;
 	if (typeof content !== "string") return { success: false, error: `edit '${name}' needs 'content'` };
-	await readSkillDocument(deps, name);
+	const current = await readSkillDocument(deps, name);
 	const validated = validateSkillDocument({ name, content, creating: false });
 	if (!validated.ok) return { success: false, error: validated.error };
+	// `edit` carries the whole document, so it is the easiest way to smuggle a
+	// `visibility:` line past the action vocabulary — and the one a human-promoted
+	// skill must stay editable through, which is why the pre-existing tier is part
+	// of the rule rather than a blanket "buddy only".
+	const scope = visibilityRefusal(deps, validated.frontmatter, frontmatterOf(current));
+	if (scope !== undefined) return { success: false, error: scope };
 
 	const file = join(deps.skillsRoot, name, "SKILL.md");
 	await writeFile(file, content);
@@ -603,6 +636,46 @@ async function readSkillDocument(deps: ManageDeps, name: string): Promise<string
 	} catch (error) {
 		throw new Error(`skill '${name}' has no readable SKILL.md (${messageOf(error)})`);
 	}
+}
+
+/**
+ * Refuse a write that would hand a skill a tier its writer may not grant.
+ *
+ * Spec §4.3's declaration layer: `skill_manage` **refuses** a resulting
+ * `visibility` that is neither `buddy` nor the tier the skill already had, so
+ * the automatic pass cannot promote a habit into every ordinary coding session.
+ * The rule is deliberately not "buddy only": a skill a human already promoted
+ * must stay editable, and *lowering* a tier (to `buddy`) is not a scope raise.
+ * The panel's human-only `setVisibility` is the only writer that skips this.
+ * @param deps - the write path's dependencies, including the writer's authority.
+ * @param next - the frontmatter the operation would leave behind.
+ * @param previous - the frontmatter before it, or `undefined` for a create.
+ * @returns the refusal message, or `undefined` when the write may proceed.
+ */
+function visibilityRefusal(
+	deps: ManageDeps,
+	next: Readonly<Record<string, unknown>>,
+	previous: Readonly<Record<string, unknown>> | undefined,
+): string | undefined {
+	if (deps.maySetVisibility === true) return undefined;
+	const target = declaredVisibility(next);
+	if (target === BUDDY_TIER) return undefined;
+	if (previous !== undefined && declaredVisibility(previous) === target) return undefined;
+	return `skill_manage may not set visibility to '${target}'; only the panel can move a skill out of the ${BUDDY_TIER} tier`;
+}
+
+/**
+ * Parse a document's frontmatter for the visibility comparison.
+ *
+ * A document that does not parse has no readable declaration, which the
+ * providers resolve to `buddy` — so an unreadable pre-write document is treated
+ * as `buddy` rather than as an exemption.
+ * @param document - the existing SKILL.md text.
+ * @returns the frontmatter, or `undefined` when it could not be parsed.
+ */
+function frontmatterOf(document: string): Record<string, unknown> | undefined {
+	const parsed = parseFrontmatter(document);
+	return "error" in parsed ? undefined : parsed.frontmatter;
 }
 
 /**

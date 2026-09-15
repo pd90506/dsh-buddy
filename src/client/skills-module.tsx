@@ -39,6 +39,24 @@ interface LedgerEntry {
 	readonly skill: string;
 }
 
+/**
+ * One attributed review's spend, mirroring `src/skills/gateway.ts`'s
+ * `ReviewUsageView`.
+ *
+ * Spec §9.2: this is the **only** place a review's cost is visible — the stock
+ * session page never folds it in — so the numbers are shown as the host
+ * recorded them and never re-derived.
+ */
+interface ReviewSpend {
+	readonly id: string;
+	readonly ts: string;
+	readonly steps: number;
+	readonly inputTokens: number;
+	readonly outputTokens: number;
+	readonly cacheReadTokens: number;
+	readonly outcome: string;
+}
+
 /** Whether the preset's skills row reported in, and who owns the preset id. */
 interface SkillsStatus {
 	readonly synced: boolean;
@@ -232,6 +250,7 @@ export function createSkillsModule(deps: SkillsModuleDeps): () => unknown {
 		const [status, setStatus] = useState<SkillsStatus | undefined>(undefined);
 		const [skills, setSkills] = useState<readonly Skill[]>([]);
 		const [ledger, setLedger] = useState<readonly LedgerEntry[]>([]);
+		const [reviews, setReviews] = useState<readonly ReviewSpend[]>([]);
 		const [enabled, setEnabled] = useState(false);
 		const [loaded, setLoaded] = useState(false);
 		const [error, setError] = useState<string | undefined>(undefined);
@@ -239,15 +258,17 @@ export function createSkillsModule(deps: SkillsModuleDeps): () => unknown {
 
 		const load = useCallback(async (): Promise<void> => {
 			try {
-				const [nextStatus, nextSkills, nextLedger, prefs] = await Promise.all([
+				const [nextStatus, nextSkills, nextLedger, nextReviews, prefs] = await Promise.all([
 					deps.call("buddySkills/status", {}),
 					deps.call("buddySkills/list", {}),
 					deps.call("buddySkills/ledger", {}),
+					deps.call("buddySkills/reviewUsage", {}),
 					deps.call("buddyPersona/preferences", {}),
 				]);
 				setStatus(nextStatus as SkillsStatus);
 				setSkills(Array.isArray(nextSkills) ? (nextSkills as readonly Skill[]) : []);
 				setLedger(Array.isArray(nextLedger) ? (nextLedger as readonly LedgerEntry[]) : []);
+				setReviews(Array.isArray(nextReviews) ? (nextReviews as readonly ReviewSpend[]) : []);
 				setEnabled((prefs as { skills?: { enabled?: boolean } }).skills?.enabled === true);
 				setLoaded(true);
 				setError(undefined);
@@ -366,6 +387,23 @@ export function createSkillsModule(deps: SkillsModuleDeps): () => unknown {
 									setError(message);
 								}}
 							/>
+						))
+					)}
+				</section>
+
+				<section className={FORM_CLASS.group}>
+					<div className={FORM_CLASS.title}>{deps.t("skillsSpendTitle")}</div>
+					{reviews.length === 0 ? (
+						<p className={FORM_CLASS.status}>{deps.t("skillsSpendEmpty")}</p>
+					) : (
+						reviews.map((review) => (
+							<div key={review.id} className={FORM_CLASS.field}>
+								<p className={FORM_CLASS.status}>{`${review.ts} — ${review.outcome}`}</p>
+								<p className={FORM_CLASS.status}>{`${deps.t("skillsSpendSteps")}: ${String(review.steps)}`}</p>
+								<p className={FORM_CLASS.status}>{`${deps.t("skillsSpendIn")}: ${String(review.inputTokens)}`}</p>
+								<p className={FORM_CLASS.status}>{`${deps.t("skillsSpendOut")}: ${String(review.outputTokens)}`}</p>
+								<p className={FORM_CLASS.status}>{`${deps.t("skillsSpendCacheRead")}: ${String(review.cacheReadTokens)}`}</p>
+							</div>
 						))
 					)}
 				</section>
