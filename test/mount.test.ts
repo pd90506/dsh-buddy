@@ -49,7 +49,18 @@ interface Host {
 
 /** A session record as `sessionQuery.listSessions` returns it, trimmed to what the row reads. */
 interface SessionStub {
-	readonly header: { readonly id: string; readonly cwd?: string; readonly agentPreset?: string };
+	readonly header: {
+		readonly id: string;
+		readonly cwd?: string;
+		readonly agentPreset?: string;
+		/**
+		 * `childSessionMeta()` stamps a child session with this; a review run is a
+		 * real child of the buddy conversation and inherits its `agentPreset`.
+		 */
+		readonly origin?: string;
+		/** The second mark `childSessionMeta()` writes for the same fact. */
+		readonly delegationDepth?: number;
+	};
 	/** Present so the row demonstrably ignores everything outside `header`. */
 	readonly live: boolean;
 }
@@ -562,6 +573,28 @@ test("sessions excludes conversations the workspace registry has archived", asyn
 		sessions.map((session) => session.sessionId),
 		["s-b"],
 		"an archived conversation must not appear in the list",
+	);
+});
+
+test("a review child session never appears in the buddy conversation list", async () => {
+	const mounted = await mount({
+		sessions: [
+			{ header: { id: "s1", agentPreset: BUDDY_PRESET_ID }, live: true },
+			{ header: { id: "review-child", agentPreset: BUDDY_PRESET_ID, origin: "subagent" }, live: true },
+			// 第二个标记同一个事实：`childSessionMeta()` 同时写 origin 与 delegationDepth。
+			{ header: { id: "review-child-2", agentPreset: BUDDY_PRESET_ID, delegationDepth: 1 }, live: true },
+		],
+		titles: { s1: { title: "S1", updatedAt: 1 } },
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+
+	const listed = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+
+	assert.deepEqual(
+		listed.map((session) => session.sessionId),
+		["s1"],
+		"a background review child must not appear as a ghost conversation in the Buddy folder",
 	);
 });
 

@@ -73,7 +73,19 @@ interface PluginContext {
 
 /** The subset of `ctx.sessionQuery` this row reads. */
 interface SessionQuery {
-	listSessions(signal?: AbortSignal): Promise<readonly { header: { id: string; cwd?: string; agentPreset?: string } }[]>;
+	listSessions(signal?: AbortSignal): Promise<
+		readonly {
+			header: {
+				id: string;
+				cwd?: string;
+				agentPreset?: string;
+				// Both come off the real `SessionHeader`: `childSessionMeta()` writes them
+				// on every subagent child, and the filter below reads them.
+				origin?: "subagent";
+				delegationDepth?: number;
+			};
+		}[]
+	>;
 	readTitle?(sessionId: string, signal?: AbortSignal): Promise<{ title: string; updatedAt: number } | undefined>;
 }
 
@@ -145,7 +157,15 @@ export function apply(ctx: PluginContext): void {
 		// is soft: without it, nothing is archived and nothing is filtered.
 		const archived = archivedSessionIds();
 		const mine = records.filter(
-			(record) => record.header.agentPreset === BUDDY_PRESET_ID && !archived.has(record.header.id),
+			(record) =>
+				record.header.agentPreset === BUDDY_PRESET_ID &&
+				// 后台 review 跑的是真子会话，`childSessionMeta()` 会把父的
+				// `agentPreset: 'buddy'` 继承下来（design.md §4.4、§13.2 item 3）：不过滤就会每次
+				// 自动总结都在 Buddy 文件夹里留一条幽灵对话。两个条件是同一个事实的两种标记，
+				// 与 skills 行那两处跳过背景回合的守卫保持同一条谓词。
+				record.header.origin !== "subagent" &&
+				(record.header.delegationDepth ?? 0) === 0 &&
+				!archived.has(record.header.id),
 		);
 		// Soft and per request: without the Telegram row every conversation is a web one.
 		const telegram = ctx.get("buddyTelegram") as { telegramSessionIds(): Promise<string[]> } | undefined;
