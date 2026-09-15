@@ -2,10 +2,11 @@
 # `dsh plugin --profile <name> add` (via the package's dsh.bundle.patch
 # declaration).
 #
-# Two host rows, deliberately separate: the store owns the buddy home and the
-# `buddy` storage domain, and the persona row stands on it. Each row has its own
-# effect scope, so a failure in one does not take the other down, and either can
-# be turned off from a profile's own cordis.patch.yml without touching code:
+# The host rows, deliberately separate: the store owns the buddy home and the
+# `buddy` storage domain, the persona and skills rows stand on it, and the
+# telegram row bridges the bot. Each row has its own effect scope, so a failure
+# in one does not take the others down, and any of them can be turned off from a
+# profile's own cordis.patch.yml without touching code:
 #
 #   - id: buddy-persona
 #     disabled: true
@@ -26,6 +27,9 @@
       config: {}
     - id: buddy-persona
       name: 'dsh-buddy/persona'
+      config: {}
+    - id: buddy-skills
+      name: 'dsh-buddy/skills'
       config: {}
     - id: buddy-client
       name: 'dsh-buddy'

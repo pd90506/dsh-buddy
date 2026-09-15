@@ -117,6 +117,13 @@
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
 
+# Skill evolution: its provider, `skill_manage`, the event listeners and the
+# `/refine` command all register into THIS preset's layer, so the skills it
+# summarizes automatically stay structurally invisible to ordinary coding
+# sessions (see the Phase 3 design doc §4).
+- id: buddy-skills-agent
+  name: 'dsh-buddy/skills-agent'
+
 # ── goals ───────────────────────────────────────────────────────────────────
 
 # The goal service and session driver stay on the host plane, where the Gateway

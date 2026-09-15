@@ -11,6 +11,8 @@
     "./store": { "default": "./lib/store.js" },
     "./persona": { "default": "./lib/persona.js" },
     "./telegram": { "default": "./lib/telegram.js" },
+    "./skills": { "default": "./lib/skills.js" },
+    "./skills-agent": { "default": "./lib/skills-agent.js" },
     "./client": { "default": "./lib/client.js" },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"

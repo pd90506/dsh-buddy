@@ -44,3 +44,12 @@ test("the package entry is a mountable cordis plugin that registers nothing", ()
 test("the patch mounts the telegram row under the buddy package", () => {
 	assert.ok(rowNames().includes("dsh-buddy/telegram"), `rows: ${rowNames().join(", ")}`);
 });
+
+test("the patch mounts the buddy-skills host row after the persona row", () => {
+	assert.ok(rowNames().includes("dsh-buddy/skills"), `rows: ${rowNames().join(", ")}`);
+});
+
+test("the patch mounts the buddy-skills-agent row through the buddy preset, not the host", () => {
+	const patch = readFileSync(join(ROOT, "cordis.patch.yml"), "utf8");
+	assert.ok(!patch.includes("skills-agent"), "the agent row belongs to the preset template, never the host patch");
+});
