@@ -42,6 +42,7 @@
  * @module dsh-buddy/skills/review
  */
 import { randomUUID } from "node:crypto";
+import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 import type { BuddyConfig } from "../config.ts";
 import type { ReviewUsageRecord } from "../store/domain.ts";
@@ -403,30 +404,31 @@ export class ReviewCoordinator {
 	 * must never throw into the host row's listener. Exceeding a budget calls
 	 * `interrupt` once and keeps counting, because the child may still deliver
 	 * events while it winds down and the row is what it cost either way.
+	 *
+	 * The event is typed from `@deepseek-ai/dsh-session`'s real `SessionEvent`
+	 * rather than a locally declared shape, because the token accounting sits on
+	 * `event.data` (`assistant/message`'s `usage`), not on the envelope. A
+	 * hand-rolled `{type, usage}` type is what let the budgets read `undefined`
+	 * for every review and record a permanent zero spend.
 	 * @param childSessionId - the child session the event belongs to.
-	 * @param event - the raw event; only its `type` and `usage` are read.
+	 * @param event - the real envelope; only its `type` and `data.usage` are read.
 	 */
-	noteChildEvent(childSessionId: string, event: unknown): void {
+	noteChildEvent(childSessionId: string, event: SessionEvent): void {
 		try {
 			const review = this.resolveReview(childSessionId);
 			if (review === undefined) return;
-			const record = event as { type?: unknown; usage?: unknown } | undefined;
-			if (record === undefined || record === null) return;
+			// The type is the real envelope, but this runs on a live firehose: a
+			// value that is not an object at all is ignored rather than thrown on.
+			if (typeof event !== "object" || !event) return;
 
-			if (record.type === "step/end") {
+			if (event.type === "step/end") {
 				review.steps += 1;
 				if (review.steps >= this.deps.config().skills.maxReviewSteps) this.stop(childSessionId, review);
 				return;
 			}
-			if (record.type === "assistant/message") {
-				const usage = record.usage as
-					| {
-							inputTokens?: unknown;
-							outputTokens?: unknown;
-							cacheReadTokens?: unknown;
-							cacheWriteTokens?: unknown;
-					  }
-					| undefined;
+			if (event.type === "assistant/message") {
+				// The accounting rides on `data`, beside the message it belongs to.
+				const usage = event.data?.usage;
 				review.inputTokens += count(usage?.inputTokens);
 				review.outputTokens += count(usage?.outputTokens);
 				review.cacheReadTokens += count(usage?.cacheReadTokens);
@@ -556,14 +558,22 @@ export class ReviewCoordinator {
 	 * event for a session whose id the coordinator has not been handed yet, and
 	 * with exactly one review flying there is no ambiguity about whose it is.
 	 * With several flying, an unknown id is dropped rather than guessed at.
+	 *
+	 * The fallback is deliberately confined to that window (`childSessionId`
+	 * still `undefined`). The preset row offers **every** session event to
+	 * {@link noteChildEvent} — that is how a review's own child is observed —
+	 * so once an id is known, an unrecognized one is another session's event,
+	 * most often the parent conversation's own `step/end`. Charging those to the
+	 * flying review would spend its budget on work it never did.
 	 * @param childSessionId - the event's session id.
 	 * @returns the review to charge the event to, or `undefined` to ignore it.
 	 */
 	private resolveReview(childSessionId: string): ActiveReview | undefined {
 		const known = this.children.get(childSessionId);
 		if (known !== undefined) return known;
-		if (this.active.size === 1) return this.active.values().next().value;
-		return undefined;
+		if (this.active.size !== 1) return undefined;
+		const only = this.active.values().next().value;
+		return only !== undefined && only.childSessionId === undefined ? only : undefined;
 	}
 
 	/**

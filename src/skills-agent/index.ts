@@ -41,10 +41,16 @@
  *   and the jurisdiction guard live. The action set is the host row's own
  *   {@link SKILL_MANAGE_ACTIONS}, so the tool's vocabulary and the write path's
  *   cannot drift — and `visibility` is in neither, because only the panel may
- *   raise a skill's scope.
+ *   raise a skill's scope. The *field* is still writable through document
+ *   content, which is why the host row's write path independently refuses a
+ *   resulting non-buddy tier (spec §4.3).
  * @module dsh-buddy/skills-agent
  */
 import { defineTool } from "@deepseek-ai/dsh-tools";
+// `import type` only: the real envelope the session log appends. A locally
+// declared `{type, data?}` shape is what let the review budgets read a token
+// count off the wrong level and record a permanent zero spend.
+import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import { createBuddyProvider } from "../skills/provider.ts";
 // From the leaf, never from `../skills/index.ts`: that module is the host row,
 // and importing any symbol from it would pull the host row's whole module graph
@@ -132,6 +138,17 @@ interface SkillsPlane {
 	skillsRoot(): string;
 	/** Count one model round of a conversation toward its next review. */
 	noteStep(sessionId: string): void;
+	/**
+	 * Offer one session event to the review coordinator.
+	 *
+	 * Called for **every** event of **every** session: the coordinator is the
+	 * only place a review child's model rounds and token spend accumulate, and it
+	 * is the side that knows which ids are its own children (and ignores the
+	 * rest — a parent conversation's own events included).
+	 * @param sessionId - the session the event belongs to.
+	 * @param event - the real session envelope.
+	 */
+	noteChildEvent(sessionId: string, event: SessionEvent): void;
 	/** Reset a conversation's counter because the model curated a skill itself. */
 	noteSkillManageCalled(sessionId: string): void;
 	/** The post-commit end of a turn: maybe start a review. */
@@ -161,12 +178,6 @@ interface AgentContext {
 	get(name: string): unknown;
 	effect(effect: () => (() => void) | Promise<() => void>, label?: string): unknown;
 	on(name: string, listener: (...args: never[]) => unknown, options?: { prepend?: boolean }): unknown;
-}
-
-/** One session event, reduced to the two types this row forwards. */
-interface SessionEvent {
-	readonly type: string;
-	readonly data?: { readonly reason?: { readonly kind?: string } } | undefined;
 }
 
 /** The session a `session/event` carries, reduced to the header this row reads. */
@@ -255,11 +266,15 @@ export function apply(ctx: AgentContext): void {
 	}, "dsh-buddy-skills-agent: skill_manage");
 
 	// `session/event` is an **emit**, not a waterfall: the listener takes
-	// `(session, event)` and returns nothing. Both forwards are one call into the
+	// `(session, event)` and returns nothing. Every event is offered to the
 	// host service, which owns the counter, the nudge and the whole review
-	// decision; this row only recognizes the two event types.
+	// decision: a review child's `step/end` and `assistant/message` are the only
+	// place §7.4's budgets and §9.2's attributed spend are observed, and this row
+	// cannot tell a child from any other session. The coordinator ignores events
+	// it has no review for. This row only adds the two decisions it owns.
 	ctx.on("session/event", (session: LiveSession, event: SessionEvent) => {
 		const sessionId = session.header.id;
+		plane.noteChildEvent(sessionId, event);
 		if (event.type === "step/end") plane.noteStep(sessionId);
 		if (event.type === "turn/end") {
 			void plane.onTurnEnd({

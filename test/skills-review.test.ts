@@ -27,6 +27,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 import { FALLBACK_CONFIG, type BuddyConfig } from "../src/config.ts";
 import { digestHistory, type DigestMessage } from "../src/skills/digest.ts";
@@ -255,6 +256,45 @@ function soleUsageRow(harness: Harness): ReviewUsageRecord {
 	return [...harness.reviewUsage.entries()][0]![1];
 }
 
+/**
+ * One real `step/end` envelope.
+ *
+ * `noteChildEvent` takes the session's own `SessionEvent`, so a test that handed
+ * it `{type: 'step/end'}` was asserting against a shape the log never produces —
+ * and could not fail when the production read moved to `data`.
+ * @param seq - the sequence number (also the timestamp).
+ * @returns the envelope.
+ */
+function stepEnd(seq = 1): SessionEvent {
+	return { type: "step/end", seq, time: seq, data: { turn: 1, step: seq } } as unknown as SessionEvent;
+}
+
+/**
+ * One real `assistant/message` envelope carrying token accounting on `data`.
+ * @param usage - the token counts the adapter reported.
+ * @param seq - the sequence number (also the timestamp).
+ * @returns the envelope.
+ */
+function assistantUsage(usage: Record<string, number>, seq = 1): SessionEvent {
+	return {
+		type: "assistant/message",
+		seq,
+		time: seq,
+		data: {
+			turn: 1,
+			step: seq,
+			message: {
+				id: `m${seq}`,
+				role: "assistant",
+				content: [],
+				source: { kind: "model", provider: "p", model: "m" },
+			},
+			stream: [],
+			usage,
+		},
+	} as unknown as SessionEvent;
+}
+
 test("the nudge counts steps and fires only on a completed turn", async () => {
 	const harness = makeCoordinator();
 	for (let i = 0; i < NUDGE; i += 1) harness.coordinator.noteStep("s1");
@@ -375,7 +415,7 @@ test("the review stops at the step budget", async () => {
 	const harness = makeCoordinator({}, shared);
 	const running = startReview(harness);
 	assert.equal(shared.interrupted.length, 0);
-	for (let i = 0; i < STEP_BUDGET; i += 1) harness.coordinator.noteChildEvent("child", { type: "step/end" });
+	for (let i = 0; i < STEP_BUDGET; i += 1) harness.coordinator.noteChildEvent("child", stepEnd(i + 1));
 	assert.equal(shared.interrupted[0], "child");
 	harness.gate.settle.resolve("ok");
 	await running;
@@ -388,19 +428,66 @@ test("the input-token budget is cumulative, not per message", async () => {
 	// only be the sum (spec §7.4 budgets 600000 cumulatively).
 	const harness = makeCoordinator({ maxInputTokens: 1000 }, shared);
 	const running = startReview(harness);
-	harness.coordinator.noteChildEvent("child", {
-		type: "assistant/message",
-		usage: { inputTokens: 600, cacheReadTokens: 100 },
-	});
+	harness.coordinator.noteChildEvent("child", assistantUsage({ inputTokens: 600, cacheReadTokens: 100 }, 1));
 	assert.deepEqual(shared.interrupted, [], "one message alone is under the budget");
-	harness.coordinator.noteChildEvent("child", {
-		type: "assistant/message",
-		usage: { inputTokens: 600, cacheReadTokens: 800 },
-	});
+	harness.coordinator.noteChildEvent("child", assistantUsage({ inputTokens: 600, cacheReadTokens: 800 }, 2));
 	assert.equal(shared.interrupted[0], "child");
 	harness.gate.settle.resolve("ok");
 	await running;
 	assert.equal(soleUsageRow(harness).inputTokens, 1200);
+});
+
+test("an event races in before spawn answers, and is charged to the single flying review", async () => {
+	// The documented window: the child exists and starts emitting before
+	// `subagents.start` resolves, so its id is not yet known. With exactly one
+	// review flying there is no ambiguity, and dropping these events would let the
+	// first model rounds of every review go unaccounted.
+	let answer!: (value: { childSessionId: string; done: Promise<unknown> }) => void;
+	const spawnGate = new Promise<{ childSessionId: string; done: Promise<unknown> }>((resolve) => {
+		answer = resolve;
+	});
+	const interrupted: string[] = [];
+	const config: BuddyConfig = { ...FALLBACK_CONFIG, skills: { ...FALLBACK_CONFIG.skills, maxReviewSteps: 2 } };
+	const coordinator = new ReviewCoordinator({
+		config: () => config,
+		spawn: () => spawnGate,
+		interrupt: (childSessionId) => {
+			interrupted.push(childSessionId);
+		},
+		now: () => "2026-09-14T00:00:00.000Z",
+		log: () => {},
+		reviewUsage: tableStub<ReviewUsageRecord>(),
+	});
+	for (let i = 0; i < NUDGE; i += 1) coordinator.noteStep("s1");
+	const running = coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
+	coordinator.noteChildEvent("not-yet-known", stepEnd(1));
+	coordinator.noteChildEvent("not-yet-known", stepEnd(2));
+	assert.deepEqual(interrupted, ["not-yet-known"], "the budget is enforced through the id spawn has not answered with yet");
+	answer({ childSessionId: "real-child", done: Promise.resolve("ok") });
+	await running;
+});
+
+test("a parent conversation's own steps are never charged to a flying review", async () => {
+	// With the preset row offering *every* session event to the coordinator, the
+	// parent conversation's own `step/end`s arrive at `noteChildEvent` too. Once a
+	// review's child id is known, an unrecognized id is another session's event:
+	// charging it would spend the review's step budget on work the review never
+	// did — and a chatty parent could stop its own review mid-flight.
+	const shared = freshShared();
+	const harness = makeCoordinator({}, shared);
+	// The review must be genuinely in flight — the run held open — or its child
+	// would finish alongside the first `await` and the assertion below would pass
+	// for the wrong reason (there would be no review left to mis-charge).
+	harness.gate.mode = "pending";
+	const running = startReview(harness);
+	// Let `spawn` answer, which is the moment the child id becomes known.
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < STEP_BUDGET; i += 1) harness.coordinator.noteChildEvent("s1", stepEnd(i + 1));
+	assert.deepEqual(shared.interrupted, [], "the parent's own rounds must not fire the review's budget");
+	harness.gate.settle.resolve("ok");
+	await running;
+	const row = soleUsageRow(harness);
+	assert.equal(row.steps, 0, "and none of them may be attributed to the review");
 });
 
 test("usage is attributed to the parent session in a finally, even on failure", async () => {
@@ -423,10 +510,10 @@ test("usage is attributed to the parent session in a finally, even on failure", 
 	});
 	for (let i = 0; i < NUDGE; i += 1) coordinator.noteStep("s1");
 	const ending = coordinator.onTurnEnd({ sessionId: "s1", reason: { kind: "completed" } });
-	coordinator.noteChildEvent("child", {
-		type: "assistant/message",
-		usage: { inputTokens: 1200, outputTokens: 34, cacheReadTokens: 900, cacheWriteTokens: 12 },
-	});
+	coordinator.noteChildEvent(
+		"child",
+		assistantUsage({ inputTokens: 1200, outputTokens: 34, cacheReadTokens: 900, cacheWriteTokens: 12 }),
+	);
 	fail(new Error("review blew up"));
 	await ending;
 	assert.equal(reviewUsage.size, 1);
@@ -473,11 +560,15 @@ test("a failing usage write is logged, not thrown at the caller", async () => {
 test("a malformed child event is ignored rather than thrown", async () => {
 	const harness = makeCoordinator();
 	await fire(harness);
+	// The envelope is typed as the real `SessionEvent`; these are the wire values
+	// a live firehose could still hand the listener, cast to reach the runtime
+	// guards the type cannot express.
+	const garbage = (value: unknown): SessionEvent => value as SessionEvent;
 	assert.doesNotThrow(() => {
-		harness.coordinator.noteChildEvent("child", undefined);
-		harness.coordinator.noteChildEvent("child", { type: "step/end", usage: "nope" });
-		harness.coordinator.noteChildEvent("child", { type: "assistant/message", usage: { inputTokens: "many" } });
-		harness.coordinator.noteChildEvent("child", { type: 7 });
+		harness.coordinator.noteChildEvent("child", garbage(undefined));
+		harness.coordinator.noteChildEvent("child", garbage({ type: "step/end", usage: "nope" }));
+		harness.coordinator.noteChildEvent("child", garbage({ type: "assistant/message", usage: { inputTokens: "many" } }));
+		harness.coordinator.noteChildEvent("child", garbage({ type: 7 }));
 	});
 	assert.deepEqual(harness.shared.interrupted, []);
 });
@@ -499,11 +590,11 @@ test("no step is counted while skills are disabled", async () => {
 test("the completion log line carries the calls and cache facts", async () => {
 	const harness = makeCoordinator();
 	const running = startReview(harness);
-	harness.coordinator.noteChildEvent("child", { type: "step/end" });
-	harness.coordinator.noteChildEvent("child", {
-		type: "assistant/message",
-		usage: { inputTokens: 1200, outputTokens: 34, cacheReadTokens: 900 },
-	});
+	harness.coordinator.noteChildEvent("child", stepEnd(1));
+	harness.coordinator.noteChildEvent(
+		"child",
+		assistantUsage({ inputTokens: 1200, outputTokens: 34, cacheReadTokens: 900 }, 2),
+	);
 	harness.gate.settle.resolve("ok");
 	await running;
 	assert.deepEqual(harness.shared.logged, [

@@ -359,6 +359,8 @@ test("the skills module warns when the preset missed its heartbeat or belongs to
 	const shown = texts(panel.tree());
 	assert.ok(shown.includes("settings.buddy:skillsPresetMissed"), "a missed heartbeat must never be silent");
 	assert.ok(shown.includes("settings.buddy:skillsPresetUser"), "a user-owned preset id must be said out loud too");
+	// A spend section with nothing in it says so rather than rendering as absent.
+	assert.ok(shown.includes("settings.buddy:skillsSpendEmpty"));
 });
 
 test("the skills review switch writes only the enabled slice and keeps the rest server-side", async () => {
@@ -461,6 +463,42 @@ test("the ledger lists its history and undoes one entry", async () => {
 	const rollback = panel.calls.find((call) => call.endpoint === "buddySkills/rollback");
 	assert.deepEqual(rollback?.payload, { args: { entryId: "e1" } }, "the rollback is addressed by ledger id");
 	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsRolledBack"), "a successful undo says so");
+});
+
+test("the panel shows each review's attributed spend, the only place §9.2 makes it visible", async () => {
+	// DSH's stock session page never folds a review's tokens into its cost view,
+	// so this module is the whole visible surface for "what did self-improvement
+	// cost". The numbers are the host's own and must render per review.
+	const spend = [
+		{
+			id: "r1",
+			ts: "2026-09-14T11:00:00.000Z",
+			parentSessionId: "s1",
+			childSessionId: "c1",
+			provider: "fork",
+			model: "m",
+			steps: 4,
+			inputTokens: 1200,
+			outputTokens: 34,
+			cacheReadTokens: 900,
+			outcome: "completed",
+		},
+	];
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/reviewUsage") return { ok: true, value: spend };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	const shown = texts(panel.tree());
+	assert.ok(shown.includes("settings.buddy:skillsSpendTitle"), "the spend section must exist");
+	assert.ok(shown.includes("2026-09-14T11:00:00.000Z — completed"), "a row carries its timestamp and outcome");
+	assert.ok(shown.includes("settings.buddy:skillsSpendSteps: 4"), "the model rounds a review used");
+	assert.ok(shown.includes("settings.buddy:skillsSpendIn: 1200"), "input tokens");
+	assert.ok(shown.includes("settings.buddy:skillsSpendOut: 34"), "output tokens");
+	assert.ok(shown.includes("settings.buddy:skillsSpendCacheRead: 900"), "cache-read tokens — the fork's cache evidence");
 });
 
 test("the visibility selector offers only the two word tiers the host accepts verbatim", async () => {

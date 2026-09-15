@@ -20,3 +20,17 @@ test("a panel patch accepts only the known module ids with boolean values", () =
 test("unknown top-level fields and malformed shapes produce an empty patch", () => {
 	assert.deepEqual(cleanPreferencesPatch(FALLBACK_CONFIG, { home: "/elsewhere", model: "x", panel: [] }), {});
 });
+
+test("a skills patch copies only the reviewed switch, never an adjacent settings write", () => {
+	// The panel owns exactly one field of `skills`, and this is a live settings
+	// write: a patch that smuggled a second field must not reach the config, or
+	// the review route and the budgets would become panel-writable.
+	const current = {
+		...FALLBACK_CONFIG,
+		skills: { ...FALLBACK_CONFIG.skills, reviewProvider: "kept", reviewModel: "kept" },
+	};
+	assert.deepEqual(
+		cleanPreferencesPatch(current, { skills: { enabled: false, reviewProvider: "evil", maxReviewSteps: 1 } }),
+		{ skills: { ...current.skills, enabled: false } },
+	);
+});

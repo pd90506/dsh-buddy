@@ -30,16 +30,23 @@
  *   the preset did not mount and says so. That converts the phase's signature
  *   failure — installed, silently doing nothing — into a visible state.
  * - **Nothing but the panel can raise a skill's scope.** The action set the
- *   write path accepts has no `visibility`, and {@link BuddySkillsService.setVisibility}
- *   is reachable only through the `buddySkills/visibility` endpoint. That is the
- *   one hard guarantee that a habit learned in Buddy cannot leak into ordinary
- *   coding sessions.
+ *   write path accepts has no `visibility`, *and* the write path refuses any
+ *   resulting document whose `visibility` is neither `buddy` nor the tier the
+ *   skill already had — so `create`/`edit`/`patch` cannot smuggle one in through
+ *   their content either. {@link BuddySkillsService.setVisibility} is the only
+ *   writer admitted past that check, and it is reachable only through the
+ *   `buddySkills/visibility` endpoint. That is the one hard guarantee that a
+ *   habit learned in Buddy cannot leak into ordinary coding sessions.
  * @module dsh-buddy/skills
  */
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Service } from "@deepseek-ai/cordis";
+// `import type` only, from the real package: the session envelope and the
+// surface event are what the log appends, and a locally declared shape is what
+// let both the review budgets and the digest adapter read the wrong level.
+import type { SessionEvent, SurfaceEvent } from "@deepseek-ai/dsh-session";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 import type { BuddyConfig } from "../config.ts";
 import type { BuddyPaths } from "../paths.ts";
@@ -219,7 +226,7 @@ interface AgentRegistry {
  */
 interface SessionQuery {
 	/** The transcript surface; only the cheap-model (digest) path needs it. */
-	readSurface(sessionId: string): Promise<{ readonly events: readonly unknown[] }>;
+	readSurface(sessionId: string): Promise<{ readonly events: readonly SurfaceEvent[] }>;
 }
 
 /** Anything that names a session: an Agent, a header, or a bare id. */
@@ -426,9 +433,9 @@ export class BuddySkillsService extends Service {
 	/**
 	 * Observe one event of a review's child session and enforce its budgets.
 	 * @param childSessionId - the child session the event belongs to.
-	 * @param event - the raw event; only its type and usage are read.
+	 * @param event - the real session envelope; only its type and data are read.
 	 */
-	noteChildEvent(childSessionId: string, event: unknown): void {
+	noteChildEvent(childSessionId: string, event: SessionEvent): void {
 		this.coordinator.noteChildEvent(childSessionId, event);
 	}
 
@@ -583,7 +590,13 @@ export class BuddySkillsService extends Service {
 		// `actor: "user"`: the promotion is the human's act whatever session the
 		// panel was open in, and the ledger should say so. The guard is the
 		// foreground one, which allows everything.
-		const outcome = await runOperations(this.manageDeps("", "user"), [
+		//
+		// `maySetVisibility` is what makes this the **only** writer that may raise
+		// a tier: the same `runOperations` path, reached by `skill_manage`, refuses
+		// a resulting non-buddy `visibility` outright (spec §4.3). Without the flag
+		// the promotion would be refused here too; without the refusal the tool
+		// could promote a skill with a `visibility:` line and no human involved.
+		const outcome = await runOperations(this.manageDeps("", "user", true), [
 			{ action: "patch", name: skill, old_string: document, new_string: patched },
 		]);
 		// The rewrite moves the skill between the two tiers, so both cached
@@ -1004,9 +1017,11 @@ export class BuddySkillsService extends Service {
 	 * Build the write path's dependencies.
 	 * @param sessionId - the calling session, empty for a panel promotion.
 	 * @param actor - the ledger actor to stamp; defaults to the caller's identity.
+	 * @param maySetVisibility - the human-only promotion rail; `false` for every
+	 *   `skill_manage` batch, which may never raise a skill's scope (spec §4.3).
 	 * @returns paths, tables, clock and the jurisdiction guard.
 	 */
-	private manageDeps(sessionId: string, actor?: SkillLedgerRecord["actor"]): ManageDeps {
+	private manageDeps(sessionId: string, actor?: SkillLedgerRecord["actor"], maySetVisibility = false): ManageDeps {
 		const store = this.host.buddyStore;
 		const reviewSession = this.reviewSessions.has(sessionId);
 		let reads = this.readSets.get(sessionId);
@@ -1023,6 +1038,7 @@ export class BuddySkillsService extends Service {
 			usage: store.skillUsage(),
 			actor: () => actor ?? (reviewSession ? "agent" : "user"),
 			now: () => new Date().toISOString(),
+			maySetVisibility,
 			guard: (action: Operation["action"], skill: string): WriteVerdict => {
 				// The foreground's own home is theirs: jurisdiction exists to keep
 				// the *automatic* review inside what it created.
@@ -1387,29 +1403,67 @@ function validatedTier(declared: string | undefined): string {
 }
 
 /**
- * @returns the digest messages one surface snapshot carries.
+ * The digest messages one surface snapshot carries.
+ *
+ * The events are the real `SurfaceEvent`s `readSurface` answers with, and the
+ * text lives on their `data`: a `user/message`'s data *is* the message, while an
+ * `assistant/message`'s data wraps it as `message`. Reading `content` off the
+ * envelope instead flattens every turn to the empty string — a digest banner
+ * with no conversation under it, which is a blind review.
+ * @param events - the surface events, oldest first.
+ * @returns the digest messages the review's prompt is rendered from.
  */
-function digestMessages(events: readonly unknown[]): readonly DigestMessage[] {
+function digestMessages(events: readonly SurfaceEvent[]): readonly DigestMessage[] {
 	const messages: DigestMessage[] = [];
 	for (const event of events) {
-		if (typeof event !== "object" || event === null) continue;
-		const record = event as { type?: unknown; content?: unknown };
-		const role =
-			record.type === "user/message"
-				? "user"
-				: record.type === "assistant/message"
-					? "assistant"
-					: record.type === "tool/result"
-						? "tool"
-						: undefined;
-		if (role === undefined) continue;
-		const text = textOf(record.content);
-		// An assistant turn with tool calls is what the digest renders as a name
-		// list; the surface does not carry those names here, so the text alone is
-		// what this row can honestly contribute.
-		messages.push({ role, text });
+		if (event.type === "user/message") {
+			messages.push({ role: "user", text: textOf(event.data.content) });
+			continue;
+		}
+		if (event.type === "assistant/message") {
+			// The tool-call blocks are the only source of the §7.1
+			// `ASSISTANT[tools: …]` line, so they are read here or nowhere.
+			const content = event.data.message.content;
+			const toolNames = toolNamesOf(content);
+			messages.push(toolNames.length === 0
+				? { role: "assistant", text: textOf(content) }
+				: { role: "assistant", text: textOf(content), toolNames });
+			continue;
+		}
+		if (event.type === "tool/result") {
+			// A tool result is only ever dropped by the digest, but it is kept in
+			// the message list so the tail-ordering rule sees it.
+			messages.push({ role: "tool", text: toolResultText(event.data.message.content) });
+		}
 	}
 	return messages;
+}
+
+/**
+ * The tool names one assistant message requested.
+ * @param content - the message's content blocks.
+ * @returns the invoked tool names, in call order.
+ */
+function toolNamesOf(content: readonly { readonly type: string; readonly name?: string }[]): string[] {
+	const names: string[] = [];
+	for (const block of content) {
+		if (block.type === "tool-call" && typeof block.name === "string" && block.name !== "") names.push(block.name);
+	}
+	return names;
+}
+
+/**
+ * Flatten one `tool/result` message's nested content to plain text.
+ * @param content - the tool-result block(s).
+ * @returns the text they carry.
+ */
+function toolResultText(content: readonly { readonly type: string; readonly content?: unknown }[]): string {
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const block of content) {
+		if (block.type === "tool-result") parts.push(textOf(block.content));
+	}
+	return parts.join("\n");
 }
 
 /**

@@ -139,7 +139,12 @@ export const Config: z<Partial<BuddyConfig>, BuddyConfig> = z.object({
 				.description(
 					"Reserved and not yet honoured: staging writes for approval needs a pending queue plus an approval surface, so every write is applied today whatever this is set to",
 				),
-			ledger: z.boolean().default(true).description("Record the skill mutation ledger"),
+			ledger: z
+				.boolean()
+				.default(true)
+				.description(
+					"Reserved and not yet honoured: the skill mutation ledger is always written and rollback replays it, so disabling this would silently remove rollback rather than stop the recording",
+				),
 		})
 		.default({ ...FALLBACK_CONFIG.skills })
 		.description("Automatic skill curation"),

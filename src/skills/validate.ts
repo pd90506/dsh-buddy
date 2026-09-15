@@ -14,9 +14,16 @@
  * default instead of dropping a hand-written skill from the catalog.
  * @module dsh-buddy/skills/validate
  */
+import { isAbsolute } from "node:path";
 
 /** DSH's public skill-name grammar (`dsh-skill`'s own `SKILL_NAME`). */
 export const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/** The least-exposed tier, and both providers' default for an unreadable value. */
+export const BUDDY_TIER = "buddy";
+
+/** The prefix a path-scoped tier carries. */
+const PROJECT_TIER_PREFIX = "project:";
 
 /** The only directories a skill may ship support files in. */
 export const ALLOWED_SUBDIRS = ["references", "templates", "scripts", "assets"] as const;
@@ -109,6 +116,31 @@ export function validateSkillDocument(input: {
 	}
 	if (parsed.body.trim() === "") return { ok: false, error: "the body is empty" };
 	return { ok: true, frontmatter: parsed.frontmatter, body: parsed.body };
+}
+
+/**
+ * The tier one frontmatter declares, resolved as the providers resolve it.
+ *
+ * Deliberately mirrors `provider.ts`'s read path (`resolveVisibility`), because
+ * this is the *write* side of the same rule: an absent, empty, non-scalar,
+ * relative-`project:` or unknown value is `buddy`, so an unreadable declaration
+ * can never be mistaken for a promotion. The provider resolves to a
+ * discriminated `SkillVisibility`; this answers the canonical string the write
+ * path compares against.
+ * @param frontmatter - a parsed frontmatter mapping.
+ * @returns `"buddy"`, `"global"`, or `"project:<absolute path>"`.
+ */
+export function declaredVisibility(frontmatter: Readonly<Record<string, unknown>>): string {
+	const raw = frontmatter["visibility"];
+	if (typeof raw !== "string") return BUDDY_TIER;
+	const value = raw.trim();
+	if (value === "" || value === BUDDY_TIER) return BUDDY_TIER;
+	if (value === "global") return "global";
+	if (value.startsWith(PROJECT_TIER_PREFIX)) {
+		const path = value.slice(PROJECT_TIER_PREFIX.length).trim();
+		if (path !== "" && isAbsolute(path)) return `${PROJECT_TIER_PREFIX}${path}`;
+	}
+	return BUDDY_TIER;
 }
 
 /**
