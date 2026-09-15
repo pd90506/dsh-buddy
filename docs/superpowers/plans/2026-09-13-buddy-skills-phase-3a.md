@@ -2225,6 +2225,57 @@ git commit -m "feat: wire the skills rows into the host composition and the budd
 probe 里什么都看不见。做法是复制 profile 后把 `node_modules` 逐项软链过去，再把 `dsh-buddy` 那一项换成
 `/home/panda-nuc/repo/dsh-buddy/.worktrees/phase-3a`，然后 `DSH_HOME=<probe> dsh --profile web --no-open --port 3099`。
 
+**Step 6 执行结果（2026-09-15，controller）。** 具体走法：`/tmp/stage-probe.sh` 复制 profile 的五个文件，把
+`node_modules` 逐项软链过去，只把 `dsh-buddy` 换成 worktree；`DSH_HOME=/tmp/dsh-probe dsh --profile web
+--no-open --port 3099`。
+
+**这一步抓到了本期唯一的一个 Critical，而且只有它能抓到。** 第一次启动直接失败，整个插件树拒绝加载：
+
+```
+Error: dsh: plugin tree failed to load: failed to apply loader entry buddy-skills (dsh-buddy/skills):
+typert: package face "dsh-buddy#host" is already registered
+```
+
+typert 注册表是宿主平面的单例，键是 `typertPackageKey(package, face)`；persona 行已经占了 `dsh-buddy#host`
+（`src/persona/gateway.ts:19` + `:126`），而新的 skills 行照抄了同一个包名。仓库自己的先例是**一行一个 typert
+包名**（telegram 用 `dsh-buddy-telegram`）。修复：只把 `src/skills/gateway.ts` 的 `TYPERT_PACKAGE` 改成
+`dsh-buddy-skills`，`BUDDY_SKILLS_SERVICE`（`"buddySkills"` 线协议命名空间）与 `BUDDY_SKILLS_ENDPOINTS` 一字
+未动；并新增 `test/typert-faces.test.ts`——把三行真实网关构造进**同一个**记录型注册表，断言没有哪个
+`${package}#${face}` 有两个主人（未修前 RED 打印 `dsh-buddy#host <- buddy-persona + buddy-skills`）。
+
+为什么 665 个单元测试、每任务独立复审、Task 15 的「真实工具注册表」测试都没看见：这个冲突只在**两个行同时
+装进同一个真实进程**时才存在，而 Task 18 正是第一次让 skills 行可被挂载的那个提交。**这是本期第四次印证那条
+规则——只对着 fake 验证过的接缝，证明不了 harness 里的事。**
+
+修完之后的验收，全部走真实 api-gateway：
+1. 干净启动，两行都挂上（此前整个插件树根本不加载）。
+2. `POST /api/buddySkills/status` → `{"ok":true,"value":{"synced":false,"missed":true,"preset":"plugin"}}`——
+   重新验证了 Task 13 那个 Critical 绑定键（线协议 `buddySkills` vs cordis 键 `buddySkillsEndpoints`），这是
+   fake 注册表做不到的。`synced:false, missed:true` 是设计里的提示态（还没有 buddy 会话挂载预设），说明那条
+   「预设未同步」提示是活的，不是沉默的谎。
+3. `POST /api/buddyPersona/preferences` → 五个 `panel.sections` 含 `skills: true`，且 `skills:{enabled:true}`。
+4. 写路径：`updatePreferences {patch:{skills:{enabled:false}}}` 回带 `enabled:false`，probe 的 `settings.yaml`
+   里 `buddy.skills.enabled: false` 而 `creationNudgeInterval: 10` 原样保留——「从 current 补全」的纪律在真实
+   写入上成立。
+5. `buddySkills/list` / `ledger` / `reviewUsage` 都是 `ok:true, value:[]`；`buddyTelegram/status` 仍答
+   `state:"off"`，既有行无回归。
+6. 两个子路径都能按真实模块解析加载成可挂载插件。
+7. **隔离**：`~/.dsh/.agent-presets/buddy/agent.cordis.yml` 仍是 `731b2258…` 且**没有标记**——真机那份无标记
+   安装完好，留给 Task 10b 的认领路径。
+
+**探测本身的坑（记下来，别再当成产品 bug）**：第一次启动报 `dsh-buddy-store: boot failed: cannot create effect
+on inactive context`、三行卡在 `pending (waiting for service: buddyStore)`——那是 boot 撞上了并发的
+`npm run check` 在重写 `lib/*.js`。没有并发写入者时重启即干净。**不要在被构建重写的 worktree 上启动 harness。**
+另外 `find ~/.dsh -newermt '<probe start>'` 这条隔离检查在原理上不可能为空：用户那台常驻的 3080 harness 正
+在往 `~/.dsh` 写**本次编码会话自己**的日志。要比较的是 probe 可能碰过的那几件具体产物。
+
+**未验到的部分，如实记着**：spec §13.2 的 1、4、5（10 步以上自动出现 review、16 步与 60 万 token 的停止、
+`cache_read > 0`）需要真实多轮对话与模型；第 2 条的技能**目录**隔离需要一个活会话去查它 scoped 的
+`dsh-skill` 注册表。`dsh web` 没有一次性模式（`dsh web --help` 只有 host/port/open/trusted-host），所以这次
+probe 从头到尾**没有挂载过 `buddy` 预设**——这正是 `status.synced` 为 `false` 的原因。**预设行的真实挂载、
+以及所有依赖预设 scope 层的保证，仍然未被验证。** Task 15 说技能那半边要留到这里；这里把它缩小到了一个具体
+可执行的步骤（在真实会话里挂载 `buddy` 预设），而不是关掉它。面板的真实 React 布局同样未验证。
+
 ---
 
 ## Self-Review
