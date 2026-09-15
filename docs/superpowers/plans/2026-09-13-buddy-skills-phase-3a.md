@@ -1825,6 +1825,10 @@ git commit -m "fix: keep review child sessions out of the buddy conversation lis
 - Modify: `src/persona/gateway.ts`（`PreferencesView.skills`；`cleanPreferencesPatch` 收 `skills.enabled`；`GatewayDeps.writePreferences` 的类型）
 - Modify: `src/persona/index.ts`（`preferences()` 回 `skills`）
 - Test: `test/gateway.test.ts`、`test/mount.test.ts`、`test/store.test.ts`
+  - **补记（2026-09-15，controller）**：`test/preferences.test.ts` 是 `cleanPreferencesPatch` 的**专属单元套件**
+    （`:4` 直接 import 它，三条用例分别覆盖 model 分支、panel 分支与畸形/未知字段）。本任务的 Files 列表当时
+    漏了它，实现者在报告里主动指出；新分支的行为目前只在网关层被覆盖（`test/gateway.test.ts` 正反两条）。
+    最终全分支复审把这件事与"合法布尔值 + 额外键"那个未覆盖向量一起裁定。
 
 **Interfaces:**
 - Consumes: Task 1 的 `buddy.skills` 设置段（`BuddySkillsConfig`，`src/config.ts`）
@@ -2029,7 +2033,11 @@ export const PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram
 | `skillsAdopt` | `Manage automatically` | `交给自动管理` |
 | `skillsPromote` | `Visibility` | `可见范围` |
 | `skillsVisibilityBuddy` | `Buddy only` | `仅 Buddy` |
-| `skillsVisibilityProject` | `This project` | `当前项目` |
+| `skillsVisibilityProject` | `A project folder` | `某个项目目录` |
+| `skillsProjectPath` | `Project folder` | `项目目录` |
+| `skillsProjectPathHint` | `Absolute path. Only sessions whose working directory is inside it will see this skill.` | `绝对路径。只有在它下层目录里运行的会话能看到这个技能。` |
+| `skillsProjectApply` | `Apply` | `应用` |
+| `skillsLoading` | `Loading…` | `载入中…` |
 | `skillsVisibilityGlobal` | `All sessions` | `所有会话` |
 | `skillsManagedByAgent` | `Automatic` | `自动` |
 | `skillsManagedByHuman` | `Yours` | `你的` |
@@ -2055,14 +2063,29 @@ export const PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram
 3. review 总开关：`Switch`，`label={t("skillsReview")}`，初值取 `preferences.skills.enabled`，`onChange` →
    `call("buddyPersona/updatePreferences", { patch: { skills: { enabled } } })`；失败把消息放进 `error`。
 4. 技能列表：每行画名字、描述、`useCount`、`latestActivityAt`、`curatorManaged ? t("skillsManagedByAgent") :
-   t("skillsManagedByHuman")`，以及三个控件——pin/unpin（`buddySkills/pin`，参数 `{ skill, pinned }`）、adopt
+   t("skillsManagedByHuman")`，以及这些控件——pin/unpin（`buddySkills/pin`，参数 `{ skill, pinned }`）、adopt
    （`buddySkills/adopt`，**只在 `curatorManaged === false` 时画**）、可见范围 `Select`（`buddySkills/visibility`，
-   参数 `{ skill, tier }`，三个选项就是三个 tier）。空列表画 `t("skillsEmpty")`。
+   参数 `{ skill, tier }`，**只给 `buddy` 与 `global` 两个词级 tier**）、以及一个由人填写的项目目录 `Input` +
+   `Button`，写 `project:<path>`。空列表画 `t("skillsEmpty")`。
+
+   **订正（2026-09-15，controller，由实现者的质疑暴露）**：`tier` 的取值不是"三个字面量"。已核实
+   `parseTier`（`src/skills/index.ts:1234-1242`）只接受 `"buddy"`、`"global"` 或**非空**的 `project:<path>`——
+   裸 `"project"` 在任何写入之前就被拒绝。而 `preferences.conversationCwd` 是 `<buddy home>/main/workspace`
+   （buddy 自己的草稿 cwd，不是任何"项目"）；设计文档 §7.1（`2026-09-12-dsh-buddy-design.md:250-254`）把
+   `project: <path>` 定义为"只在该项目目录下的会话"。所以把技能作用域写成 `project:<conversationCwd>` 等于
+   只发给本来就能通过 `buddy` 层看到它的那些会话——一个点了没有任何作用的控件。**规则**：项目 tier 的路径
+   由人自己填，**绝不预填**；不是绝对路径就**可见地拒绝且不调端点**（`src/skills/provider.ts:451` 明确拒绝为
+   非绝对路径的 `project:` 做作用域，而 `parseTier` 会照收 `project:relative/dir`，于是技能被静默地留在
+   buddy 层——一次什么都没做的"提升"）。
 5. 账本列表：`ledger()` 每行画 `ts` / `action` / `skill` 与一个 `t("skillsRollback")` 按钮
    （`buddySkills/rollback`，参数 `{ entryId: row.id }`）；成功画 `t("skillsRolledBack")`，失败画
    `t("skillsFailed")`。空账本画 `t("skillsLedgerEmpty")`。
 6. 提升可见性**只能由人点**：面板是唯一的门（`skill_manage` 拒绝写非 buddy 的 visibility），所以这里不要做
    任何「自动提升」，也不要替用户决定 tier。
+7. **被拒绝的写不能沉默**：`SkillMutationView` / `SkillRollbackView` 都带 `success` 与 `message`
+   （`src/skills/gateway.ts`），`success === false` 时要把宿主给的 `message` 画在与抛错同一条可见面上。
+   spec §10 的规则是失败永不静默。注意：**失败后不要重载列表**——重载会把刚设的 error 清掉，拒绝又变回沉默
+   （本任务的第一版就踩了这个，测试抓住了）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -2077,69 +2100,125 @@ git commit -m "feat: the Skills module in the buddy main panel"
 ```
 ---
 
-### Task 18: 接线（补丁 / 构建 / 清单 / preset 模板）与真机验收
+### Task 18: 接线（补丁 / 构建 / 清单 / preset 模板）
 
 **Files:**
-- Modify: `cordis.patch.yml`, `build.mjs`, `package.json`, `assets/preset/agent.cordis.yml`
-- Test: `test/patch.test.ts`, `test/preset.test.ts`
+- Modify: `cordis.patch.yml`、`build.mjs`、`package.json`、`assets/preset/agent.cordis.yml`
+- Test: `test/patch.test.ts`、`test/preset.test.ts`
 
 **Interfaces:**
-- Consumes: Task 13、14、10
-- Produces: 两行进入各自组合；`./skills` 与 `./skills-agent` 两个导出
+- Consumes: Task 13（host 行入口 `src/skills/index.ts`）、Task 14（preset 行入口 `src/skills-agent/index.ts`）、Task 10（生成物语义与模板哈希表）
+- Produces: 两行分别进入各自的组合；`./skills` 与 `./skills-agent` 两个导出；`lib/skills.js` 与 `lib/skills-agent.js` 两个产物
+
+**订正（2026-09-15，controller，三条都对着工作树核过）**：
+1. **文件头的生成物声明已经有了**，不需要再加。`assets/preset/agent.cordis.yml:1-14` 目前就是 Task 10 写的
+   `GENERATED ARTIFACT: THIS WIRING IS NOT YOURS TO EDIT` 块（含 SOUL.md / AGENTS.md / 面板三条出路与
+   「复制预设到新 id」的指引）。再加一遍就是重复；原计划 Step 3 的这一句按已完成处理，**只做** skills 段那行。
+2. **`PUBLISHED_TEMPLATE_HASHES`（`src/store/preset.ts:88-103`）是只增不删的表**。本轮改模板之后
+   **不需要**也没有理由删任何一条：`731b2258…`（`59b9e98`，真机上那份无标记安装的字节）与 `2c5e5f59…`
+   （`d4e1607`，Task 10 的模板）都必须留着，否则 Task 10b 的「认领旧的无标记安装」会失效。只有当你把一份
+   **已经发给过别人**的模板字节换掉时才追加一行；本轮改出来的字节与 3a 一起首发，不在表里。
+3. **`cordis.patch.yml` 的文件头注释已过时**（它写着 "Two host rows"，实际已有四个）。加行时顺手把这句改成
+   事实描述，别再留下一个会误导人的数字。
+4. **Step 5 的真机验收不由实现者做**，改由 controller 在 Task 18 的 review 之后单独跑（见 §13.2）。理由：
+   它要起一个隔离实例、驱动真实对话、并核对 probe 指向的是**本 worktree 的构建产物**——那一步需要 J 决定
+   probe profile 的依赖指向，且失败时的修复动作（改 profile、改构建）不属于本任务的 diff。实现者**不要**
+   起 dsh 实例、不要动 `~/.dsh`。
 
 - [ ] **Step 1: 写失败的测试**
 
+`test/patch.test.ts`（本文件已有 `rowNames()`，`test/patch.test.ts:26`）：
+
 ```ts
-test("the patch mounts the buddy-skills host row", () => {
-	assert.ok(rowNames().includes("dsh-buddy/skills"));
+test("the patch mounts the buddy-skills host row after the persona row", () => {
+	assert.ok(rowNames().includes("dsh-buddy/skills"), `rows: ${rowNames().join(", ")}`);
 });
 
-test("the shipped preset carries the agent row and the generated-artifact notice", () => {
-	const preset = readFileSync(join(ROOT, "assets", "preset", "agent.cordis.yml"), "utf8");
-	assert.match(preset, /name: 'dsh-buddy\/skills-agent'/);
-	assert.match(preset, /generated/i);
+test("the patch mounts the buddy-skills-agent row through the buddy preset, not the host", () => {
+	const patch = readFileSync(join(ROOT, "cordis.patch.yml"), "utf8");
+	assert.ok(!patch.includes("skills-agent"), "the agent row belongs to the preset template, never the host patch");
+});
+```
+
+`test/preset.test.ts`（本文件已有 `PRESET_PATH`，`test/preset.test.ts:25`）：
+
+```ts
+test("the shipped preset carries the agent row whose registrations live in THIS preset's layer", () => {
+	const preset = readFileSync(PRESET_PATH, "utf8");
+	assert.match(preset, /- id: buddy-skills-agent\n\s+name: 'dsh-buddy\/skills-agent'/);
+	// 生成物声明是 Task 10 留下的，Task 18 不要再写第二份。
+	assert.match(preset, /GENERATED ARTIFACT/);
 });
 
-test("both subpath exports resolve", () => {
+test("both subpath exports resolve, and neither is a wildcard", () => {
 	const exports = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).exports;
-	assert.ok(exports["./skills"] && exports["./skills-agent"]);
+	assert.ok(exports["./skills"], "the host row needs its own export");
+	assert.ok(exports["./skills-agent"], "the preset row needs its own export");
 });
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `node --test test/patch.test.ts test/preset.test.ts`
-Expected: FAIL
+Expected: FAIL — 两行都还没接
 
 - [ ] **Step 3: 实现**
 
-- `cordis.patch.yml` 的 `insert` 列表加 `- { id: buddy-skills, name: 'dsh-buddy/skills', config: {} }`（放在 `buddy-persona` 之后，因为都依赖 store）。
-- `package.json` 的 `exports` 加 `"./skills"` 与 `"./skills-agent"`。
-- `build.mjs` 的 `hostEntries` 加 `["src/skills/index.ts", "lib/skills.js"]` 与 `["src/skills-agent/index.ts", "lib/skills-agent.js"]`。
-- `assets/preset/agent.cordis.yml`：文件头加生成物声明（这份文件由 dsh-buddy 生成、升级按插件版本重写；改人格去 `SOUL.md`、改规则去 `AGENTS.md`、改开关用 Buddy 面板；要自定义接线请用 GUI 的"复制预设"复制成新 id），并在 skills 段末尾加：
+`cordis.patch.yml` 的 `insert` 列表加一行，**放在 `buddy-persona` 之后**（它依赖 store 发布的
+`ctx.buddyStore`）：
 
 ```yaml
-# 技能自动进化：provider / skill_manage / 事件监听都注册进 THIS preset 的层，
+    - id: buddy-skills
+      name: 'dsh-buddy/skills'
+      config: {}
+```
+
+并更新文件头那句过时的行数描述（见订正 3）。
+
+`package.json` 的 `exports` 加两条，与既有的 `"./store"` / `"./persona"` / `"./telegram"` 同形：
+
+```json
+    "./skills": "./lib/skills.js",
+    "./skills-agent": "./lib/skills-agent.js",
+```
+
+`build.mjs` 的 `hostEntries` 加两行（**顺序无关，但不要漏**；这个列表是显式的，写错路径会构建失败而不是
+静默少产物）：
+
+```js
+	["src/skills/index.ts", "lib/skills.js"],
+	["src/skills-agent/index.ts", "lib/skills-agent.js"],
+```
+
+`assets/preset/agent.cordis.yml`：在 skills 段（`:107-118`）的 `tool-skill` 之后加：
+
+```yaml
+# 技能自动进化：provider / skill_manage / 事件监听 / refine 命令都注册进 THIS preset 的层，
 # 因此自动总结出来的技能对普通编码会话结构上不可见（见第 3 期设计文档 §4）。
 - id: buddy-skills-agent
   name: 'dsh-buddy/skills-agent'
 ```
 
+**不要**再写第二份生成物声明（订正 1），**不要**动 `PUBLISHED_TEMPLATE_HASHES`（订正 2）。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `npm run check`
-Expected: PASS（typecheck + build + 全部测试）
+Expected: PASS（typecheck + build + 全部测试）。这一步之后 `lib/skills.js` 与 `lib/skills-agent.js` 必须真实
+存在——`npm run build` 会打印它们。
 
-- [ ] **Step 5: 真机验收（隔离 probe profile）**
-
-按 `CLAUDE.md` 的配方起隔离实例（`DSH_HOME=/tmp/dsh-probe ... --port 3099`），逐条跑 spec §13.2 的 9 条验收，重点是：**编码会话的技能列表里没有自动总结出来的技能、工具列表里没有 `skill_manage`**；review 的 16 步与 60 万 token 都进日志；`cache_read` > 0。验完 `find ~/.dsh -newermt '<probe start>'` 必须为空。
-
-- [ ] **Step 6: 提交**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add cordis.patch.yml build.mjs package.json assets/preset/agent.cordis.yml test/patch.test.ts test/preset.test.ts
 git commit -m "feat: wire the skills rows into the host composition and the buddy preset"
 ```
+
+**Step 6 留给 controller**：真机验收（spec §13.2 的 9 条）在 review 之后由 controller 用隔离 probe profile 跑。
+探针必须让 `dsh-buddy` 指向**本 worktree**而不是 master checkout——`~/.dsh/profiles/web/node_modules/dsh-buddy`
+是 `../../../../repo/dsh-buddy` 的符号链接，所以照 `CLAUDE.md` 的配方原样复制 profile 会加载 master 上的旧构建，
+probe 里什么都看不见。做法是复制 profile 后把 `node_modules` 逐项软链过去，再把 `dsh-buddy` 那一项换成
+`/home/panda-nuc/repo/dsh-buddy/.worktrees/phase-3a`，然后 `DSH_HOME=<probe> dsh --profile web --no-open --port 3099`。
 
 ---
 
