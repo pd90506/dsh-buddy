@@ -655,5 +655,6 @@ test("preferences are served through the proxy with the conversation cwd", async
 	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
 	const view = (await dispatch(persona, "preferences", [])) as PreferencesView;
 	assert.equal(view.conversationCwd, join(mounted.home, "main", "workspace"));
+	assert.deepEqual(view.skills, { enabled: FALLBACK_CONFIG.skills.enabled });
 	assert.deepEqual(view.panel, { sections: { soul: true, agents: true, model: true, telegram: true } });
 });

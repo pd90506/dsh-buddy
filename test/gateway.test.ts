@@ -40,6 +40,7 @@ const SESSIONS: BuddySessionSummary[] = [{ sessionId: "s1", title: "First", upda
 const PREFERENCES: PreferencesView = {
 	model: { ...FALLBACK_CONFIG.model },
 	panel: { sections: { ...FALLBACK_CONFIG.panel.sections } },
+	skills: { enabled: true },
 	conversationCwd: "/tmp/buddy-workspace",
 };
 
@@ -50,7 +51,7 @@ interface Recorder extends GatewayDeps {
 	/** How many times {@link GatewayDeps.readPersona} was called. */
 	reads: number;
 	/** Every patch that reached {@link GatewayDeps.writePreferences}, in order. */
-	readonly preferencePatches: Partial<Pick<BuddyConfig, "model" | "panel">>[];
+	readonly preferencePatches: Partial<Pick<BuddyConfig, "model" | "panel" | "skills">>[];
 	/** Every session id that reached {@link GatewayDeps.archiveSession}, in order. */
 	readonly archived: string[];
 }
@@ -247,6 +248,18 @@ test("updatePreferences dispatches through the proxy and writes only validated f
 	assert.deepEqual(recorder.preferencePatches, [
 		{ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } },
 	]);
+});
+
+test("updatePreferences carries the review master switch, completed from the current config", async () => {
+	const { service, recorder } = harness();
+	await dispatch(service, "updatePreferences", [{ skills: { enabled: false } }]);
+	assert.deepEqual(recorder.preferencePatches, [{ skills: { ...FALLBACK_CONFIG.skills, enabled: false } }]);
+});
+
+test("updatePreferences refuses a skills patch that is not a boolean", async () => {
+	const { service, recorder } = harness();
+	await dispatch(service, "updatePreferences", [{ skills: { enabled: "yes", reviewProvider: "evil" } }]);
+	assert.deepEqual(recorder.preferencePatches, [], "a malformed skills patch must not reach the writer");
 });
 
 test("archiveSession forwards a string id and answers with the fresh list", async () => {
