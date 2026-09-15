@@ -1739,6 +1739,10 @@ git commit -m "test: prove tool-catalog isolation across scopes, and name what o
 - Consumes: 无
 - Produces: `listSessions` 排除 `origin === "subagent"` 或 `delegationDepth > 0` 的会话
 
+**订正（2026-09-15，controller，实现者报告后追加）**：本行的 `SessionQuery.listSessions` 局部镜像也必须
+跟着加 `origin?: "subagent"` 与 `delegationDepth?: number`，否则 `npm run typecheck` 报 TS2339。镜像要照
+真实的 `SessionHeader` 写，**不要**用 `as` 把它盖过去——那会把耦合藏起来。
+
 - [ ] **Step 1: 写失败的测试**
 
 放在 `test/mount.test.ts` 既有的列表用例旁边（`:491` 的混合 preset 用例、`:549` 的 archived 用例之后），
@@ -1751,7 +1755,7 @@ test("a review child session never appears in the buddy conversation list", asyn
 		sessions: [
 			{ header: { id: "s1", agentPreset: BUDDY_PRESET_ID }, live: true },
 			{ header: { id: "review-child", agentPreset: BUDDY_PRESET_ID, origin: "subagent" }, live: true },
-			// 第二个标记同一个事实：`childSessionMeta()` 同时写 origin 与 delegationDepth。
+			// A second marking of the same fact: `childSessionMeta()` writes both `origin` and `delegationDepth`.
 			{ header: { id: "review-child-2", agentPreset: BUDDY_PRESET_ID, delegationDepth: 1 }, live: true },
 		],
 		titles: { s1: { title: "S1", updatedAt: 1 } },
@@ -1784,10 +1788,13 @@ Expected: FAIL — `review-child` 与 `review-child-2` 都出现在列表里
 		const mine = records.filter(
 			(record) =>
 				record.header.agentPreset === BUDDY_PRESET_ID &&
-				// 后台 review 跑的是真子会话，`childSessionMeta()` 会把父的
-				// `agentPreset: 'buddy'` 继承下来（design.md §4.4、§13.2 item 3）：不过滤就会每次
-				// 自动总结都在 Buddy 文件夹里留一条幽灵对话。两个条件是同一个事实的两种标记，
-				// 与 skills 行那两处跳过背景回合的守卫保持同一条谓词。
+				// A background review runs as a real child session, and
+				// `childSessionMeta()` lets it inherit the parent's `agentPreset: 'buddy'`
+				// down the live scope chain (design.md §4.4, §13.2 item 3). Unfiltered,
+				// every automatic review leaves a ghost conversation in the Buddy folder.
+				// The two conditions are two markings of the same fact, and this is
+				// deliberately the same predicate the skills row's two background-turn
+				// guards already use.
 				record.header.origin !== "subagent" &&
 				(record.header.delegationDepth ?? 0) === 0 &&
 				!archived.has(record.header.id),
@@ -1811,62 +1818,263 @@ git commit -m "fix: keep review child sessions out of the buddy conversation lis
 ```
 
 
-### Task 17: 面板 Skills 模块
+### Task 17a: review 总开关的承载线（host 半边）
 
 **Files:**
-- Create: `src/client/skills-module.tsx`
-- Modify: `src/client/modules.ts`, `src/index.ts`（`PANEL_SECTION_IDS`）, `src/config.ts`（`panel.sections.skills`）
-- Test: `test/client-panel.test.ts`、`test/client-ui.test.ts`
+- Modify: `src/store/index.ts`（`ConfigAccess.write` 与 `BuddyStore.updateConfig` 的 `Pick` 加 `"skills"`）
+- Modify: `src/persona/gateway.ts`（`PreferencesView.skills`；`cleanPreferencesPatch` 收 `skills.enabled`；`GatewayDeps.writePreferences` 的类型）
+- Modify: `src/persona/index.ts`（`preferences()` 回 `skills`）
+- Test: `test/gateway.test.ts`、`test/mount.test.ts`、`test/store.test.ts`
 
 **Interfaces:**
-- Consumes: Task 13 的 `buddySkills/*` 端点
-- Produces: `SkillsModule` React 组件；`PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram"]`
+- Consumes: Task 1 的 `buddy.skills` 设置段（`BuddySkillsConfig`，`src/config.ts`）
+- Produces: `PreferencesView.skills = { readonly enabled: boolean }`；`buddyPersona/updatePreferences` 接受 `{ skills: { enabled: boolean } }`，并把它写进 settings 的 `buddy.skills.enabled`
+
+**为什么单独一段**：spec §9.3 的功能表里有一行「review 总开关」，而 `buddy.skills.enabled` 今天**没有任何写入通路**——`cleanPreferencesPatch` 只认 `model` 与 `panel`，`BuddyStore.updateConfig` 的参数是
+`Partial<Pick<BuddyConfig, "model" | "panel">>`（`src/store/index.ts:173`），`ConfigAccess.write` 同样（`:62`）。
+给一个没有线的开关画控件，就是本项目已经为 `writeApproval` 否决过一次的「看得见但无真实作用」（spec §8.6）。
+先把线接上，Task 17b 再画控件。**不要**在这一步碰 `PANEL_SECTION_IDS` 或任何 `src/client/` 文件。
 
 - [ ] **Step 1: 写失败的测试**
 
+`test/gateway.test.ts`：
+- `PREFERENCES`（`:39-43`）加 `skills: { enabled: true }`；
+- `Recorder.preferencePatches`（`:53`）类型改成 `Partial<Pick<BuddyConfig, "model" | "panel" | "skills">>[]`；
+- 在 `:244` 那条既有用例之后加两条：
+
 ```ts
-test("the skills module appears in the panel and can be hidden", () => {
-	const shown = visibleModules(MODULES, { soul: true, agents: true, skills: true, model: true, telegram: true });
-	assert.deepEqual(shown.map((m) => m.id), ["soul", "agents", "skills", "model", "telegram"]);
-	const hidden = visibleModules(MODULES, { skills: false });
-	assert.ok(!hidden.some((m) => m.id === "skills"));
+test("updatePreferences carries the review master switch, completed from the current config", async () => {
+	const { service, recorder } = harness();
+	await dispatch(service, "updatePreferences", [{ skills: { enabled: false } }]);
+	assert.deepEqual(recorder.preferencePatches, [{ skills: { ...FALLBACK_CONFIG.skills, enabled: false } }]);
 });
 
-test("the built client renders the skills module without calling it as a function", () => {
-	const html = renderPanel({ active: "skills" });
-	assert.match(html, /data-module="skills"/);
+test("updatePreferences refuses a skills patch that is not a boolean", async () => {
+	const { service, recorder } = harness();
+	await dispatch(service, "updatePreferences", [{ skills: { enabled: "yes", reviewProvider: "evil" } }]);
+	assert.deepEqual(recorder.preferencePatches, [], "a malformed skills patch must not reach the writer");
 });
+```
+
+`test/store.test.ts`：在 `:571` 那条既有用例之后追加：
+
+```ts
+test("updateConfig writes the skills section through the settings plane", async () => {
+	const writes: unknown[] = [];
+	const { ctx, paths, handle } = await storeFixture();
+	const store = new BuddyStore(ctx as unknown as Context, paths, handle, {
+		read: () => FALLBACK_CONFIG,
+		write: async (patch) => {
+			writes.push(patch);
+		},
+	});
+	await store.updateConfig({ skills: { ...FALLBACK_CONFIG.skills, enabled: false } });
+	assert.deepEqual(writes, [{ skills: { ...FALLBACK_CONFIG.skills, enabled: false } }]);
+});
+```
+
+`test/mount.test.ts`：在 `:649` 那条「preferences are served through the proxy with the conversation cwd」里补一条断言。
+**不要**动 `:658` 的 `view.panel` 断言——那是 Task 17b 的改动：
+
+```ts
+	assert.deepEqual(view.skills, { enabled: FALLBACK_CONFIG.skills.enabled });
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `npm run build && node --test test/client-panel.test.ts`
-Expected: FAIL — 没有 skills 模块
+Run: `node --test test/gateway.test.ts test/store.test.ts test/mount.test.ts`
+Expected: FAIL — `view.skills` 是 `undefined`；`preferencePatches` 收不到 `skills`
 
 - [ ] **Step 3: 实现**
 
-`skills-module.tsx` 用既有的 primitives（`Button` / `Switch` / `Input`）与 `src/client/form-css.ts` 的类样式，**不写内联 style**，**不调用组件函数**（必须以 `<SkillsModule />` 形式渲染）。内容：技能列表（名字、描述、用量、最后使用、pinned、是否托管）、pin/unpin 按钮、adopt 按钮、提升可见性按钮、回滚入口（账本列表 + 一键回滚）、review 总开关（读写 `buddy.skills.enabled`）。
+`src/store/index.ts`：两处 `Pick` 都加 `"skills"`（`ConfigAccess.write` 与 `BuddyStore.updateConfig`），并把
+`updateConfig` 的 doc comment 从 "whole `model` and/or `panel` objects" 改成 "whole `model`, `panel` and/or
+`skills` objects"。`home` 依然不可写，理由不变。
 
-`modules.ts` 的模块表加一行；**`order` 必须是"排在 agents 之后、model 之前"的那个数**——先读 `src/client/modules.ts` / `panel.tsx` 里既有模块的 `order` 值再定，不要照抄下面这个字面量（`20` 是占位猜测）：
+`src/persona/gateway.ts`：`PreferencesView` 加一个切片。
 
 ```ts
-{ id: "skills", order: 20, titleKey: "module.skills", Component: SkillsModule }
+	/**
+	 * The one `skills` field the panel owns.
+	 *
+	 * Trimmed to a boolean rather than exposing `BuddySkillsConfig`: the budgets,
+	 * the review route and `writeApproval` are not panel controls, and a view that
+	 * carried them would invite the panel to write them.
+	 */
+	readonly skills: { readonly enabled: boolean };
 ```
 
-`config.ts` 的 `panel.sections` schema 加 `skills: z.boolean().default(true)`；`FALLBACK_CONFIG.panel.sections` 同步加 `skills: true`。**注意**：Task 1 已经在同一个 `config.ts` 里加了顶层 `skills` 设置段——本任务只动 `panel.sections`，不要重构或覆盖 Task 1 的段。
+`cleanPreferencesPatch` 的返回类型加 `"skills"`，`clean` 局部加 `skills?: BuddyConfig["skills"]`，并在 `panel`
+分支之后加：
+
+```ts
+	const skills = objectField(patch, "skills");
+	if (skills !== undefined && typeof skills["enabled"] === "boolean") {
+		// Completed from `current` exactly like `panel.sections`: the panel owns one
+		// field of this object, and a wire patch must not be able to blank the rest
+		// (the review route, the budgets).
+		clean.skills = { ...current.skills, enabled: skills["enabled"] };
+	}
+```
+
+`GatewayDeps.writePreferences` 的类型同步加 `"skills"`。
+
+`src/persona/index.ts` 的 `preferences()` 加一行 `skills: { enabled: config.skills.enabled },`。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `npm run build && node --test test/client-panel.test.ts test/client-ui.test.ts test/config.test.ts`
-Expected: PASS
+Run: `npm run check`
+Expected: PASS（typecheck + build + 全部测试；本任务开工前的基线是 647/0）
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/client/skills-module.tsx src/client/modules.ts src/index.ts src/config.ts test/client-panel.test.ts
-git commit -m "feat: the Skills module in the buddy main panel"
+git add src/store/index.ts src/persona/gateway.ts src/persona/index.ts test/gateway.test.ts test/store.test.ts test/mount.test.ts
+git commit -m "feat: carry the skill-review master switch on the preferences wire"
 ```
 
+---
+
+### Task 17b: 面板 Skills 模块（client 半边）
+
+**Files:**
+- Create: `src/client/skills-module.tsx`
+- Modify: `src/index.ts`（`PANEL_SECTION_IDS`）、`src/config.ts`（`panel.sections`）、`src/client/index.tsx`（模块表 + 两本字典 + import）、`src/client/settings.tsx`（`TITLE_KEYS`）
+- Test: `test/config.test.ts`、`test/client-panel.test.ts`、`test/client-settings.test.ts`、`test/mount.test.ts`
+
+**Interfaces:**
+- Consumes: Task 13 的 `buddySkills/*` 端点（`list` / `ledger` / `pin` / `adopt` / `visibility` / `rollback` / `status`）；Task 17a 的 `buddyPersona/preferences` 与 `updatePreferences` 的 `skills` 切片
+- Produces: `createSkillsModule({ call, t })`；`PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram"]`
+
+**订正（2026-09-15，controller，四条都是对着工作树核过的）**：
+1. 原 Files 里的 `src/client/modules.ts` **不需要改**——模块表是 `src/client/index.tsx:250-275` 的局部
+   `const modules`；`modules.ts` 只有 `PanelModule` 类型与 `visibleModules`。
+2. 原 Files 漏了三处**必须**跟着改的地方，不改就 typecheck 失败或测试红：
+   `src/client/settings.tsx:22-27`（`TITLE_KEYS` 是 `Record<PanelSectionId, string>`）、
+   `test/config.test.ts`（`:27` 断言四个 id；`:9` 与 `:23` 深比 `panel.sections`）、
+   `test/mount.test.ts:658`（深比 `view.panel`）。
+3. 原 Step 1 的 `renderPanel({ active: "skills" })` 与 `/data-module="skills"/` 在本仓**都不存在**：面板渲染的
+   `<section>` 没有 `data-module` 属性（`grep -rn "data-module" src/ test/` 为空），既有断言手段是
+   `test/client-panel.test.ts` 的 `mountPanel` / `panes(tree)` / `paneHas(pane, predicate)` / `navItems(tree)`。
+4. 原 Files 写的 `src/client/modules.ts` 与 `test/client-ui.test.ts` 都不在改动集里；但 `src/client/index.tsx`
+   **两本字典都要加键**——`test/client-ui.test.ts:214` 断言 en / zh 成对注册。
+
+- [ ] **Step 1: 写失败的测试**
+
+`test/config.test.ts`：`:27` 改成 `["soul", "agents", "skills", "model", "telegram"]`；`:9` 与 `:23` 的
+`deepEqual` 各加 `skills: true`。
+
+`test/mount.test.ts:658`：`view.panel` 的深比加 `skills: true`。
+
+`test/client-panel.test.ts`：`PREFS`（`:19-23`）的 `panel.sections` 加 `skills: true`；`:124` 的 nav 期望值
+改成五项、`skills` 排第三；再加一条用例（放在既有 module 用例旁边）：
+
+```ts
+test("the skills module renders in the panel and is reachable from the sub-nav", async () => {
+	const panel = mountPanel(async (endpoint) => {
+		if (endpoint === "buddyPersona/preferences") return { ok: true, value: PREFS };
+		if (endpoint === "buddySkills/status") return { ok: true, value: { synced: true, missed: false, preset: "plugin" } };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		return { ok: true, value: {} };
+	});
+	await settle();
+	assert.ok(
+		navItems(panel.tree()).some((item) => item.props["children"] === "settings.buddy:skillsTitle"),
+		"the skills module must appear in the sub-nav",
+	);
+	const pane = panes(panel.tree()).find((p) => paneHas(p, (e) => e.props["aria-label"] === "settings.buddy:skillsReview"));
+	assert.ok(pane !== undefined, "the skills module must render its review switch");
+});
+```
+
+`test/client-settings.test.ts:32`：那条「settings tab holds module switches」的断言按新增的第五个开关更新。
+
+- [ ] **Step 2: 跑测试确认失败**
+
+Run: `npm run build && node --test test/config.test.ts test/client-panel.test.ts test/client-settings.test.ts`
+Expected: FAIL — 没有 `skills` 模块，`PANEL_SECTION_IDS` 还是四个
+
+- [ ] **Step 3: 实现**
+
+**`src/index.ts:56`**：
+
+```ts
+export const PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram"] as const;
+```
+
+（`skills` 第三，正好落在 `agents` 与 `model` 之间——这是读出来的顺序，不是猜的。）
+
+**`src/config.ts`**：`FALLBACK_CONFIG.panel.sections`（`:67`）与 schema（`:105-117`）各加 `skills: true` /
+`skills: z.boolean().default(true)`。**只动 `panel.sections`**，不要碰 Task 1 加的顶层 `skills` 设置段。
+
+**`src/client/index.tsx`**：`const modules`（`:250`）里插一行，`order: 25`：
+
+```ts
+		{ id: "skills", order: 25, titleKey: "skillsTitle", Component: createSkillsModule({ call, t }) },
+```
+
+两本字典（`en` 在 `:72` 附近、`zh` 在 `:144` 附近）都要加下面这些键：
+
+| key | en | zh |
+|---|---|---|
+| `skillsTitle` | `Skills` | `技能` |
+| `skillsEmpty` | `No skills yet.` | `还没有技能。` |
+| `skillsReview` | `Automatic review` | `自动总结` |
+| `skillsReviewHint` | `Buddy reviews a conversation once it has run for a while and writes down what it learned.` | `对话进行一段时间后，Buddy 会复盘一次，把它学到的写下来。` |
+| `skillsPresetMissed` | `The buddy preset has not reported in, so skill review never starts.` | `buddy 预设没有上报，自动总结不会启动。` |
+| `skillsPresetUser` | `The preset id "buddy" belongs to a preset of your own, so this plugin will not write it and skill review cannot mount.` | `预设 id「buddy」属于你自己的预设，本插件不会写它，自动总结因此无法挂载。` |
+| `skillsPin` | `Pin` | `固定` |
+| `skillsUnpin` | `Unpin` | `取消固定` |
+| `skillsAdopt` | `Manage automatically` | `交给自动管理` |
+| `skillsPromote` | `Visibility` | `可见范围` |
+| `skillsVisibilityBuddy` | `Buddy only` | `仅 Buddy` |
+| `skillsVisibilityProject` | `This project` | `当前项目` |
+| `skillsVisibilityGlobal` | `All sessions` | `所有会话` |
+| `skillsManagedByAgent` | `Automatic` | `自动` |
+| `skillsManagedByHuman` | `Yours` | `你的` |
+| `skillsUses` | `Uses` | `使用次数` |
+| `skillsLedgerTitle` | `Change history` | `改动记录` |
+| `skillsLedgerEmpty` | `No changes recorded.` | `还没有改动记录。` |
+| `skillsRollback` | `Undo` | `撤销` |
+| `skillsRolledBack` | `Undone.` | `已撤销。` |
+| `skillsFailed` | `That did not work.` | `操作没有成功。` |
+
+**`src/client/settings.tsx:22-27`**：`TITLE_KEYS` 加 `skills: "skillsTitle"`。
+
+**`src/client/skills-module.tsx`**（新建）：照 `src/client/telegram-module.tsx` 的既有形状写——一个
+`createSkillsModule(deps)` 工厂返回组件，`useEffect` 里 `load()`，`error` state，全部用 `FORM_CLASS.*` 类，
+**不写内联 `style`**；控件只用 `Button` / `Switch` / `Input` / `Menu`（来自
+`@deepseek-ai/dsh-client-ui-primitives`），下拉用 `./select.tsx` 的 `Select`；模块必须以 `<SkillsModule />`
+形式渲染，**绝不当作函数调用**（当函数调用会把它的 hooks 并进面板自己的 hook 链，真 React 会崩）。行为：
+
+1. 挂载时读 `buddySkills/status`、`buddySkills/list`、`buddySkills/ledger`、`buddyPersona/preferences`；每次写操作
+   之后用响应里回带的 `skills` 重画列表（`manage`/`pin`/`adopt`/`visibility` 的响应都带 `skills`）。
+2. **两条互斥的提示，两条都要画，任何一条都不许静默**：`status.missed === true` → `t("skillsPresetMissed")`；
+   `status.preset === "user"` → `t("skillsPresetUser")`。二者可以同时为真。
+3. review 总开关：`Switch`，`label={t("skillsReview")}`，初值取 `preferences.skills.enabled`，`onChange` →
+   `call("buddyPersona/updatePreferences", { patch: { skills: { enabled } } })`；失败把消息放进 `error`。
+4. 技能列表：每行画名字、描述、`useCount`、`latestActivityAt`、`curatorManaged ? t("skillsManagedByAgent") :
+   t("skillsManagedByHuman")`，以及三个控件——pin/unpin（`buddySkills/pin`，参数 `{ skill, pinned }`）、adopt
+   （`buddySkills/adopt`，**只在 `curatorManaged === false` 时画**）、可见范围 `Select`（`buddySkills/visibility`，
+   参数 `{ skill, tier }`，三个选项就是三个 tier）。空列表画 `t("skillsEmpty")`。
+5. 账本列表：`ledger()` 每行画 `ts` / `action` / `skill` 与一个 `t("skillsRollback")` 按钮
+   （`buddySkills/rollback`，参数 `{ entryId: row.id }`）；成功画 `t("skillsRolledBack")`，失败画
+   `t("skillsFailed")`。空账本画 `t("skillsLedgerEmpty")`。
+6. 提升可见性**只能由人点**：面板是唯一的门（`skill_manage` 拒绝写非 buddy 的 visibility），所以这里不要做
+   任何「自动提升」，也不要替用户决定 tier。
+
+- [ ] **Step 4: 跑测试确认通过**
+
+Run: `npm run check`
+Expected: PASS（typecheck + build + 全部测试）
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add src/client/skills-module.tsx src/client/index.tsx src/client/settings.tsx src/index.ts src/config.ts test/config.test.ts test/client-panel.test.ts test/client-settings.test.ts test/mount.test.ts
+git commit -m "feat: the Skills module in the buddy main panel"
+```
 ---
 
 ### Task 18: 接线（补丁 / 构建 / 清单 / preset 模板）与真机验收
