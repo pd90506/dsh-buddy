@@ -1731,60 +1731,85 @@ git commit -m "test: prove tool-catalog isolation across scopes, and name what o
 
 **Files:**
 - Modify: `src/persona/index.ts`（`listSessions` 的过滤条件）
-- Test: `test/persona.test.ts`
+- Test: `test/mount.test.ts`
+  - **订正（2026-09-15，controller）**：本仓**没有** `test/persona.test.ts`；persona 行的既有套件是
+    `test/mount.test.ts`（`SessionStub` 定义在 `:50-54`，`listSessions` 由 `MountOptions.sessions` 喂入）。
 
 **Interfaces:**
 - Consumes: 无
-- Produces: `listSessions` 排除 `header.origin === "subagent"`
+- Produces: `listSessions` 排除 `origin === "subagent"` 或 `delegationDepth > 0` 的会话
 
 - [ ] **Step 1: 写失败的测试**
 
+放在 `test/mount.test.ts` 既有的列表用例旁边（`:491` 的混合 preset 用例、`:549` 的 archived 用例之后），
+**不要新建文件**。本文件的 harness 不叫 `mountAndList`：用既有的 `mount({ sessions, titles })` →
+`mounted.persona()` → `dispatch(persona, "sessions", [])`（`mount` 在 `:157`，`dispatch` 在 `:146`）。
+
 ```ts
 test("a review child session never appears in the buddy conversation list", async () => {
-	const sessions = [
-		{ header: { id: "s1", agentPreset: BUDDY_PRESET_ID } },
-		{ header: { id: "review-child", agentPreset: BUDDY_PRESET_ID, origin: "subagent" } },
-	];
-	const listed = await mountAndList({ sessions });
-	assert.deepEqual(listed.map((s) => s.sessionId), ["s1"]);
+	const mounted = await mount({
+		sessions: [
+			{ header: { id: "s1", agentPreset: BUDDY_PRESET_ID }, live: true },
+			{ header: { id: "review-child", agentPreset: BUDDY_PRESET_ID, origin: "subagent" }, live: true },
+			// 第二个标记同一个事实：`childSessionMeta()` 同时写 origin 与 delegationDepth。
+			{ header: { id: "review-child-2", agentPreset: BUDDY_PRESET_ID, delegationDepth: 1 }, live: true },
+		],
+		titles: { s1: { title: "S1", updatedAt: 1 } },
+	});
+	const persona = mounted.persona();
+	if (persona === undefined) assert.fail("the persona row must publish buddyPersona");
+
+	const listed = (await dispatch(persona, "sessions", [])) as BuddySessionSummary[];
+
+	assert.deepEqual(
+		listed.map((session) => session.sessionId),
+		["s1"],
+		"a background review child must not appear as a ghost conversation in the Buddy folder",
+	);
 });
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `node --test test/persona.test.ts`
-Expected: FAIL — 两个 id 都在列表里
+Run: `node --test test/mount.test.ts`
+Expected: FAIL — `review-child` 与 `review-child-2` 都出现在列表里
 
 - [ ] **Step 3: 实现**
 
-`src/persona/index.ts:147-149` 的过滤条件加一项：
+`src/persona/index.ts` 的 `mine` 过滤条件（当前在 `:147-149`）加上那两个条件。谓词与
+`src/skills/index.ts:362` / `src/skills/review.ts:356` 的 nudge 守卫**逐字一致**——"背景子会话"在这个
+仓库里只有一个拼法，幽灵过滤和 nudge 守卫不该各写一份：
 
 ```ts
 		const mine = records.filter(
 			(record) =>
 				record.header.agentPreset === BUDDY_PRESET_ID &&
-				// 后台总结跑的是真子会话，且会继承 agentPreset='buddy'；不过滤就会每次总结
-				// 都在 Buddy 文件夹里留一条幽灵对话。
+				// 后台 review 跑的是真子会话，`childSessionMeta()` 会把父的
+				// `agentPreset: 'buddy'` 继承下来（design.md §4.4、§13.2 item 3）：不过滤就会每次
+				// 自动总结都在 Buddy 文件夹里留一条幽灵对话。两个条件是同一个事实的两种标记，
+				// 与 skills 行那两处跳过背景回合的守卫保持同一条谓词。
 				record.header.origin !== "subagent" &&
+				(record.header.delegationDepth ?? 0) === 0 &&
 				!archived.has(record.header.id),
 		);
 ```
 
-`SessionStub` 的类型要加上 `origin?: string`。
+`SessionStub.header`（`test/mount.test.ts:50-54`）要同时加上
+`readonly origin?: string` 与 `readonly delegationDepth?: number`——类型加字段这件事本身就是"这个
+测试确实喂进了这个字段"的证据。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `node --test test/persona.test.ts && npm run typecheck`
+Run: `node --test test/mount.test.ts && npm run typecheck`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/persona/index.ts test/persona.test.ts
+git add src/persona/index.ts test/mount.test.ts
 git commit -m "fix: keep review child sessions out of the buddy conversation list"
 ```
 
----
 
 ### Task 17: 面板 Skills 模块
 
