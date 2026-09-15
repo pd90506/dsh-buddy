@@ -96,8 +96,13 @@ const PUBLISHED_TEMPLATE_HASHES: Record<string, readonly string[]> = {
 		"ee5a74423496f7cbc38452ae19e24f491219d5498e8f3b39a2653a566f0e4ff5",
 		// 59b9e98 — the bytes a real machine's unmarked install held
 		"731b2258190785f8827f5c68a5e742864fcafc59bbb707586fbb95c8fa7c58b8",
-		// d4e1607 — the template Task 10 published, and the current one
+		// d4e1607 — the template Task 10 published
 		"2c5e5f59990e494026fed63093e68fb4f3b216e4d544d19f6158b7c51e16f291",
+		// Task 18 — the first template to carry the buddy-skills-agent row. The
+		// bytes the previous entry published are replaced by these, so per this
+		// table's rule ("append whenever a template file's bytes change") the new
+		// bytes are appended; an unmarked install of them is still claimable.
+		"8bbfc44fc261803f916ceb00d285013fe0237f3b1852ae12ea93a3fe750d2fe2",
 	],
 	// `preset.yml` has never changed, so it has exactly one published value.
 	"preset.yml": ["eaf479947aa348633ce2d0ca44494f26433e832086f7576e4e7e23291914267c"],

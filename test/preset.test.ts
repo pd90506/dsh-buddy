@@ -22,7 +22,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SOUL_VARIABLE } from "../src/index.ts";
 
-const PRESET_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "preset", "agent.cordis.yml");
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PRESET_PATH = join(ROOT, "assets", "preset", "agent.cordis.yml");
 
 /** One row's extracted `config:` map, as raw single-quoted-scalar text (quotes stripped). */
 type RowConfig = Record<string, string>;
@@ -148,4 +149,18 @@ test("the frozen buddy preset carries exactly one dsh-persona row, bound to the 
 	// that shape. Encode the rule here rather than relying on it being
 	// remembered the next time this constant changes.
 	assert.match(SOUL_VARIABLE, /^[a-z][a-z0-9_]*$/);
+});
+
+test("the shipped preset carries the agent row whose registrations live in THIS preset's layer", () => {
+	const preset = readFileSync(PRESET_PATH, "utf8");
+	assert.match(preset, /- id: buddy-skills-agent\n\s+name: 'dsh-buddy\/skills-agent'/);
+	// The generated-artifact header is Task 10's, already at the top of the
+	// file; Task 18 must not write a second copy of it.
+	assert.match(preset, /GENERATED ARTIFACT/);
+});
+
+test("both subpath exports resolve, and neither is a wildcard", () => {
+	const exports = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).exports;
+	assert.ok(exports["./skills"], "the host row needs its own export");
+	assert.ok(exports["./skills-agent"], "the preset row needs its own export");
 });

@@ -32,6 +32,8 @@ const hostEntries = [
 	["src/index.ts", "lib/index.js"],
 	["src/store/index.ts", "lib/store.js"],
 	["src/persona/index.ts", "lib/persona.js"],
+	["src/skills/index.ts", "lib/skills.js"],
+	["src/skills-agent/index.ts", "lib/skills-agent.js"],
 	["src/telegram/index.ts", "lib/telegram.js"],
 ];
 
