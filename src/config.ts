@@ -64,7 +64,7 @@ export interface BuddyConfig {
 export const FALLBACK_CONFIG: BuddyConfig = {
 	home: "",
 	model: { provider: "", model: "", reasoningEffort: "" },
-	panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
+	panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: true } },
 	skills: {
 		enabled: true,
 		creationNudgeInterval: 10,
@@ -108,6 +108,7 @@ export const Config: z<Partial<BuddyConfig>, BuddyConfig> = z.object({
 				.object({
 					soul: z.boolean().default(true),
 					agents: z.boolean().default(true),
+					skills: z.boolean().default(true),
 					model: z.boolean().default(true),
 					telegram: z.boolean().default(true),
 				})

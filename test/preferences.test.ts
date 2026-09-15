@@ -13,7 +13,7 @@ test("a model patch is completed from the current model and only strings are acc
 test("a panel patch accepts only the known module ids with boolean values", () => {
 	assert.deepEqual(
 		cleanPreferencesPatch(FALLBACK_CONFIG, { panel: { sections: { telegram: false, soul: "no", rogue: false } } }),
-		{ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } },
+		{ panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: false } } },
 	);
 });
 

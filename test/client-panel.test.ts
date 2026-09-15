@@ -18,7 +18,8 @@ import {
 const nodeRequire = createRequire(import.meta.url);
 const PREFS = {
 	model: { provider: "", model: "", reasoningEffort: "" },
-	panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
+	panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: true } },
+	skills: { enabled: true },
 	conversationCwd: "/home/u/buddy-workspace",
 };
 
@@ -107,6 +108,9 @@ function mountAllModules() {
 		if (endpoint === "buddyPersona/preferences") return { ok: true, value: PREFS };
 		if (endpoint === "buddyPersona/persona") return { ok: true, value: { soul: "", agents: "", home: "/h" } };
 		if (endpoint === "buddyTelegram/status") return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
+		if (endpoint === "buddySkills/status") return { ok: true, value: { synced: true, missed: false, preset: "plugin" } };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
 		return { ok: true, value: { enabled: false, ownerUserId: "", defaultCwd: "", permissionPreset: "workspace-write", renderMarkdown: true, mediaDelivery: "all" } };
 	}, FULL_CATALOG);
 }
@@ -121,7 +125,13 @@ test("the panel is a sub-nav of the visible modules, the first active by default
 	await settle();
 	assert.deepEqual(
 		navItems(panel.tree()).map((item) => item.props["children"]),
-		["settings.buddy:soulTitle", "settings.buddy:agentsTitle", "settings.buddy:modelTitle", "settings.buddy:telegramTitle"],
+		[
+			"settings.buddy:soulTitle",
+			"settings.buddy:agentsTitle",
+			"settings.buddy:skillsTitle",
+			"settings.buddy:modelTitle",
+			"settings.buddy:telegramTitle",
+		],
 		"one sub-nav item per visible module, in module order",
 	);
 	const active = navItems(panel.tree()).filter((item) => item.props["aria-current"] === "page");
@@ -129,7 +139,7 @@ test("the panel is a sub-nav of the visible modules, the first active by default
 	assert.equal(active[0]?.props["children"], "settings.buddy:soulTitle", "the first visible module is active by default");
 
 	// Every visible module is mounted; only the active one is shown.
-	assert.equal(panes(panel.tree()).length, 4, "every visible module stays mounted");
+	assert.equal(panes(panel.tree()).length, 5, "every visible module stays mounted");
 	const shown = panes(panel.tree()).filter((p) => !hasClass(p, "dsh-buddy-content-pane-hidden"));
 	assert.equal(shown.length, 1, "exactly one pane is shown");
 	assert.ok(shown[0] !== undefined && shown[0] === soulPane(panel.tree()), "the shown pane is the soul module");
@@ -156,7 +166,7 @@ test("clicking a sub-nav item shows that module and hides — but does not unmou
 test("the panel shows only the modules preferences leave visible", async () => {
 	const panel = mountPanel(async (endpoint) =>
 		endpoint === "buddyPersona/preferences"
-			? { ok: true, value: { ...PREFS, panel: { sections: { ...PREFS.panel.sections, agents: false, model: false, telegram: false } } } }
+			? { ok: true, value: { ...PREFS, panel: { sections: { ...PREFS.panel.sections, agents: false, skills: false, model: false, telegram: false } } } }
 			: { ok: true, value: { soul: "v", agents: "r", home: "/h" } },
 	);
 	await settle();
@@ -168,7 +178,7 @@ test("the panel shows only the modules preferences leave visible", async () => {
 test("a document module that failed to load cannot save over the file", async () => {
 	const panel = mountPanel(async (endpoint) =>
 		endpoint === "buddyPersona/preferences"
-			? { ok: true, value: { ...PREFS, panel: { sections: { soul: true, agents: false, model: false, telegram: false } } } }
+			? { ok: true, value: { ...PREFS, panel: { sections: { soul: true, agents: false, skills: false, model: false, telegram: false } } } }
 			: { ok: false, error: { code: "EIO", message: "host is down" } },
 	);
 	await settle();
@@ -182,7 +192,7 @@ test("a document module that failed to load cannot save over the file", async ()
 test("the soul module saves only its own field", async () => {
 	const panel = mountPanel(async (endpoint) =>
 		endpoint === "buddyPersona/preferences"
-			? { ok: true, value: { ...PREFS, panel: { sections: { soul: true, agents: false, model: false, telegram: false } } } }
+			? { ok: true, value: { ...PREFS, panel: { sections: { soul: true, agents: false, skills: false, model: false, telegram: false } } } }
 			: { ok: true, value: { soul: "a voice", agents: "rules", home: "/h" } },
 	);
 	await settle();
@@ -192,7 +202,42 @@ test("the soul module saves only its own field", async () => {
 	assert.deepEqual(write?.payload, { args: { patch: { soul: "a voice" } } });
 });
 
-const ONLY = (id: string) => ({ ...PREFS, panel: { sections: { soul: false, agents: false, model: false, telegram: false, [id]: true } } });
+const ONLY = (id: string) => ({ ...PREFS, panel: { sections: { soul: false, agents: false, skills: false, model: false, telegram: false, [id]: true } } });
+
+const SKILLS_STATUS = { synced: true, missed: false, preset: "plugin" };
+
+const SKILLS = [
+	{
+		name: "ledger-keeper",
+		description: "Keeps the mutation ledger tidy",
+		visibility: "buddy",
+		useCount: 3,
+		activityCount: 5,
+		latestActivityAt: "2026-09-14T10:00:00.000Z",
+		pinned: false,
+		curatorManaged: true,
+	},
+];
+
+const LEDGER = [
+	{ id: "e1", ts: "2026-09-14T09:00:00.000Z", actor: "agent", action: "create", skill: "ledger-keeper", before: [], after: ["SKILL.md"] },
+];
+
+/** Mount the panel with the preferences slice and a skills endpoint table. */
+function mountSkills(
+	answer: (endpoint: string, payload: unknown) => Promise<unknown> | unknown,
+	prefs: Record<string, unknown> = { ...PREFS, skills: { enabled: true } },
+) {
+	return mountPanel(async (endpoint, payload) => {
+		if (endpoint === "buddyPersona/preferences") return { ok: true, value: prefs };
+		if (endpoint === "buddyPersona/persona") return { ok: true, value: { soul: "", agents: "", home: "/h" } };
+		if (endpoint === "buddyTelegram/status") return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
+		return await answer(endpoint, payload);
+	});
+}
+
+const skillsPane = (tree: unknown): StubElement | undefined =>
+	panes(tree).find((p) => paneHas(p, (e) => e.props["aria-label"] === "settings.buddy:skillsReview"));
 
 const CATALOG = {
 	default: { provider: "g", model: "gm" },
@@ -287,10 +332,208 @@ test("the telegram token is written through remote.credentials and never read ba
 	assert.deepEqual(writes, [{ ref: "TELEGRAM_BOT_TOKEN", value: "123:abc" }]);
 });
 
+test("the skills module renders in the panel and is reachable from the sub-nav", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	assert.ok(
+		navItems(panel.tree()).some((item) => item.props["children"] === "settings.buddy:skillsTitle"),
+		"the skills module must appear in the sub-nav",
+	);
+	const pane = skillsPane(panel.tree());
+	assert.ok(pane !== undefined, "the skills module must render its review switch");
+});
+
+test("the skills module warns when the preset missed its heartbeat or belongs to the user", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: { synced: false, missed: true, preset: "user" } };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	const shown = texts(panel.tree());
+	assert.ok(shown.includes("settings.buddy:skillsPresetMissed"), "a missed heartbeat must never be silent");
+	assert.ok(shown.includes("settings.buddy:skillsPresetUser"), "a user-owned preset id must be said out loud too");
+});
+
+test("the skills review switch writes only the enabled slice and keeps the rest server-side", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddyPersona/updatePreferences") return { ok: true, value: { ...PREFS, skills: { enabled: false } } };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	assert.equal(
+		switchControl(panel.tree(), "settings.buddy:skillsReview").props["aria-checked"],
+		true,
+		"the switch reads preferences.skills.enabled",
+	);
+	flipSwitch(panel.tree(), "settings.buddy:skillsReview");
+	await settle();
+	const write = panel.calls.find((call) => call.endpoint === "buddyPersona/updatePreferences");
+	assert.deepEqual(write?.payload, { args: { patch: { skills: { enabled: false } } } }, "only enabled crosses the wire");
+	assert.equal(
+		switchControl(panel.tree(), "settings.buddy:skillsReview").props["aria-checked"],
+		false,
+		"the write's own response redraws the switch",
+	);
+});
+
+test("a skill row lists its telemetry and pins and re-tiers it", async () => {
+	const panel = mountSkills(async (endpoint, payload) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+		if (endpoint === "buddySkills/pin") {
+			const args = (payload as { args: { pinned: boolean } }).args;
+			return { ok: true, value: { success: true, message: "pinned", skills: SKILLS.map((skill) => ({ ...skill, pinned: args.pinned })) } };
+		}
+		if (endpoint === "buddySkills/visibility") {
+			const args = (payload as { args: { tier: string } }).args;
+			return { ok: true, value: { success: true, message: "moved", skills: SKILLS.map((skill) => ({ ...skill, visibility: args.tier })) } };
+		}
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	const shown = texts(panel.tree());
+	assert.ok(shown.includes("ledger-keeper"), "the skill name is listed");
+	assert.ok(shown.includes("Keeps the mutation ledger tidy"), "its description is listed");
+	assert.ok(shown.includes("2026-09-14T10:00:00.000Z"), "its latest activity is listed");
+	assert.ok(shown.includes("settings.buddy:skillsManagedByAgent"), "an agent-made skill is labelled automatic");
+	assert.ok(!texts(panel.tree()).includes("settings.buddy:skillsAdopt"), "an agent-made skill offers no adopt control");
+
+	(button(panel.tree(), "settings.buddy:skillsPin").props["onClick"] as () => void)();
+	await settle();
+	const pin = panel.calls.find((call) => call.endpoint === "buddySkills/pin");
+	assert.deepEqual(pin?.payload, { args: { skill: "ledger-keeper", pinned: true } }, "pin names the skill and the new flag");
+	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsUnpin"), "the response's fresh listing redraws the row as pinned");
+
+	choose(panel.tree(), "visibility:ledger-keeper", "global");
+	await settle();
+	const move = panel.calls.find((call) => call.endpoint === "buddySkills/visibility");
+	assert.deepEqual(move?.payload, { args: { skill: "ledger-keeper", tier: "global" } }, "the tier choice is written verbatim");
+});
+
+test("an agent-made skill cannot be adopted, and a human-made one can", async () => {
+	const human = { ...SKILLS[0], name: "hand-written", curatorManaged: false };
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [human] };
+		if (endpoint === "buddySkills/adopt")
+			return { ok: true, value: { success: true, message: "adopted", skills: [{ ...human, curatorManaged: true }] } };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsManagedByHuman"), "a human-made skill is labelled yours");
+	(button(panel.tree(), "settings.buddy:skillsAdopt").props["onClick"] as () => void)();
+	await settle();
+	const adopt = panel.calls.find((call) => call.endpoint === "buddySkills/adopt");
+	assert.deepEqual(adopt?.payload, { args: { skill: "hand-written" } });
+	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsManagedByAgent"), "the fresh listing flips the label");
+	assert.ok(!texts(panel.tree()).includes("settings.buddy:skillsAdopt"), "the adopt control goes away once it is managed");
+});
+
+test("the ledger lists its history and undoes one entry", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: LEDGER };
+		if (endpoint === "buddySkills/rollback") return { ok: true, value: { success: true, message: "undone" } };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	const shown = texts(panel.tree());
+	assert.ok(shown.includes("settings.buddy:skillsLedgerTitle"));
+	assert.ok(shown.includes("2026-09-14T09:00:00.000Z"), "a ledger row carries its timestamp");
+	assert.ok(shown.includes("create"), "and its action");
+	assert.ok(shown.includes("ledger-keeper"), "and the skill it touched");
+
+	(button(panel.tree(), "settings.buddy:skillsRollback").props["onClick"] as () => void)();
+	await settle();
+	const rollback = panel.calls.find((call) => call.endpoint === "buddySkills/rollback");
+	assert.deepEqual(rollback?.payload, { args: { entryId: "e1" } }, "the rollback is addressed by ledger id");
+	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsRolledBack"), "a successful undo says so");
+});
+
+test("the project tier the selector writes carries the conversation cwd, which is the only path the host accepts", async () => {
+	const panel = mountSkills(
+		async (endpoint, payload) => {
+			if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+			if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+			if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+			if (endpoint === "buddySkills/visibility") {
+				const args = (payload as { args: { tier: string } }).args;
+				return { ok: true, value: { success: true, message: "moved", skills: [{ ...SKILLS[0], visibility: args.tier }] } };
+			}
+			return { ok: true, value: {} };
+		},
+		{ ...PREFS, conversationCwd: "/home/u/proj", skills: { enabled: true } },
+	);
+	await settle();
+	choose(panel.tree(), "visibility:ledger-keeper", "project:/home/u/proj");
+	await settle();
+	const move = panel.calls.find((call) => call.endpoint === "buddySkills/visibility");
+	assert.deepEqual(
+		move?.payload,
+		{ args: { skill: "ledger-keeper", tier: "project:/home/u/proj" } },
+		"a bare \"project\" is not a tier the host's parseTier accepts",
+	);
+});
+
+test("an empty skills list and an empty ledger say so, and a failed write carries its message", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	const shown = texts(panel.tree());
+	assert.ok(shown.includes("settings.buddy:skillsEmpty"), "an empty list says so");
+	assert.ok(shown.includes("settings.buddy:skillsLedgerEmpty"), "an empty ledger says so");
+
+	const failing = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+		if (endpoint === "buddySkills/pin") return { ok: false, error: { code: "EIO", message: "host is down" } };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	(button(failing.tree(), "settings.buddy:skillsPin").props["onClick"] as () => void)();
+	await settle();
+	assert.ok(
+		texts(failing.tree()).some((text) => typeof text === "string" && text.includes("host is down")),
+		"a failed write reports why",
+	);
+
+	// A rollback that the host refuses resolves rather than throws, so the
+	// refusal is silent unless its own `success` is read.
+	const refused = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: LEDGER };
+		if (endpoint === "buddySkills/rollback") return { ok: true, value: { success: false, message: "already undone" } };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	(button(refused.tree(), "settings.buddy:skillsRollback").props["onClick"] as () => void)();
+	await settle();
+	assert.ok(texts(refused.tree()).includes("settings.buddy:skillsFailed"), "a refused undo says so");
+});
+
 test("the panel header carries only its title — conversations start elsewhere", async () => {
 	const panel = mountPanel(async (endpoint) =>
 		endpoint === "buddyPersona/preferences"
-			? { ok: true, value: { ...PREFS, panel: { sections: { soul: false, agents: false, model: false, telegram: false } } } }
+			? { ok: true, value: { ...PREFS, panel: { sections: { soul: false, agents: false, skills: false, model: false, telegram: false } } } }
 			: { ok: true, value: {} },
 	);
 	await settle();
@@ -326,7 +569,7 @@ test("no module renders a raw checkbox, text input, select or inline style — e
 	assert.deepEqual(all.filter((e) => e.type === "select"), [], "selects are Menu-backed selectors");
 	assert.deepEqual(all.filter((e) => e.type === "input" && e.props["data-wrapper-class"] === undefined), [], "text fields are the Input primitive");
 	assert.deepEqual(all.filter((e) => e.props["style"] !== undefined), [], "styling comes from classes on --dsw tokens");
-	assert.equal(all.filter((e) => e.props["role"] === "switch").length, 3, "Model follow-default plus Telegram markdown and enabled");
+	assert.equal(all.filter((e) => e.props["role"] === "switch").length, 4, "Model follow-default, the Skills review switch, and Telegram markdown and enabled");
 	assert.equal(all.filter((e) => e.type === "menu").length, 5, "provider, model, effort, permission level and media delivery");
 });
 
@@ -339,7 +582,7 @@ test("the panel clears a stale preferences error once a notified reload succeeds
 	// and the panel's post-notify reload) succeeds.
 	const renderer = createRenderer();
 	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
-	let prefs = { ...PREFS, panel: { sections: { soul: true, agents: true, model: true, telegram: true } } };
+	let prefs = { ...PREFS, panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: true } } };
 	let preferencesCalls = 0;
 	const FAILED_LOAD = "buddyPersona/preferences failed: EIO: host is down";
 	const { ctx, registrations } = contextStub({
@@ -365,6 +608,9 @@ test("the panel clears a stale preferences error once a notified reload succeeds
 				if (endpoint === "buddyTelegram/status") {
 					return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
 				}
+				if (endpoint === "buddySkills/status") return { ok: true, value: { synced: true, missed: false, preset: "plugin" } };
+				if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+				if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
 				throw new Error(`unexpected endpoint: ${endpoint}`);
 			},
 		},
@@ -410,7 +656,7 @@ test("the main panel drops a module the settings tab just hid, without remountin
 	// the shared `preferencesChanged` notifier can make the panel reload.
 	const renderer = createRenderer();
 	const client = loadClient((name) => renderer.modules[name] ?? nodeRequire(name));
-	let prefs = { ...PREFS, panel: { sections: { soul: true, agents: true, model: true, telegram: true } } };
+	let prefs = { ...PREFS, panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: true } } };
 	const { ctx, registrations } = contextStub({
 		rpc: {
 			call: async (_route: string, endpoint: string, payload: unknown) => {
@@ -430,6 +676,9 @@ test("the main panel drops a module the settings tab just hid, without remountin
 				if (endpoint === "buddyTelegram/status") {
 					return { ok: true, value: { state: "off", token: { configured: false, writable: true }, sessions: 0 } };
 				}
+				if (endpoint === "buddySkills/status") return { ok: true, value: { synced: true, missed: false, preset: "plugin" } };
+				if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+				if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
 				throw new Error(`unexpected endpoint: ${endpoint}`);
 			},
 		},

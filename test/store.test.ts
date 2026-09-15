@@ -580,9 +580,9 @@ test("the store exposes the live config and writes preferences through the setti
 		},
 	});
 	assert.equal(store.config().model.provider, "p");
-	await store.updateConfig({ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } });
+	await store.updateConfig({ panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: false } } });
 	assert.deepEqual(writes, [
-		{ ns: "buddy", patch: { panel: { sections: { soul: true, agents: true, model: true, telegram: false } } } },
+		{ ns: "buddy", patch: { panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: false } } } },
 	]);
 	assert.equal(store.config().panel.sections.telegram, false, "config() must read live, not a boot snapshot");
 });

@@ -53,7 +53,7 @@ export const BUDDY_PRESET_ID = "buddy";
  * side-effecting module evaluation out of a bundle. `config.ts` re-exports both
  * names so host-side code keeps a single import path.
  */
-export const PANEL_SECTION_IDS = ["soul", "agents", "model", "telegram"] as const;
+export const PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram"] as const;
 
 /** One main-panel module id. */
 export type PanelSectionId = (typeof PANEL_SECTION_IDS)[number];

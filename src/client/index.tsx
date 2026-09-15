@@ -8,7 +8,7 @@
  * {@link MAIN_PANEL_KEY} is imported from the shared constants module instead
  * of being restated on either side.
  *
- * The main panel is a module table (Soul, Agents, Model, Telegram); the
+ * The main panel is a module table (Soul, Agents, Skills, Model, Telegram); the
  * Settings tab surfaces Buddy's own settings, not the conversations, which the
  * sidebar folder lists directly above Settings.
  * @module dsh-buddy/client
@@ -33,6 +33,7 @@ import type { PanelModule } from "./modules.ts";
 import { createNotifier } from "./notifier.ts";
 import { createBuddyPanel } from "./panel.tsx";
 import { createBuddySettingsSection } from "./settings.tsx";
+import { createSkillsModule } from "./skills-module.tsx";
 import { createTelegramModule } from "./telegram-module.tsx";
 
 /** Dictionary namespace owned by this plugin. */
@@ -76,6 +77,29 @@ const en = {
 	soulHint: "Voice, attitude and opinions. Saved to SOUL.md and used by buddy conversations only.",
 	agentsTitle: "Agents",
 	agentsHint: "Rules Buddy follows. Saved to AGENTS.md, kept separate from voice on purpose.",
+	skillsTitle: "Skills",
+	skillsEmpty: "No skills yet.",
+	skillsReview: "Automatic review",
+	skillsReviewHint:
+		"Buddy reviews a conversation once it has run for a while and writes down what it learned.",
+	skillsPresetMissed: "The buddy preset has not reported in, so skill review never starts.",
+	skillsPresetUser:
+		'The preset id "buddy" belongs to a preset of your own, so this plugin will not write it and skill review cannot mount.',
+	skillsPin: "Pin",
+	skillsUnpin: "Unpin",
+	skillsAdopt: "Manage automatically",
+	skillsPromote: "Visibility",
+	skillsVisibilityBuddy: "Buddy only",
+	skillsVisibilityProject: "This project",
+	skillsVisibilityGlobal: "All sessions",
+	skillsManagedByAgent: "Automatic",
+	skillsManagedByHuman: "Yours",
+	skillsUses: "Uses",
+	skillsLedgerTitle: "Change history",
+	skillsLedgerEmpty: "No changes recorded.",
+	skillsRollback: "Undo",
+	skillsRolledBack: "Undone.",
+	skillsFailed: "That did not work.",
 	modelTitle: "Model",
 	telegramTitle: "Telegram",
 	save: "Save",
@@ -148,6 +172,27 @@ const zh: typeof en = {
 	soulHint: "声音、态度与观点。保存到 SOUL.md，仅对 buddy 对话生效。",
 	agentsTitle: "Agents",
 	agentsHint: "Buddy 遵循的规则。保存到 AGENTS.md，与人格刻意分开。",
+	skillsTitle: "技能",
+	skillsEmpty: "还没有技能。",
+	skillsReview: "自动总结",
+	skillsReviewHint: "对话进行一段时间后，Buddy 会复盘一次，把它学到的写下来。",
+	skillsPresetMissed: "buddy 预设没有上报，自动总结不会启动。",
+	skillsPresetUser: "预设 id「buddy」属于你自己的预设，本插件不会写它，自动总结因此无法挂载。",
+	skillsPin: "固定",
+	skillsUnpin: "取消固定",
+	skillsAdopt: "交给自动管理",
+	skillsPromote: "可见范围",
+	skillsVisibilityBuddy: "仅 Buddy",
+	skillsVisibilityProject: "当前项目",
+	skillsVisibilityGlobal: "所有会话",
+	skillsManagedByAgent: "自动",
+	skillsManagedByHuman: "你的",
+	skillsUses: "使用次数",
+	skillsLedgerTitle: "改动记录",
+	skillsLedgerEmpty: "还没有改动记录。",
+	skillsRollback: "撤销",
+	skillsRolledBack: "已撤销。",
+	skillsFailed: "操作没有成功。",
 	modelTitle: "模型",
 	telegramTitle: "Telegram",
 	save: "保存",
@@ -250,6 +295,7 @@ export function apply(ctx: any): void {
 	const modules: PanelModule<() => unknown>[] = [
 		{ id: "soul", order: 10, titleKey: "soulTitle", Component: createDocumentModule({ call, t }, "soul") },
 		{ id: "agents", order: 20, titleKey: "agentsTitle", Component: createDocumentModule({ call, t }, "agents") },
+		{ id: "skills", order: 25, titleKey: "skillsTitle", Component: createSkillsModule({ call, t }) },
 		{
 			id: "model",
 			order: 30,
