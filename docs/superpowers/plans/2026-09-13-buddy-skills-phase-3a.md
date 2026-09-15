@@ -2175,11 +2175,16 @@ Expected: FAIL — 两行都还没接
 
 并更新文件头那句过时的行数描述（见订正 3）。
 
-`package.json` 的 `exports` 加两条，与既有的 `"./store"` / `"./persona"` / `"./telegram"` 同形：
+`package.json` 的 `exports` 加两条。**形状必须与既有的 `"./store"` / `"./persona"` / `"./telegram"` 逐字同形**
+——本包的每个子路径导出都是 `{ "default": ... }` 对象，不是一个裸字符串（已核实 `package.json`）：
 
 ```json
-    "./skills": "./lib/skills.js",
-    "./skills-agent": "./lib/skills-agent.js",
+    "./skills": {
+      "default": "./lib/skills.js"
+    },
+    "./skills-agent": {
+      "default": "./lib/skills-agent.js"
+    },
 ```
 
 `build.mjs` 的 `hostEntries` 加两行（**顺序无关，但不要漏**；这个列表是显式的，写错路径会构建失败而不是
