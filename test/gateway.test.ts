@@ -246,7 +246,7 @@ test("updatePreferences dispatches through the proxy and writes only validated f
 	const { service, recorder } = harness();
 	await dispatch(service, "updatePreferences", [{ panel: { sections: { telegram: false } }, home: "/nope" }]);
 	assert.deepEqual(recorder.preferencePatches, [
-		{ panel: { sections: { soul: true, agents: true, model: true, telegram: false } } },
+		{ panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: false } } },
 	]);
 });
 

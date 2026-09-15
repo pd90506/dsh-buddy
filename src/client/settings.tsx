@@ -22,6 +22,7 @@ export interface SettingsDeps {
 const TITLE_KEYS: Record<PanelSectionId, string> = {
 	soul: "soulTitle",
 	agents: "agentsTitle",
+	skills: "skillsTitle",
 	model: "modelTitle",
 	telegram: "telegramTitle",
 };

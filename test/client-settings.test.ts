@@ -6,7 +6,7 @@ import { contextStub, createRenderer, elements, flipSwitch, loadClient, settle, 
 const nodeRequire = createRequire(import.meta.url);
 const PREFS = {
 	model: { provider: "", model: "", reasoningEffort: "" },
-	panel: { sections: { soul: true, agents: true, model: true, telegram: true } },
+	panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: true } },
 	conversationCwd: "/c",
 };
 
@@ -37,7 +37,7 @@ test("the settings tab holds module switches and the home path — no persona ed
 	const all = elements(tab.tree());
 	assert.equal(all.filter((e) => e.type === "textarea").length, 0, "persona editing lives in the main panel now");
 	assert.equal(all.filter((e) => e.type === "input").length, 0, "no raw checkboxes");
-	assert.equal(all.filter((e) => e.props["role"] === "switch").length, 4, "one harness Switch per module");
+	assert.equal(all.filter((e) => e.props["role"] === "switch").length, 5, "one harness Switch per module");
 	assert.ok(all.some((e) => e.props["children"] === "settings.buddy:homeLabel /home/buddy"));
 });
 
@@ -52,6 +52,6 @@ test("toggling a module writes the whole sections object", async () => {
 	await settle();
 	const write = tab.calls.find((call) => call.endpoint === "buddyPersona/updatePreferences");
 	assert.deepEqual(write?.payload, {
-		args: { patch: { panel: { sections: { soul: true, agents: true, model: true, telegram: false } } } },
+		args: { patch: { panel: { sections: { soul: true, agents: true, skills: true, model: true, telegram: false } } } },
 	});
 });
