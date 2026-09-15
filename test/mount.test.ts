@@ -581,7 +581,8 @@ test("a review child session never appears in the buddy conversation list", asyn
 		sessions: [
 			{ header: { id: "s1", agentPreset: BUDDY_PRESET_ID }, live: true },
 			{ header: { id: "review-child", agentPreset: BUDDY_PRESET_ID, origin: "subagent" }, live: true },
-			// 第二个标记同一个事实：`childSessionMeta()` 同时写 origin 与 delegationDepth。
+			// A second marking of the same fact: `childSessionMeta()` writes both
+			// `origin` and `delegationDepth`.
 			{ header: { id: "review-child-2", agentPreset: BUDDY_PRESET_ID, delegationDepth: 1 }, live: true },
 		],
 		titles: { s1: { title: "S1", updatedAt: 1 } },
