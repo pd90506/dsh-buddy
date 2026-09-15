@@ -112,7 +112,7 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 1. **注册层**：provider / `skill_manage` / 事件监听 / `refine` 命令全部由 **preset 行**注册 → 只进 buddy 层。普通编码会话合并不到这一层，工具目录里也没有 `skill_manage`。
 2. **文件层**：技能写在 `<home>/main/skills/`，**不是任何默认扫描根**。宿主 composition 那个 global 层的 `skill-filesystem` 永远读不到它，因此普通编码会话（哪怕 cwd 就在 buddy workspace 下）也看不到。
 3. **声明层**：frontmatter `visibility` 默认 `buddy`；`global` / `project: <path>` 的技能由**宿主行的 global 层 provider**贡献（`project:` 用 `SkillLookupOptions.cwd` 过滤）。`skill_manage` **拒绝**把 `visibility` 写成非 `buddy`。**Agent 无法自我提升作用域**，只有人能改。
-4. **配套修改**：`buddyPersona/sessions` 必须过滤 `header.origin === 'subagent'`。已核实 review 子会话会继承 `agentPreset: 'buddy'`（`childSessionMeta` 从父的 live scope chain 取），而现有列表只按 preset + archived 过滤，不处理就会每次自动总结都多出一条幽灵对话。
+4. **配套修改**：`buddyPersona/sessions` 必须过滤 `header.origin === 'subagent'` **或** `header.delegationDepth > 0`。已核实 review 子会话会继承 `agentPreset: 'buddy'`（`childSessionMeta` 同时写 `origin:'subagent'`、`delegationDepth`，并从父的 live scope chain 取 `agentPreset`），而现有列表只按 preset + archived 过滤，不处理就会每次自动总结都多出一条幽灵对话。两个条件要一起判，与 §7 里跳过背景回合的那条 nudge 守卫（`src/skills/index.ts`、`src/skills/review.ts`）保持同一条谓词——同一个事实不该有第二种拼法。
 
 ## 5. preset 归属变更：从"用户文件"改为"插件生成物"
 
@@ -410,7 +410,7 @@ curator 的 **pause / run-now** 属于 3b（`$H` 有 `PUT /api/curator/paused`�
 | `test/skills-isolation.test.ts` | 按层隔离：buddy 层注册的 provider 在**非 buddy** scope 下取不到；`skill_manage` 不在非 buddy 的工具目录里 |
 | `test/skills-review.test.ts` | nudge 计数与清零、触发条件（`completed` / 子会话跳过 / 单飞丢弃）、digest 精确算法（tail 扩展、截断长度、tool result 丢弃）、16 与 60 万预算的停止、用量写入父会话记录 |
 | `test/preset-sync.test.ts` | 生成物语义：无标记不动、有标记同步、覆盖前备份、标记写入 |
-| `test/persona.test.ts`（既有） | 追加：`listSessions` 过滤 `origin:'subagent'` |
+| `test/mount.test.ts`（既有） | 追加：`listSessions` 过滤 `origin:'subagent'` 或 `delegationDepth > 0`。**订正**：原文写的 `test/persona.test.ts` 在本仓并不存在，persona 行的套件是 `test/mount.test.ts` |
 
 ### 13.2 真机验收（隔离 probe profile）
 
