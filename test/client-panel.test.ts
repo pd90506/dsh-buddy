@@ -463,29 +463,64 @@ test("the ledger lists its history and undoes one entry", async () => {
 	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsRolledBack"), "a successful undo says so");
 });
 
-test("the project tier the selector writes carries the conversation cwd, which is the only path the host accepts", async () => {
-	const panel = mountSkills(
-		async (endpoint, payload) => {
-			if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
-			if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
-			if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
-			if (endpoint === "buddySkills/visibility") {
-				const args = (payload as { args: { tier: string } }).args;
-				return { ok: true, value: { success: true, message: "moved", skills: [{ ...SKILLS[0], visibility: args.tier }] } };
-			}
-			return { ok: true, value: {} };
-		},
-		{ ...PREFS, conversationCwd: "/home/u/proj", skills: { enabled: true } },
-	);
+test("the visibility selector offers only the two word tiers the host accepts verbatim", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+		return { ok: true, value: {} };
+	});
 	await settle();
-	choose(panel.tree(), "visibility:ledger-keeper", "project:/home/u/proj");
+	const menu = elements(panel.tree()).find(
+		(e) => e.type === "menu" && (e.props["children"] as Partial<StubElement> | undefined)?.props?.["name"] === "visibility:ledger-keeper",
+	);
+	assert.deepEqual(
+		(menu?.props["items"] as { id: string }[]).map((item) => item.id),
+		["buddy", "global"],
+		'neither a bare "project" nor a path the panel guessed is offered',
+	);
+});
+
+test("a project tier is written from the human's own absolute path", async () => {
+	const panel = mountSkills(async (endpoint, payload) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+		if (endpoint === "buddySkills/visibility") {
+			const args = (payload as { args: { tier: string } }).args;
+			return { ok: true, value: { success: true, message: "moved", skills: [{ ...SKILLS[0], visibility: args.tier }] } };
+		}
+		return { ok: true, value: {} };
+	});
+	await settle();
+	const field = elements(panel.tree()).find((e) => e.type === "input" && e.props["aria-label"] === "settings.buddy:skillsProjectPath");
+	assert.ok(field !== undefined, "the project folder is a field the human fills in");
+	assert.equal(field.props["value"], "", "it must not be prefilled with a path the panel guessed");
+
+	(field.props["onChange"] as (event: { target: { value: string } }) => void)({ target: { value: "  /home/u/proj  " } });
+	(button(panel.tree(), "settings.buddy:skillsProjectApply").props["onClick"] as () => void)();
 	await settle();
 	const move = panel.calls.find((call) => call.endpoint === "buddySkills/visibility");
-	assert.deepEqual(
-		move?.payload,
-		{ args: { skill: "ledger-keeper", tier: "project:/home/u/proj" } },
-		"a bare \"project\" is not a tier the host's parseTier accepts",
+	assert.deepEqual(move?.payload, { args: { skill: "ledger-keeper", tier: "project:/home/u/proj" } }, "the trimmed absolute path becomes the tier");
+});
+
+test("a project path that is not absolute is refused without a write", async () => {
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+		return { ok: true, value: {} };
+	});
+	await settle();
+	const field = elements(panel.tree()).find((e) => e.type === "input" && e.props["aria-label"] === "settings.buddy:skillsProjectPath");
+	(field?.props["onChange"] as (event: { target: { value: string } }) => void)({ target: { value: "relative/dir" } });
+	(button(panel.tree(), "settings.buddy:skillsProjectApply").props["onClick"] as () => void)();
+	await settle();
+	assert.ok(
+		!panel.calls.some((call) => call.endpoint === "buddySkills/visibility"),
+		"a relative path must never reach the endpoint: the provider would silently rescope it to the private tier",
 	);
+	assert.ok(texts(panel.tree()).includes("settings.buddy:skillsFailed"), "the refusal is visible");
 });
 
 test("an empty skills list and an empty ledger say so, and a failed write carries its message", async () => {
@@ -515,9 +550,27 @@ test("an empty skills list and an empty ledger say so, and a failed write carrie
 		"a failed write reports why",
 	);
 
-	// A rollback that the host refuses resolves rather than throws, so the
-	// refusal is silent unless its own `success` is read.
-	const refused = mountSkills(async (endpoint) => {
+	// A write the host refuses *resolves* with `success: false` and its own
+	// message rather than throwing, so the message is the only thing that can
+	// make the refusal visible — the failure spec §10 forbids is a silent one.
+	const refusedWrite = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/list") return { ok: true, value: SKILLS };
+		if (endpoint === "buddySkills/pin")
+			return { ok: true, value: { success: false, message: "skill 'ledger-keeper' has no readable SKILL.md", skills: SKILLS } };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	(button(refusedWrite.tree(), "settings.buddy:skillsPin").props["onClick"] as () => void)();
+	await settle();
+	assert.ok(
+		texts(refusedWrite.tree()).some((text) => typeof text === "string" && text.includes("has no readable SKILL.md")),
+		"a refused pin renders the host's own message",
+	);
+
+	// Same rule for the rollback: it resolves rather than throws.
+	const refusedUndo = mountSkills(async (endpoint) => {
 		if (endpoint === "buddySkills/status") return { ok: true, value: SKILLS_STATUS };
 		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
 		if (endpoint === "buddySkills/ledger") return { ok: true, value: LEDGER };
@@ -525,9 +578,12 @@ test("an empty skills list and an empty ledger say so, and a failed write carrie
 		return { ok: true, value: { skills: { enabled: true } } };
 	});
 	await settle();
-	(button(refused.tree(), "settings.buddy:skillsRollback").props["onClick"] as () => void)();
+	(button(refusedUndo.tree(), "settings.buddy:skillsRollback").props["onClick"] as () => void)();
 	await settle();
-	assert.ok(texts(refused.tree()).includes("settings.buddy:skillsFailed"), "a refused undo says so");
+	assert.ok(
+		texts(refusedUndo.tree()).some((text) => typeof text === "string" && text.includes("already undone")),
+		"a refused undo renders the host's own message",
+	);
 });
 
 test("the panel header carries only its title — conversations start elsewhere", async () => {
