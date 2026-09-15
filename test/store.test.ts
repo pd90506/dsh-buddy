@@ -587,6 +587,19 @@ test("the store exposes the live config and writes preferences through the setti
 	assert.equal(store.config().panel.sections.telegram, false, "config() must read live, not a boot snapshot");
 });
 
+test("updateConfig writes the skills section through the settings plane", async () => {
+	const writes: unknown[] = [];
+	const { ctx, paths, handle } = await storeFixture();
+	const store = new BuddyStore(ctx as unknown as Context, paths, handle, {
+		read: () => FALLBACK_CONFIG,
+		write: async (patch) => {
+			writes.push(patch);
+		},
+	});
+	await store.updateConfig({ skills: { ...FALLBACK_CONFIG.skills, enabled: false } });
+	assert.deepEqual(writes, [{ skills: { ...FALLBACK_CONFIG.skills, enabled: false } }]);
+});
+
 test("a store built without config access reports the fallback and refuses writes", async () => {
 	const { ctx, paths, handle } = await storeFixture();
 	const store = new BuddyStore(ctx as unknown as Context, paths, handle);

@@ -199,7 +199,12 @@ export function apply(ctx: PluginContext): void {
 		// Created here, not by the caller: the browser cannot mkdir, and the session
 		// store rejects a cwd that does not exist.
 		await mkdir(conversationCwd, { recursive: true });
-		return { model: { ...config.model }, panel: { sections: { ...config.panel.sections } }, conversationCwd };
+		return {
+			model: { ...config.model },
+			panel: { sections: { ...config.panel.sections } },
+			skills: { enabled: config.skills.enabled },
+			conversationCwd,
+		};
 	};
 
 	// Exactly once: the gateway registers the `dsh-buddy` typert package, and a

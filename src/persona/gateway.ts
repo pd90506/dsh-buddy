@@ -48,6 +48,14 @@ export interface PersonaView {
 export interface PreferencesView {
 	readonly model: BuddyModelDefault;
 	readonly panel: { readonly sections: Record<PanelSectionId, boolean> };
+	/**
+	 * The one `skills` field the panel owns.
+	 *
+	 * Trimmed to a boolean rather than exposing `BuddySkillsConfig`: the budgets,
+	 * the review route and `writeApproval` are not panel controls, and a view that
+	 * carried them would invite the panel to write them.
+	 */
+	readonly skills: { readonly enabled: boolean };
 	/** Absolute working directory for a new web buddy conversation; created on read. */
 	readonly conversationCwd: string;
 }
@@ -64,7 +72,7 @@ function objectField(value: unknown, key: string): Record<string, unknown> | und
  * Validate a wire patch against the current configuration.
  *
  * Whole objects go out because the settings plane's merge depth is not part of
- * this plugin's contract: a `model` or `panel` write is always complete.
+ * this plugin's contract: a `model`, `panel` or `skills` write is always complete.
  * @param current - the configuration as it reads now.
  * @param patch - untrusted wire data.
  * @returns only the fields that validated, each completed from `current`.
@@ -72,8 +80,12 @@ function objectField(value: unknown, key: string): Record<string, unknown> | und
 export function cleanPreferencesPatch(
 	current: BuddyConfig,
 	patch: Record<string, unknown>,
-): Partial<Pick<BuddyConfig, "model" | "panel">> {
-	const clean: { model?: BuddyModelDefault; panel?: BuddyConfig["panel"] } = {};
+): Partial<Pick<BuddyConfig, "model" | "panel" | "skills">> {
+	const clean: {
+		model?: BuddyModelDefault;
+		panel?: BuddyConfig["panel"];
+		skills?: BuddyConfig["skills"];
+	} = {};
 	const model = objectField(patch, "model");
 	if (model !== undefined) {
 		const next = { ...current.model };
@@ -89,6 +101,13 @@ export function cleanPreferencesPatch(
 			if (typeof sections[id] === "boolean") next[id] = sections[id];
 		}
 		clean.panel = { sections: next };
+	}
+	const skills = objectField(patch, "skills");
+	if (skills !== undefined && typeof skills["enabled"] === "boolean") {
+		// Completed from `current` exactly like `panel.sections`: the panel owns one
+		// field of this object, and a wire patch must not be able to blank the rest
+		// (the review route, the budgets).
+		clean.skills = { ...current.skills, enabled: skills["enabled"] };
 	}
 	return clean;
 }
@@ -150,7 +169,9 @@ export interface GatewayDeps {
 	/** Buddy-wide preferences. */
 	readonly readPreferences: () => Promise<PreferencesView>;
 	/** Apply an already-validated preferences write. */
-	readonly writePreferences: (patch: Partial<Pick<BuddyConfig, "model" | "panel">>) => Promise<PreferencesView>;
+	readonly writePreferences: (
+		patch: Partial<Pick<BuddyConfig, "model" | "panel" | "skills">>,
+	) => Promise<PreferencesView>;
 	/** The configuration the validator completes patches from. */
 	readonly currentConfig: () => BuddyConfig;
 }
@@ -250,7 +271,7 @@ export class BuddyPersonaGateway extends TypertRemoteService {
 
 	/**
 	 * Write Buddy-wide preferences. Unknown or malformed fields are dropped.
-	 * @param patch - `{ model?: Partial<BuddyModelDefault>, panel?: { sections?: Partial<Record<PanelSectionId, boolean>> } }`.
+	 * @param patch - `{ model?: Partial<BuddyModelDefault>, panel?: { sections?: Partial<Record<PanelSectionId, boolean>> }, skills?: { enabled?: boolean } }`.
 	 * @returns the preferences after the write.
 	 */
 	async updatePreferences(patch: Record<string, unknown>): Promise<PreferencesView> {

@@ -60,7 +60,7 @@ export interface ConfigAccess {
 	/** The resolved section, read at call time. */
 	read(): BuddyConfig;
 	/** Merge a patch into the section through the settings plane. */
-	write(patch: Partial<Pick<BuddyConfig, "model" | "panel">>): Promise<void>;
+	write(patch: Partial<Pick<BuddyConfig, "model" | "panel" | "skills">>): Promise<void>;
 }
 
 /** Used when the row runs without a settings plane. */
@@ -168,9 +168,9 @@ export class BuddyStore extends Service {
 	/**
 	 * Write Buddy-wide preferences. `home` is deliberately not writable here: it
 	 * is read once at boot and moving it under a live row strands open handles.
-	 * @param patch - whole `model` and/or `panel` objects.
+	 * @param patch - whole `model`, `panel` and/or `skills` objects.
 	 */
-	async updateConfig(patch: Partial<Pick<BuddyConfig, "model" | "panel">>): Promise<void> {
+	async updateConfig(patch: Partial<Pick<BuddyConfig, "model" | "panel" | "skills">>): Promise<void> {
 		await this.configAccess.write(patch);
 	}
 }
