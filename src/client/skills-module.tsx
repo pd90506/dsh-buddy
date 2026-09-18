@@ -57,7 +57,15 @@ interface ReviewSpend {
 	readonly outcome: string;
 }
 
-/** Whether the preset's skills row reported in, and who owns the preset id. */
+/**
+ * Whether the preset's skills row reported in, whether that is a fault, and who
+ * owns the preset id.
+ *
+ * `missed` and `synced` are not complements: the host derives `missed` from an
+ * observed live mount, so a preset no session has composed yet reports both
+ * `false` — the waiting state the module explains in neutral copy rather than
+ * as an error.
+ */
 interface SkillsStatus {
 	readonly synced: boolean;
 	readonly missed: boolean;
@@ -364,9 +372,18 @@ export function createSkillsModule(deps: SkillsModuleDeps): () => unknown {
 						</div>
 						<p className={FORM_CLASS.hint}>{deps.t("skillsReviewHint")}</p>
 					</div>
-					{/* Both notices are rendered, never collapsed into one: an unowned
-					    preset id keeps `missed` true forever, and the two together are
-					    what explains why no heartbeat will ever clear it. */}
+					{/* Three states, and they are mutually exclusive by construction:
+					    `missed` is only ever true once a live mount exists (the host
+					    derives it from the roster), so the neutral line can never
+					    contradict it. It is deliberately not the error style — a
+					    preset no buddy conversation has mounted yet is the normal
+					    state of a fresh process, not a fault, and saying so is still
+					    the explanation for why automatic review is not running. The
+					    ownership line is separate and can sit beside either: an
+					    unowned preset id is why no mount will ever clear it. */}
+					{status?.missed === false && status?.preset === "plugin" && (
+						<p className={FORM_CLASS.status}>{deps.t("skillsPresetWaiting")}</p>
+					)}
 					{status?.missed === true && <p className={FORM_CLASS.error}>{deps.t("skillsPresetMissed")}</p>}
 					{status?.preset === "user" && <p className={FORM_CLASS.error}>{deps.t("skillsPresetUser")}</p>}
 				</section>

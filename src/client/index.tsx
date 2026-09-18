@@ -82,6 +82,7 @@ const en = {
 	skillsReview: "Automatic review",
 	skillsReviewHint:
 		"Buddy reviews a conversation once it has run for a while and writes down what it learned.",
+	skillsPresetWaiting: "Automatic review starts once Buddy has had its first conversation.",
 	skillsPresetMissed: "The buddy preset has not reported in, so skill review never starts.",
 	skillsPresetUser:
 		'The preset id "buddy" belongs to a preset of your own, so this plugin will not write it and skill review cannot mount.',
@@ -186,6 +187,7 @@ const zh: typeof en = {
 	skillsEmpty: "还没有技能。",
 	skillsReview: "自动总结",
 	skillsReviewHint: "对话进行一段时间后，Buddy 会复盘一次，把它学到的写下来。",
+	skillsPresetWaiting: "Buddy 还没有进行过对话，自动总结要等第一次对话之后才开始。",
 	skillsPresetMissed: "buddy 预设没有上报，自动总结不会启动。",
 	skillsPresetUser: "预设 id「buddy」属于你自己的预设，本插件不会写它，自动总结因此无法挂载。",
 	skillsPin: "固定",

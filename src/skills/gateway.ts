@@ -125,13 +125,15 @@ export interface SkillLedgerView {
  *
  * Spec §5.2's third bullet: a preset that is installed but silently contributes
  * nothing is the failure this phase exists to make visible. `missed` is the
- * notice — `true` once the bound fired and no heartbeat had arrived — and
- * `synced` is the same fact from the other side, so a panel can render either.
+ * notice, and it is deliberately not the complement of `synced`: a preset is
+ * composed lazily, so `synced: false, missed: false` is the normal state of a
+ * process that has not run a buddy conversation yet, and only a preset that
+ * really mounted without reporting in is a fault.
  */
 export interface SkillsStatusView {
 	/** `true` once the agent row reported that it mounted. */
 	readonly synced: boolean;
-	/** `true` while the not-synced notice is showing. */
+	/** `true` while a live mount exists and no report has arrived. */
 	readonly missed: boolean;
 	/**
 	 * Who the `buddy` preset directory belongs to.

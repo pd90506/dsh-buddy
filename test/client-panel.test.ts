@@ -348,6 +348,23 @@ test("the skills module renders in the panel and is reachable from the sub-nav",
 	assert.ok(pane !== undefined, "the skills module must render its review switch");
 });
 
+test("the skills module stays quiet while no buddy session has mounted the preset", async () => {
+	// The preset is composed lazily, so this is the state of every fresh process
+	// until its first buddy conversation. Calling it a failure is what made the
+	// panel red on a healthy install; the user still needs to be told why
+	// automatic review has not started, so the neutral hint carries that.
+	const panel = mountSkills(async (endpoint) => {
+		if (endpoint === "buddySkills/status") return { ok: true, value: { synced: false, missed: false, preset: "plugin" } };
+		if (endpoint === "buddySkills/list") return { ok: true, value: [] };
+		if (endpoint === "buddySkills/ledger") return { ok: true, value: [] };
+		return { ok: true, value: { skills: { enabled: true } } };
+	});
+	await settle();
+	const shown = texts(panel.tree());
+	assert.ok(shown.includes("settings.buddy:skillsPresetWaiting"), "the not-yet state must still be explained");
+	assert.ok(!shown.includes("settings.buddy:skillsPresetMissed"), "a lazy preset is not a missed heartbeat");
+});
+
 test("the skills module warns when the preset missed its heartbeat or belongs to the user", async () => {
 	const panel = mountSkills(async (endpoint) => {
 		if (endpoint === "buddySkills/status") return { ok: true, value: { synced: false, missed: true, preset: "user" } };

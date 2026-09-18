@@ -2026,6 +2026,7 @@ export const PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram
 | `skillsEmpty` | `No skills yet.` | `还没有技能。` |
 | `skillsReview` | `Automatic review` | `自动总结` |
 | `skillsReviewHint` | `Buddy reviews a conversation once it has run for a while and writes down what it learned.` | `对话进行一段时间后，Buddy 会复盘一次，把它学到的写下来。` |
+| `skillsPresetWaiting` | `Automatic review starts once Buddy has had its first conversation.` | `Buddy 还没有进行过对话，自动总结要等第一次对话之后才开始。` |
 | `skillsPresetMissed` | `The buddy preset has not reported in, so skill review never starts.` | `buddy 预设没有上报，自动总结不会启动。` |
 | `skillsPresetUser` | `The preset id "buddy" belongs to a preset of your own, so this plugin will not write it and skill review cannot mount.` | `预设 id「buddy」属于你自己的预设，本插件不会写它，自动总结因此无法挂载。` |
 | `skillsPin` | `Pin` | `固定` |
@@ -2058,8 +2059,11 @@ export const PANEL_SECTION_IDS = ["soul", "agents", "skills", "model", "telegram
 
 1. 挂载时读 `buddySkills/status`、`buddySkills/list`、`buddySkills/ledger`、`buddyPersona/preferences`；每次写操作
    之后用响应里回带的 `skills` 重画列表（`manage`/`pin`/`adopt`/`visibility` 的响应都带 `skills`）。
-2. **两条互斥的提示，两条都要画，任何一条都不许静默**：`status.missed === true` → `t("skillsPresetMissed")`；
-   `status.preset === "user"` → `t("skillsPresetUser")`。二者可以同时为真。
+2. **三条互斥的提示，任何一条都不许静默**（**订正 2026-09-15**：原文只有前两条，而 `synced:false` 在惰性挂载下
+   是常态，见文末订正节）：`status.missed === true` → 错误样式 `t("skillsPresetMissed")`；
+   `status.missed === false && status.preset === "plugin"` → **中性样式** `t("skillsPresetWaiting")`；
+   `status.preset === "user"` → 错误样式 `t("skillsPresetUser")`。`missed` 三态互斥由宿主构造保证，ownership
+   那一条可以与前两条中任意一条同时为真。
 3. review 总开关：`Switch`，`label={t("skillsReview")}`，初值取 `preferences.skills.enabled`，`onChange` →
    `call("buddyPersona/updatePreferences", { patch: { skills: { enabled } } })`；失败把消息放进 `error`。
 4. 技能列表：每行画名字、描述、`useCount`、`latestActivityAt`、`curatorManaged ? t("skillsManagedByAgent") :
@@ -2285,3 +2289,58 @@ probe 从头到尾**没有挂载过 `buddy` 预设**——这正是 `status.sync
 **Placeholder scan：** 无 TBD/TODO/占位断言；每个代码步骤都给了可直接落地的代码，或给出明确的移植源（`$H` 行号 + 规则名/常量值）。自检中发现并已修掉的两处：(1) Task 2 的测试原先引用 Task 6 才定义的 `emptyUsageRecord`（顺序倒置）→ 已把该构造函数移到 Task 2 的 `domain.ts`，Task 6 改为 import；(2) Task 3 曾留一条示意断言 → 已删除，只保留真实断言。
 
 **Type consistency：** `SkillUsageRecord`/`SkillLedgerRecord`/`ReviewUsageRecord`（Task 2）↔ 访问器命名（Task 5/6/12）；`runOperations` 的返回形状（Task 7）↔ 工具返回值（Task 14）↔ 面板展示（Task 17）；`ReviewCoordinator` 的方法名（Task 12）↔ 监听器调用（Task 14）↔ `ctx.buddySkills` 的转发（Task 13）三处一致；`GENERATED_MARKER`（Task 10）↔ 验收（Task 18 的 preset 断言）。
+
+---
+
+## 订正（2026-09-15）：心跳的判据是「观测到的挂载」，不是墙上时钟
+
+**症状：** 用户打开 Buddy 面板 → Skills，未做任何异常操作，却看到红字
+`The buddy preset has not reported in, so skill review never starts.`（`skillsPresetMissed`）。
+
+**根因（本节原文的设计缺陷，不是实现 bug）：** 宿主行 `dsh-buddy/skills` 在**开机时**挂一个 10 秒定时器，
+超时未收到预设行 `dsh-buddy/skills-agent` 的 `noteAgentRowMounted` 就把 `heartbeatMissed` 置真。但 agent preset
+是**惰性挂载**的：`mountPreset(agentCtx, preset)` 只在某个会话真正用该预设组合 agent 时才跑
+（`dsh-agent-presets`），没有 buddy 会话的进程**永远不会有挂载**。于是计时器必然先响，面板在每一次 dsh 重启
+之后、第一个 buddy 会话出现之前都常亮这条错误——**设计本意是消灭「装了却静默无效」，却制造了一个系统性误报。**
+
+**新规则：** 删掉 `PRESET_HEARTBEAT_TIMEOUT_MS` 与那个定时器，`notePresetSyncMissed()` 一并删除。
+`missed` 改为**每次读取时现算**：
+
+```
+missed = not heartbeat and 本进程存在 buddy 预设的活挂载
+```
+
+活挂载由宿主行软取 `agentPresets.compositionInventory()` 判定（`ctx.get("agentPresets")`，缺失/读失败一律
+按"没有挂载"处理，即"还没什么可说的"，而不是报错）。**`fiberState` 是唯一判据**：inventory 对**每个** roster
+预设都作答——没有活挂载的预设由组合文件作答、每行都没有 `fiberState`——所以"id 在名单里"≠"它挂载了"。
+这一条是真实 harness 的 probe 抓出来的：第一版判据只比对 id，probe 干净启动仍答 `missed: true`。
+
+**新增第三种状态：** `synced` 与 `missed` 不再是互补关系，`synced:false, missed:false` 表示"这个进程还没有
+buddy 会话"——正常态，不是故障。面板新增中性提示（不报警样式）：
+
+| key | en | zh |
+|---|---|---|
+| `skillsPresetWaiting` | `Automatic review starts once Buddy has had its first conversation.` | `Buddy 还没有进行过对话，自动总结要等第一次对话之后才开始。` |
+
+三态互斥由构造保证：`missed` 只在存在活挂载时才可能为真，所以中性行永远不会与错误行同时出现；`preset === "user"`
+仍可与之并列（那是"永远不会有挂载"的原因，preset §5.2 原文保留）。
+
+**真实 harness 验收（隔离 probe，端口 3099，DSH_HOME 指向 /tmp）：**
+
+```
+POST /api/buddySkills/status
+{"type":"server-response","rpcId":"1","result":{"ok":true,
+ "value":{"synced":false,"missed":false,"preset":"plugin"}}}
+```
+
+即干净启动、没有任何 buddy 会话时不再报错；`buddySkills/reviewUsage` 仍为 `ok:true, value:[]`，既有行无回归。
+**仍未验到的部分**：真机"已挂载但未上报"这一支（需要在预设有活挂载时把预设行弄失效），只有单元测试覆盖
+（`test/skills-mount.test.ts` 的 `composedPresets` 桩）；以及面板的真实 React 视觉呈现。
+
+**顺带记录的两个 probe 观察，免得下次当成产品 bug：**
+
+1. 同一个 probe 家目录反复启停会出现 `dsh-buddy-store: boot failed: cannot create effect on inactive context`
+   （伴随三行 `pending (waiting for service: buddyStore)`）。换一个干净的 `DSH_HOME` 立刻正常启动——是残留状态
+   的启动竞态，不是本次改动引入的。
+2. 用户那台常驻实例的 `~/.dsh/storages/buddy_telegram.json` 里已有 `botUsername` 与一条 chat 记录，但那条会话
+   创建于更早的进程：**当前进程确实没有任何 buddy 会话**，这正是原提示常亮的直接原因。

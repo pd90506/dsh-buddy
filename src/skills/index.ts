@@ -49,6 +49,9 @@ import { Service } from "@deepseek-ai/cordis";
 import type { SessionEvent, SurfaceEvent } from "@deepseek-ai/dsh-session";
 import type { KvTable } from "@deepseek-ai/dsh-storage-domain";
 import type { BuddyConfig } from "../config.ts";
+// A value import, not `import type`: the mount check names the preset id, and
+// spelling it a second time here is how the check and the store's write drift.
+import { BUDDY_PRESET_ID } from "../index.ts";
 import type { BuddyPaths } from "../paths.ts";
 import type { ReviewUsageRecord, SkillLedgerRecord, SkillUsageRecord } from "../store/domain.ts";
 // `import type` only: this module must not pull `src/store/preset.ts` — and its
@@ -89,18 +92,28 @@ export const name = "dsh-buddy-skills";
 export const inject = ["buddyStore"];
 
 /**
- * How long after boot the row waits for the agent row's heartbeat before it
- * declares the preset unsynchronized.
+ * The slice of the `agentPresets` roster this row reads.
  *
- * An **internal liveness constant, not a user tunable**: it belongs to neither
- * `Config` nor the settings tab, and no profile can raise it. It is the same
- * class of value as the store row's two-second settings barrier. Ten seconds is
- * far longer than the agent row's own mount takes — the loader mounts both rows
- * in the same pass — so the bound cannot fire on a merely busy event loop, while
- * still being short enough that a user who opens the panel reads the truth
- * rather than a stale "nothing is wrong".
+ * Declared locally like every other soft-dependency shape here: the roster is
+ * not in this package's dependency closure, and the row calls exactly one method
+ * on it. `compositionInventory` is the preset picker's own read — it answers
+ * from a **live standing mount** when one exists and never composes anything
+ * itself — so it is the one honest way to ask "has this preset mounted in this
+ * process yet" without mounting it.
  */
-const PRESET_HEARTBEAT_TIMEOUT_MS = 10_000;
+interface PresetRosterHandle {
+	/**
+	 * Every preset's composition, answering from a live mount when there is one.
+	 * @returns one entry per roster preset; a row carries `fiberState` only when
+	 * the preset really has a live mount.
+	 */
+	compositionInventory(): Promise<
+		readonly {
+			readonly id: string;
+			readonly rows: readonly { readonly fiberState?: unknown }[];
+		}[]
+	>;
+}
 
 /** The `buddyStore` members this row uses. */
 interface StoreHandle {
@@ -303,9 +316,6 @@ export class BuddySkillsService extends Service {
 	/** Whether the agent row has reported that it mounted. */
 	private heartbeat = false;
 
-	/** Whether the heartbeat deadline passed without a report. */
-	private heartbeatMissed = false;
-
 	/**
 	 * Set by {@link dispose}. A review whose `subagents.start` was still in
 	 * flight when the row unloaded must notice and stop itself: nothing else is
@@ -463,16 +473,12 @@ export class BuddySkillsService extends Service {
 	/**
 	 * Report that the agent row mounted, clearing the not-synced notice.
 	 *
-	 * Called by the preset row at mount time. This is the only writer: the
-	 * deadline below records a *miss*, so a preset that mounts late still clears
-	 * the notice instead of latching into a warning.
+	 * Called by the preset row at mount time. This is the only writer: a miss is
+	 * derived per read (see {@link presetSyncMissed}), so a report can never
+	 * leave a stale warning behind.
 	 */
 	noteAgentRowMounted(): void {
 		this.heartbeat = true;
-		// A late heartbeat *clears* the notice: the bound identifies "the preset
-		// did not mount", not "the preset mounted late", and a user who repaired
-		// the wiring should see the warning go away without a reload.
-		this.heartbeatMissed = false;
 	}
 
 	/**
@@ -486,38 +492,82 @@ export class BuddySkillsService extends Service {
 	/**
 	 * Whether the not-synced notice is showing.
 	 *
-	 * Exposed beside {@link presetSynced} so the panel can name the failure —
-	 * "the preset did not mount" is actionable, "false" is not. A heartbeat that
-	 * arrives after the bound clears it, so the two reads can never disagree in
-	 * the direction that matters: a synced preset never reports a miss.
-	 * @returns `true` while the bound has fired and no heartbeat has arrived.
+	 * The notice means **"this preset mounted and its skills half never reported
+	 * in"**, and nothing else. It deliberately does not mean "no report has
+	 * arrived yet", because a preset is composed lazily: a process that has not
+	 * run a buddy conversation has no mount at all, which is the normal state
+	 * right after every restart. Deciding that from a wall-clock bound armed at
+	 * boot made a healthy install warn on every boot — the mount has to be
+	 * *observed* first, and the roster is what can observe one without causing
+	 * it (`agentPresets.compositionInventory` never composes).
+	 *
+	 * Both directions stay honest: a preset that mounted without its skills row
+	 * (the row removed from the composition, or its `apply` degrading to a
+	 * no-op) reports a miss, and a heartbeat that arrives afterwards clears it
+	 * on the next read rather than latching.
+	 * @returns `true` while a live mount exists and no heartbeat has arrived.
 	 */
 	async presetSyncMissed(): Promise<boolean> {
-		return this.heartbeatMissed;
+		if (this.heartbeat) return false;
+		return await this.presetHasLiveMount();
 	}
 
 	/**
-	 * Record that the heartbeat deadline fired. Called by this row's own timer.
+	 * Whether the buddy preset is composed in this process right now.
+	 *
+	 * `fiberState` is the discriminator, and it is load-bearing: the inventory
+	 * answers for **every** roster preset, serving a preset nothing has composed
+	 * from its composition file with no `fiberState` on any row. Membership alone
+	 * therefore means "the roster knows this id", not "it mounted" — reading it
+	 * that way reports the miss on a healthy fresh boot, which the real-harness
+	 * probe caught. A live mount is the one thing only a composition produces.
+	 *
+	 * Fail-open in the only direction that matters: a roster that is absent,
+	 * unreadable or mid-reload answers "not mounted", which reports "nothing to
+	 * say yet" rather than an error the user cannot act on. A false miss is a
+	 * permanent red notice on a healthy install; a missed fault is still caught
+	 * by `preset === "user"` and by the roster's own broken-preset verdict.
+	 * @returns `true` when a live standing mount of the buddy preset exists.
 	 */
-	notePresetSyncMissed(): void {
-		if (!this.heartbeat) this.heartbeatMissed = true;
+	private async presetHasLiveMount(): Promise<boolean> {
+		const roster = this.host.get("agentPresets") as PresetRosterHandle | undefined;
+		if (roster === undefined) return false;
+		try {
+			const inventory = await roster.compositionInventory();
+			if (!Array.isArray(inventory)) return false;
+			return inventory.some(
+				(entry) =>
+					entry !== null &&
+					typeof entry === "object" &&
+					entry.id === BUDDY_PRESET_ID &&
+					Array.isArray(entry.rows) &&
+					entry.rows.some(
+						(row: { readonly fiberState?: unknown }) => row !== null && typeof row === "object" && row.fiberState !== undefined,
+					),
+			);
+		} catch (error) {
+			console.error(`dsh-buddy-skills: reading the preset composition failed (${messageOf(error)})`);
+			return false;
+		}
 	}
 
 	/**
 	 * The preset-sync notice, as the panel reads it (spec §5.2's third bullet).
 	 *
 	 * The two heartbeat fields are the same fact from both sides so a panel can
-	 * render whichever it wants without knowing which one the bound writes.
-	 * `preset` is the other half of the diagnosis — told apart, a missing row
-	 * because a heartbeat never came and a row that can never come because the
-	 * user's own preset owns the id are two different things to a user.
+	 * render whichever it wants. `missed` is derived from an observed live mount
+	 * (see {@link presetSyncMissed}) rather than stored, so a fresh process
+	 * reports "neither" until a session actually composes the preset. `preset` is
+	 * the other half of the diagnosis — told apart, a mounted preset whose skills
+	 * row never reported in and a row that can never report because the user's
+	 * own preset owns the id are two different things to a user.
 	 * @returns whether the agent row reported in, whether the notice shows, and
 	 * who owns the preset directory.
 	 */
 	async status(): Promise<SkillsStatusView> {
 		return {
 			synced: this.heartbeat,
-			missed: this.heartbeatMissed,
+			missed: await this.presetSyncMissed(),
 			preset: await this.host.buddyStore.presetOwnership(),
 		};
 	}
@@ -1199,22 +1249,6 @@ export function apply(ctx: PluginContext): void {
 			await service.dispose();
 		};
 	}, "dsh-buddy: skills");
-
-	// The heartbeat bound (spec §5.2): if the agent row has not reported by now,
-	// the preset did not mount its half — the failure mode this phase exists to
-	// make visible. `unref`ed so a pending bound never holds the process open,
-	// and cleared on disposal so it dies with the fiber: a bare `setTimeout`
-	// would outlive the row and fire against a disposed service. It reads the
-	// service through `ctx.get` at firing time rather than closing over it,
-	// which keeps the timer independent of construction order.
-	ctx.effect(() => {
-		const timer = setTimeout(() => {
-			const live = ctx.get("buddySkills") as BuddySkillsService | undefined;
-			live?.notePresetSyncMissed();
-		}, PRESET_HEARTBEAT_TIMEOUT_MS);
-		timer.unref();
-		return () => clearTimeout(timer);
-	}, "dsh-buddy: skills heartbeat");
 }
 
 /**

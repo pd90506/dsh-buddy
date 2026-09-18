@@ -145,6 +145,7 @@ host composition（cordis.patch.yml）        buddy preset（assets/preset/agent
 - **首次覆盖前**，若磁盘上那份内容与插件上次写出的不同（= 有人手改过），先写一份 `.bak` 并在面板提示"已备份"。
 - 模板文件头改成生成物声明：这份接线文件由 dsh-buddy 生成、升级按插件版本重写；要改人格去 `SOUL.md`，要改规则去 `AGENTS.md`，要改开关用 Buddy 面板 / `settings.yaml`；**要自定义接线请用 GUI 的"复制预设"复制成新 id 再改**（harness 的 `agentPresets.copy` 是 Remote 暴露的既有能力）。
 - 行挂载失败的可观测性：preset 行挂载时向宿主行上报"我在"；宿主行启动后 **10 秒**（内部常量，不进 settings，与 store 行那个 2 秒等待上限同类）仍未收到上报，就在面板显示"预设未同步"。这样"静默无效"这个失败模式被消除。
+  > **2026-09-15 订正：** 「启动后 10 秒」这个判据是错的，已删。agent preset 是**惰性挂载**的——没有 buddy 会话的进程根本不会有挂载——所以开机计时必然先响，面板在每次重启后、第一个 buddy 会话之前都常亮这条错误，把一个健康安装报成故障。现行规则：`missed` 每次读取时现算，判据是「本进程确实存在 buddy 预设的**活挂载**（`agentPresets.compositionInventory()` 里有 `fiberState` 的行），而宿主行仍未收到上报」；`synced:false, missed:false` 表示"还没有 buddy 会话"，面板用中性文案说明而不是报警。完整推导与真实 harness 验收见 `../plans/2026-09-13-buddy-skills-phase-3a.md` 文末订正节。
 
 ### 5.3 要一并改掉的既有产物
 

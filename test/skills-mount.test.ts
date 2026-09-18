@@ -25,12 +25,11 @@
  *    providers really see the new tier. That is the one hard guarantee that a
  *    habit learned in Buddy cannot leak into ordinary coding sessions.
  *
- * The heartbeat bound is ten seconds of wall clock, which no suite should wait
- * out. The harness therefore captures the timer where the row arms it (an
- * ordinary `setTimeout` at the documented delay, with every other delay still
- * going to the real scheduler) and `fireHeartbeat` invokes that captured
- * callback — so what the tests observe is the real registration, not a
- * test-only seam into the service.
+ * The not-synced notice is decided from an **observed** standing mount, not from
+ * wall clock: the preset is lazy, so a fresh process legitimately has none and
+ * the panel must stay silent until one exists. The harness therefore stubs the
+ * `agentPresets` plane the row asks (`compositionInventory`, the same read the
+ * preset picker uses) and lets a test answer "a live mount exists".
  * @module test/skills-mount
  */
 import assert from "node:assert/strict";
@@ -146,10 +145,8 @@ interface Mounted {
 	 * the rows an event shape the harness never produces.
 	 */
 	emitSessionEvent(sessionId: string, event: unknown): void;
-	/** The delays of every timer the heartbeat arm registered, in order. */
-	readonly heartbeatDelays: number[];
-	/** Invoke the heartbeat bound's callback, as ten seconds passing would. */
-	fireHeartbeat(): void;
+	/** Install a live standing mount of one preset, as a composed session leaves. */
+	readonly composePreset: (id: string) => void;
 	/** Every line the row sent to `console.error`, which is its log sink. */
 	readonly logLines: string[];
 	/**
@@ -218,6 +215,23 @@ interface MountOptions {
 	 * panel has to be able to name — the whole point of the ownership field.
 	 */
 	readonly seedUserPreset?: boolean;
+	/**
+	 * The preset ids the `agentPresets` plane reports as **live standing mounts**
+	 * from the start; default none.
+	 *
+	 * A preset is composed lazily, so "no mount" is the normal state of a fresh
+	 * process — the claim under test is that the row reads that absence as
+	 * "nothing to report yet" rather than as a failure.
+	 */
+	readonly composedPresets?: readonly string[];
+	/**
+	 * The preset ids the roster **lists** without a live mount — the shape a real
+	 * `compositionInventory` answers for a preset nothing has composed yet: the
+	 * id and its composition-file rows, with no `fiberState` anywhere.
+	 */
+	readonly listedPresets?: readonly string[];
+	/** Mount an `agentPresets` plane at all; default `true`. */
+	readonly withAgentPresets?: boolean;
 }
 
 /**
@@ -302,296 +316,304 @@ async function mountSkills(options: MountOptions = {}): Promise<Mounted> {
 		await writeFile(join(presetDir, "agent.cordis.yml"), "mine\n", "utf8");
 	}
 
-	// The heartbeat bound is a real ten-second timer, so it is captured where the
-	// row arms it: every other timeout still goes to the real scheduler (the
-	// harness's own polls depend on it), and only the bound is held.
-	const realSetTimeout = globalThis.setTimeout;
 	const realConsoleError = console.error;
-	const heartbeatCallbacks: (() => void)[] = [];
-	const heartbeatDelays: number[] = [];
+	/** The preset ids whose standing mount the roster reports as live. */
+	const composed = new Set<string>(options.composedPresets ?? []);
 
-	try {
-		globalThis.setTimeout = ((callback: () => void, delay?: number) => {
-			if (delay !== 10_000) return realSetTimeout(callback, delay);
-			heartbeatCallbacks.push(callback);
-			heartbeatDelays.push(delay);
-			return realSetTimeout(() => undefined, 0);
-		}) as typeof setTimeout;
-		// The row logs through `console.error`; capturing it is what lets a test
-	// assert that a degradation is *said out loud* rather than silent.
+	// The row logs through `console.error`; capturing it is what lets a test
+	// assert that a degradation is *said out loud* rather than silent. The
+	// capture is deliberately still installed when the mount returns: a test
+	// reads `logLines` after dispatching, so restoring the real console at this
+	// point would throw away the very lines under test.
 	const logLines: string[] = [];
 	console.error = (...args: unknown[]) => {
 		logLines.push(args.map((value) => String(value)).join(" "));
 	};
 	const root = new Context() as unknown as Host;
-		/** Every mounted fiber, so `dispose` tears the graph down the way a reload does. */
-		const fibers: { dispose(): Promise<void> }[] = [];
-		const contributions: unknown[] = [];
-		/** The providers the row registered, and the controls it was handed. */
-		const providerNames: string[] = [];
-		const providerControls = new Map<string, { readonly signal: AbortSignal; invalidate(): void }>();
-		const invalidations = new Map<string, number>();
-		const started: Started[] = [];
-		const interrupted: string[] = [];
-		const authorities: unknown[] = [];
-		const runs: RunHandle[] = [];
-		const witness = { signals: [] as AbortSignal[], disposed: [] as string[] };
-		const usageTable = tableStub<SkillUsageRecord>();
-		const ledgerTable = tableStub<SkillLedgerRecord>();
-		const reviewTable = tableStub<ReviewUsageRecord>();
-		const surfaces = new Map<string, readonly unknown[]>(Object.entries(options.surfaces ?? {}));
-		let global: Record<string, unknown> = {};
-		/** Each live agent's `options`, keyed by session id. */
-		const agents = new Map<string, { provider?: string; model?: string }>(Object.entries(options.agents ?? {}));
-		let releaseStart: () => void = () => undefined;
-		const startGate = {
-			promise: new Promise<void>((resolve) => {
-				releaseStart = resolve;
-			}),
-		};
+	/** Every mounted fiber, so `dispose` tears the graph down the way a reload does. */
+	const fibers: { dispose(): Promise<void> }[] = [];
+	const contributions: unknown[] = [];
+	/** The providers the row registered, and the controls it was handed. */
+	const providerNames: string[] = [];
+	const providerControls = new Map<string, { readonly signal: AbortSignal; invalidate(): void }>();
+	const invalidations = new Map<string, number>();
+	const started: Started[] = [];
+	const interrupted: string[] = [];
+	const authorities: unknown[] = [];
+	const runs: RunHandle[] = [];
+	const witness = { signals: [] as AbortSignal[], disposed: [] as string[] };
+	const usageTable = tableStub<SkillUsageRecord>();
+	const ledgerTable = tableStub<SkillLedgerRecord>();
+	const reviewTable = tableStub<ReviewUsageRecord>();
+	const surfaces = new Map<string, readonly unknown[]>(Object.entries(options.surfaces ?? {}));
+	let global: Record<string, unknown> = {};
+	/** Each live agent's `options`, keyed by session id. */
+	const agents = new Map<string, { provider?: string; model?: string }>(Object.entries(options.agents ?? {}));
+	let releaseStart: () => void = () => undefined;
+	const startGate = {
+		promise: new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		}),
+	};
 
-		const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
-			const fiber = root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) });
-			fibers.push(fiber as never);
-			dshHomeHold.track(fiber as { dispose(): Promise<void> });
-		};
-		const give = (ctx: unknown, key: string, value: unknown): void => {
-			(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
-		};
+	const sibling = (pluginName: string, provide: (ctx: unknown) => void): void => {
+		const fiber = root.plugin({ name: pluginName, apply: (ctx: unknown) => provide(ctx) });
+		fibers.push(fiber as never);
+		dshHomeHold.track(fiber as { dispose(): Promise<void> });
+	};
+	const give = (ctx: unknown, key: string, value: unknown): void => {
+		(ctx as { reflect: { provide(name: string, value: unknown): void } }).reflect.provide(key, value);
+	};
 
-		if (options.withTypert !== false) {
-			sibling("fake-typert", (ctx) =>
-				give(ctx, "typert", {
-					register: (contribution: unknown) => {
-						contributions.push(contribution);
-						return () => undefined;
-					},
-				}),
-			);
-		}
-		// The `skills` registry, recording rather than real: `dsh-skill` is not in
-		// this package's dependency closure, so the row can only be driven against
-		// its declared contract — `registerProvider(create)` calls the factory with
-		// a control and answers the disposer that unregisters.
-		if (options.withSkillsRegistry !== false) {
-			sibling("fake-skills", (ctx) =>
-				give(ctx, "skills", {
-					registerProvider: (create: (control: unknown) => { readonly name: string }) => {
-						// The name is only known once the factory returns, so the holder
-						// is filled in immediately after and read when `invalidate` runs.
-						let name = "";
-						const control = {
-							signal: new AbortController().signal,
-							invalidate: (): void => {
-								const key = name === "" ? "unknown" : name;
-								invalidations.set(key, (invalidations.get(key) ?? 0) + 1);
-							},
-						};
-						const provider = create(control);
-						name = provider.name;
-						providerNames.push(provider.name);
-						providerControls.set(provider.name, control);
-						return () => {
-							const at = providerNames.indexOf(provider.name);
-							if (at !== -1) providerNames.splice(at, 1);
-							providerControls.delete(provider.name);
-						};
-					},
-				}),
-			);
-		}
-		sibling("fake-storage", (ctx) =>
-			give(ctx, "storageDomain", {
-				open: async () => ({
-					name: "buddy",
-					global: {
-						get: () => global,
-						set: async (next: Record<string, unknown>) => {
-							global = next;
-						},
-					},
-					table: (tableName: string) => {
-						if (tableName === "skill_usage") return usageTable;
-						if (tableName === "skill_ledger") return ledgerTable;
-						return reviewTable;
-					},
-					close: async () => undefined,
-				}),
-				get: () => undefined,
-			}),
-		);
-		sibling("fake-settings", (ctx) =>
-			give(ctx, "settings", {
-				installSection: (
-					_owner: unknown,
-					_ns: string,
-					_schema: unknown,
-					_entry: unknown,
-					hooks: { setSource(source: () => BuddyConfig): void; onChange(): void },
-				) => {
-					hooks.setSource(() => config);
+	if (options.withTypert !== false) {
+		sibling("fake-typert", (ctx) =>
+			give(ctx, "typert", {
+				register: (contribution: unknown) => {
+					contributions.push(contribution);
+					return () => undefined;
 				},
 			}),
 		);
-		// The real agent registry is a soft dependency: the row only asks it for
-		// the live Agent a session id belongs to, to hand `subagents.start` its
-		// `parent`.
-		if (options.withAgents !== false) {
-			// Exactly the verified shape and nothing more: `AgentRegistry.get`
-			// (`dsh-agent/lib/types/index.d.ts`) answering a live Agent whose
-			// `options: AgentOptions` is the documented runtime face
-			// (`dsh-agent/lib/types/runtime-types.d.ts:139-141`). A test that reaches
-			// for an accessor the harness does not really have therefore fails here
-			// instead of being satisfied by an invented method — which is precisely
-			// how a fictional `sessionQuery.readRoute` stayed invisible once before.
-			sibling("fake-agents", (ctx) =>
-				give(ctx, "agents", {
-					get: (sessionId: string) =>
-						agents.has(sessionId)
-							? { id: sessionId, options: agents.get(sessionId) }
-							: // No map was supplied: a bare live agent with no route, which is
-								// what a session the deployment never pinned looks like.
-								options.agents === undefined
-								? { id: sessionId, options: {} }
-								: undefined,
-				}),
-			);
-		}
-		if (options.withSubagents !== false) {
-			sibling("fake-subagents", (ctx) =>
-				give(ctx, "subagents", {
-					start: async (name: string, request: Record<string, unknown>) => {
-						if (options.holdStart === true) await startGate.promise;
-						started.push({
-							name,
-							prompt: request["prompt"] as Started["prompt"],
-							toolFilter: request["toolFilter"],
-							agentOptions: request["agentOptions"],
-							parent: request["parent"],
-						});
-						const childSessionId = `child-${started.length}`;
-						witness.signals.push(request["signal"] as AbortSignal);
-						let finishRun: () => void = () => undefined;
-						const result = new Promise<unknown>((resolve) => {
-							finishRun = () => resolve({ stopReason: "completed" });
-						});
-						// A test that only asserts the *start* must not leave the
-						// coordinator waiting on a run nothing will settle, so the
-						// run finishes on its own microtask unless the test asked to
-						// keep it alive with `holdRuns`.
-						if (options.holdRuns !== true) queueMicrotask(() => finishRun());
-						runs.push({ childSessionId, finish: () => finishRun() });
-						// A run's disposal settles its result, exactly as the
-						// in-process driver does by cancelling the child.
-						return {
-							id: childSessionId,
-							result,
-							dispose: async () => {
-								witness.disposed.push(childSessionId);
-								finishRun();
-							},
-						};
-					},
-					interrupt: (childSessionId: string, authority: unknown) => {
-						interrupted.push(childSessionId);
-						authorities.push(authority);
-					},
-				}),
-			);
-		}
-		if (options.withSessionQuery === true) {
-			sibling("fake-session-query", (ctx) =>
-				give(ctx, "sessionQuery", {
-					// Only methods the shipped `SessionQueryEngine` really has.
-					readSurface: async (sessionId: string) => ({ events: surfaces.get(sessionId) ?? [] }),
-					listSessions: async () => [],
-					readTitle: async () => undefined,
-				}),
-			);
-		}
-
-		const mountRow = (row: { name: string; inject?: string[]; apply: (ctx: never) => void }): unknown => {
-			const fiber = root.plugin({ name: row.name, inject: row.inject ?? [], apply: row.apply });
-			fibers.push(fiber as never);
-			// The file-scope teardown disposes these too, before the ambient
-			// home returns — a mount a test never disposes must not be able to
-			// resume its boot against the real `~/.dsh` afterwards.
-			dshHomeHold.track(fiber as { dispose(): Promise<void> });
-			return fiber;
-		};
-		if (options.withStore !== false) mountRow(storeRow as never);
-		const skillsFiber = mountRow(skillsRow as never) as { state: number };
-
-		const service = (): ServiceProxy | undefined => root.get(BUDDY_SKILLS_SERVICE) as ServiceProxy | undefined;
-		if (options.withStore !== false) {
-			await until(() => service() !== undefined);
-		}
-		// Mounted only once the host row has *published* `buddySkills`: the preset
-		// row reads it with `ctx.get` at apply time and degrades to a silent no-op
-		// when it is not there yet, which a mount ordered before the publication
-		// would be. The composition mounts both rows in one pass and cordis orders
-		// the activation, so this is the harness's job, not a production seam.
-		if (options.withAgentRow === true) mountRow(skillsAgentRow as never);
-		await settle();
-
-		return {
-			home,
-			root,
-			skillsRowState: () => skillsFiber.state,
-			provideStore: () => {
-				if (options.withStore !== false) return;
-				// This boot happens after the harness returned, and it must still
-				// see THIS mount's scratch home: the file-scope hold keeps a
-				// throwaway ambient for the whole file, and nothing in between
-				// re-points it.
-				mountRow(storeRow as never);
-			},
-			releaseStart: () => releaseStart(),
-			skillsRoot: join(home, "main", "skills"),
-			skills: service,
-			contributions,
-			providerNames,
-			invalidationsFor: (provider) => invalidations.get(provider) ?? 0,
-			started,
-			interrupted,
-			authorities,
-			witness,
-			runs,
-			usage: usageTable.rows,
-			ledger: ledgerTable.rows,
-			reviews: reviewTable.rows,
-			emitSessionEvent: (sessionId, event) => {
-				(root as unknown as { emit(name: string, ...args: unknown[]): unknown }).emit(
-					"session/event",
-					{ header: { id: sessionId } },
-					event,
-				);
-			},
-			logLines,
-			restoreLogging: () => {
-				console.error = realConsoleError;
-			},
-			heartbeatDelays,
-			fireHeartbeat: () => {
-				for (const fire of [...heartbeatCallbacks]) fire();
-			},
-			// Reverse mount order: the skills row is unloaded before the store it
-			// depends on, which is what a real reload does.
-			dispose: async () => {
-				for (const fiber of [...fibers].reverse()) await fiber.dispose();
-				// Back to the file's hold home, never the ambient one. It is safe
-				// unconditionally — unlike a captured "previous" value, a second
-				// dispose cannot put the real home back under another live mount.
-				dshHomeHold.release();
-			},
-		};
-	} finally {
-		// Restore whatever happened: the patched scheduler must never outlive one
-		// mount, or a later test's polling would depend on this one's capture. The
-		// bound has already been armed by the time the harness returns, so the
-		// restore costs the capture nothing.
-		globalThis.setTimeout = realSetTimeout;
 	}
+	// The `skills` registry, recording rather than real: `dsh-skill` is not in
+	// this package's dependency closure, so the row can only be driven against
+	// its declared contract — `registerProvider(create)` calls the factory with
+	// a control and answers the disposer that unregisters.
+	if (options.withSkillsRegistry !== false) {
+		sibling("fake-skills", (ctx) =>
+			give(ctx, "skills", {
+				registerProvider: (create: (control: unknown) => { readonly name: string }) => {
+					// The name is only known once the factory returns, so the holder
+					// is filled in immediately after and read when `invalidate` runs.
+					let name = "";
+					const control = {
+						signal: new AbortController().signal,
+						invalidate: (): void => {
+							const key = name === "" ? "unknown" : name;
+							invalidations.set(key, (invalidations.get(key) ?? 0) + 1);
+						},
+					};
+					const provider = create(control);
+					name = provider.name;
+					providerNames.push(provider.name);
+					providerControls.set(provider.name, control);
+					return () => {
+						const at = providerNames.indexOf(provider.name);
+						if (at !== -1) providerNames.splice(at, 1);
+						providerControls.delete(provider.name);
+					};
+				},
+			}),
+		);
+	}
+	sibling("fake-storage", (ctx) =>
+		give(ctx, "storageDomain", {
+			open: async () => ({
+				name: "buddy",
+				global: {
+					get: () => global,
+					set: async (next: Record<string, unknown>) => {
+						global = next;
+					},
+				},
+				table: (tableName: string) => {
+					if (tableName === "skill_usage") return usageTable;
+					if (tableName === "skill_ledger") return ledgerTable;
+					return reviewTable;
+				},
+				close: async () => undefined,
+			}),
+			get: () => undefined,
+		}),
+	);
+	sibling("fake-settings", (ctx) =>
+		give(ctx, "settings", {
+			installSection: (
+				_owner: unknown,
+				_ns: string,
+				_schema: unknown,
+				_entry: unknown,
+				hooks: { setSource(source: () => BuddyConfig): void; onChange(): void },
+			) => {
+				hooks.setSource(() => config);
+			},
+		}),
+	);
+	// The real agent registry is a soft dependency: the row only asks it for
+	// the live Agent a session id belongs to, to hand `subagents.start` its
+	// `parent`.
+	if (options.withAgents !== false) {
+		// Exactly the verified shape and nothing more: `AgentRegistry.get`
+		// (`dsh-agent/lib/types/index.d.ts`) answering a live Agent whose
+		// `options: AgentOptions` is the documented runtime face
+		// (`dsh-agent/lib/types/runtime-types.d.ts:139-141`). A test that reaches
+		// for an accessor the harness does not really have therefore fails here
+		// instead of being satisfied by an invented method — which is precisely
+		// how a fictional `sessionQuery.readRoute` stayed invisible once before.
+		sibling("fake-agents", (ctx) =>
+			give(ctx, "agents", {
+				get: (sessionId: string) =>
+					agents.has(sessionId)
+						? { id: sessionId, options: agents.get(sessionId) }
+						: // No map was supplied: a bare live agent with no route, which is
+							// what a session the deployment never pinned looks like.
+							options.agents === undefined
+							? { id: sessionId, options: {} }
+							: undefined,
+			}),
+		);
+	}
+	if (options.withAgentPresets !== false) {
+		// The roster's own read, reduced to what the row asks it: which preset
+		// ids have a live standing mount in THIS process. `compositionInventory`
+		// really does answer from a live mount and never mounts one on a read,
+		// so "absent from here" is exactly "no session has composed it yet".
+		sibling("fake-agent-presets", (ctx) =>
+			give(ctx, "agentPresets", {
+				compositionInventory: async () => [
+					...[...composed].map((id) => ({
+						id,
+						trust: "user",
+						isDefault: false,
+						rows: [{ entryId: "buddy-persona", moduleName: "@deepseek-ai/dsh-persona", enabled: true, fiberState: 2 }],
+					})),
+					...(options.listedPresets ?? []).map((id) => ({
+						id,
+						trust: "user",
+						isDefault: false,
+						rows: [{ entryId: "buddy-persona", moduleName: "@deepseek-ai/dsh-persona", enabled: true }],
+					})),
+				],
+			}),
+		);
+	}
+	if (options.withSubagents !== false) {
+		sibling("fake-subagents", (ctx) =>
+			give(ctx, "subagents", {
+				start: async (name: string, request: Record<string, unknown>) => {
+					if (options.holdStart === true) await startGate.promise;
+					started.push({
+						name,
+						prompt: request["prompt"] as Started["prompt"],
+						toolFilter: request["toolFilter"],
+						agentOptions: request["agentOptions"],
+						parent: request["parent"],
+					});
+					const childSessionId = `child-${started.length}`;
+					witness.signals.push(request["signal"] as AbortSignal);
+					let finishRun: () => void = () => undefined;
+					const result = new Promise<unknown>((resolve) => {
+						finishRun = () => resolve({ stopReason: "completed" });
+					});
+					// A test that only asserts the *start* must not leave the
+					// coordinator waiting on a run nothing will settle, so the
+					// run finishes on its own microtask unless the test asked to
+					// keep it alive with `holdRuns`.
+					if (options.holdRuns !== true) queueMicrotask(() => finishRun());
+					runs.push({ childSessionId, finish: () => finishRun() });
+					// A run's disposal settles its result, exactly as the
+					// in-process driver does by cancelling the child.
+					return {
+						id: childSessionId,
+						result,
+						dispose: async () => {
+							witness.disposed.push(childSessionId);
+							finishRun();
+						},
+					};
+				},
+				interrupt: (childSessionId: string, authority: unknown) => {
+					interrupted.push(childSessionId);
+					authorities.push(authority);
+				},
+			}),
+		);
+	}
+	if (options.withSessionQuery === true) {
+		sibling("fake-session-query", (ctx) =>
+			give(ctx, "sessionQuery", {
+				// Only methods the shipped `SessionQueryEngine` really has.
+				readSurface: async (sessionId: string) => ({ events: surfaces.get(sessionId) ?? [] }),
+				listSessions: async () => [],
+				readTitle: async () => undefined,
+			}),
+		);
+	}
+
+	const mountRow = (row: { name: string; inject?: string[]; apply: (ctx: never) => void }): unknown => {
+		const fiber = root.plugin({ name: row.name, inject: row.inject ?? [], apply: row.apply });
+		fibers.push(fiber as never);
+		// The file-scope teardown disposes these too, before the ambient
+		// home returns — a mount a test never disposes must not be able to
+		// resume its boot against the real `~/.dsh` afterwards.
+		dshHomeHold.track(fiber as { dispose(): Promise<void> });
+		return fiber;
+	};
+	if (options.withStore !== false) mountRow(storeRow as never);
+	const skillsFiber = mountRow(skillsRow as never) as { state: number };
+
+	const service = (): ServiceProxy | undefined => root.get(BUDDY_SKILLS_SERVICE) as ServiceProxy | undefined;
+	if (options.withStore !== false) {
+		await until(() => service() !== undefined);
+	}
+	// Mounted only once the host row has *published* `buddySkills`: the preset
+	// row reads it with `ctx.get` at apply time and degrades to a silent no-op
+	// when it is not there yet, which a mount ordered before the publication
+	// would be. The composition mounts both rows in one pass and cordis orders
+	// the activation, so this is the harness's job, not a production seam.
+	if (options.withAgentRow === true) mountRow(skillsAgentRow as never);
+	await settle();
+
+	return {
+		home,
+		root,
+		skillsRowState: () => skillsFiber.state,
+		provideStore: () => {
+			if (options.withStore !== false) return;
+			// This boot happens after the harness returned, and it must still
+			// see THIS mount's scratch home: the file-scope hold keeps a
+			// throwaway ambient for the whole file, and nothing in between
+			// re-points it.
+			mountRow(storeRow as never);
+		},
+		releaseStart: () => releaseStart(),
+		skillsRoot: join(home, "main", "skills"),
+		skills: service,
+		contributions,
+		providerNames,
+		invalidationsFor: (provider) => invalidations.get(provider) ?? 0,
+		started,
+		interrupted,
+		authorities,
+		witness,
+		runs,
+		usage: usageTable.rows,
+		ledger: ledgerTable.rows,
+		reviews: reviewTable.rows,
+		emitSessionEvent: (sessionId, event) => {
+			(root as unknown as { emit(name: string, ...args: unknown[]): unknown }).emit(
+				"session/event",
+				{ header: { id: sessionId } },
+				event,
+			);
+		},
+		logLines,
+		restoreLogging: () => {
+			console.error = realConsoleError;
+		},
+		composePreset: (id) => {
+			composed.add(id);
+		},
+		// Reverse mount order: the skills row is unloaded before the store it
+		// depends on, which is what a real reload does.
+		dispose: async () => {
+			for (const fiber of [...fibers].reverse()) await fiber.dispose();
+			// Back to the file's hold home, never the ambient one. It is safe
+			// unconditionally — unlike a captured "previous" value, a second
+			// dispose cannot put the real home back under another live mount.
+			dshHomeHold.release();
+		},
+	};
 }
 
 /**
@@ -768,46 +790,78 @@ test("the row mounts and serves without a typert registry, and says so", async (
 	mounted.restoreLogging();
 });
 
-test("a heartbeat before the bound flips the notice from the start", async () => {
+test("a heartbeat before any mount flips the notice from the start", async () => {
 	const service = serviceOf(await mountSkills());
 	assert.equal(await dispatch(service, "presetSynced", []), false, "no heartbeat has arrived yet");
 	dispatch(service, "noteAgentRowMounted", []);
 	assert.equal(await dispatch(service, "presetSynced", []), true);
 });
 
-test("the heartbeat bound fires the not-synced state after ten seconds", async () => {
-	// The bound is 10s of wall clock, which no suite should wait out. The harness
-	// captures the timer where the row registers it — an ordinary `setTimeout` at
-	// the documented delay — and `fireHeartbeat` invokes that captured callback,
-	// so the observation is the real registration rather than a test-only seam.
+test("a process that never composed the buddy preset reports nothing wrong", async () => {
+	// The preset is lazy: it mounts when a session first runs on it, so "no live
+	// mount in this process" is the normal state right after a restart, not a
+	// fault. Reporting it as a miss is what made the panel show a red error on a
+	// healthy install every single boot.
 	const mounted = await mountSkills();
 	const service = serviceOf(mounted);
-	assert.equal(mounted.heartbeatDelays.includes(10_000), true, "the row must arm a 10s bound");
-	assert.equal(await dispatch(service, "presetSyncMissed", []), false, "nothing is decided before it fires");
+	assert.equal(await dispatch(service, "presetSyncMissed", []), false, "no mount is not a miss");
+	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: false, preset: "plugin" });
+});
 
-	mounted.fireHeartbeat();
+test("a live mount whose skills row never reported in is the miss", async () => {
+	// The failure this phase exists to surface: the preset IS composed and its
+	// agent row never said it was here. Only then may the panel call it broken.
+	const mounted = await mountSkills({ composedPresets: ["buddy"] });
+	const service = serviceOf(mounted);
 	assert.equal(await dispatch(service, "presetSyncMissed", []), true);
 	assert.equal(await dispatch(service, "presetSynced", []), false);
 	// The same fact on the wire, which is what a panel actually reads.
 	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: true, preset: "plugin" });
 });
 
-test("a heartbeat that arrives late still clears the notice", async () => {
-	// A preset that mounts after the bound must recover rather than latch: the
-	// bound records a *miss*, it does not overrule a later report.
-	const mounted = await mountSkills();
+test("a heartbeat that arrives after the mount still clears the notice", async () => {
+	// A row that reports late must recover rather than latch: the miss is
+	// derived per read, it does not overrule a later report.
+	const mounted = await mountSkills({ composedPresets: ["buddy"] });
 	const service = serviceOf(mounted);
-	mounted.fireHeartbeat();
+	assert.equal(await dispatch(service, "presetSyncMissed", []), true);
 	dispatch(service, "noteAgentRowMounted", []);
 	assert.equal(await dispatch(service, "presetSyncMissed", []), false);
 	assert.equal(await dispatch(service, "presetSynced", []), true);
 });
 
-test("a heartbeat that arrived before the bound is never reported as a miss", async () => {
-	const mounted = await mountSkills();
+test("the buddy composition is the only mount that counts", async () => {
+	// Every other preset in the roster is composed constantly; reading the whole
+	// roster as "the buddy preset is up" would put the notice right back.
+	const mounted = await mountSkills({ composedPresets: ["standard", "explore"] });
+	const service = serviceOf(mounted);
+	assert.equal(await dispatch(service, "presetSyncMissed", []), false);
+});
+
+test("without the roster plane a mount cannot be observed, so nothing is claimed", async () => {
+	// `agentPresets` is soft like every plane besides the store: a deployment
+	// that does not expose it must still serve `ctx.buddySkills`, and an
+	// unobservable mount is reported as "not yet", never guessed as a fault.
+	const mounted = await mountSkills({ withAgentPresets: false });
+	const service = serviceOf(mounted);
+	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: false, preset: "plugin" });
+});
+
+test("a known preset the roster lists without a live mount is not a mount", async () => {
+	// `compositionInventory` answers for EVERY roster preset — a preset nothing
+	// has composed is answered from its composition file, with no `fiberState`
+	// on any row. Reading the roster's membership as "it mounted" would put the
+	// notice back on a healthy fresh boot: the probe caught exactly this.
+	const mounted = await mountSkills({ listedPresets: ["buddy"] });
+	const service = serviceOf(mounted);
+	assert.equal(await dispatch(service, "presetSyncMissed", []), false, "a listed preset is not a mounted one");
+	assert.deepEqual(await dispatch(service, "status", []), { synced: false, missed: false, preset: "plugin" });
+});
+
+test("a heartbeat that arrived before the mount is never reported as a miss", async () => {
+	const mounted = await mountSkills({ composedPresets: ["buddy"] });
 	const service = serviceOf(mounted);
 	dispatch(service, "noteAgentRowMounted", []);
-	mounted.fireHeartbeat();
 	assert.equal(await dispatch(service, "presetSyncMissed", []), false);
 	assert.equal(await dispatch(service, "presetSynced", []), true);
 	assert.deepEqual(await dispatch(service, "status", []), { synced: true, missed: false, preset: "plugin" });
